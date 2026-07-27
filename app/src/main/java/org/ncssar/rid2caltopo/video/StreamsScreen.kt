@@ -109,7 +109,6 @@ import org.opendroneid.android.bluetooth.WiFiScanner
 import androidx.documentfile.provider.DocumentFile
 
 private const val EMPTY_STREAMS_SETTINGS_DESIGNATOR = "__empty_streams_defaults__"
-internal const val STREAM_PIP_ASPECT_RATIO = 16f / 9f
 private const val STREAM_PIP_FRAME_PADDING_DP = 24f
 
 internal data class StreamPipInsetSize(
@@ -121,7 +120,7 @@ internal fun streamPipInsetSize(
     maxWidth: Float,
     maxHeight: Float,
     insetFraction: Float,
-    aspectRatio: Float = STREAM_PIP_ASPECT_RATIO,
+    aspectRatio: Float = streamPipFullFrameAspectRatio(maxWidth, maxHeight),
     padding: Float = STREAM_PIP_FRAME_PADDING_DP
 ): StreamPipInsetSize {
     val safeAspectRatio = if (aspectRatio.isFinite() && aspectRatio > 0f) aspectRatio else 1f
@@ -131,6 +130,13 @@ internal fun streamPipInsetSize(
     val insetWidth = minOf(desiredWidth, maxInsetHeight * safeAspectRatio)
     return StreamPipInsetSize(width = insetWidth, height = insetWidth / safeAspectRatio)
 }
+
+internal fun streamPipFullFrameAspectRatio(width: Float, height: Float): Float =
+    if (width.isFinite() && height.isFinite() && width > 0f && height > 0f) {
+        width / height
+    } else {
+        1f
+    }
 
 internal fun streamPipHasStreamContent(visibleStreamCount: Int, focusedPath: String?): Boolean =
     visibleStreamCount > 0 || focusedPath != null
@@ -493,7 +499,6 @@ fun StreamsScreen(
                     StreamPipInsetFrame(
                         editorMode = streamPipUiState.editorMode,
                         insetFraction = streamPipUiState.insetFraction,
-                        aspectRatio = STREAM_PIP_ASPECT_RATIO,
                         onTap = swapToMap,
                         onLongPress = { viewModel.toggleStreamPipEditorModeFromLongPress() },
                         onResizeFractionChange = { next -> viewModel.setStreamPipInsetFraction(next) }
@@ -520,7 +525,6 @@ fun StreamsScreen(
                     StreamPipInsetFrame(
                         editorMode = streamPipUiState.editorMode,
                         insetFraction = streamPipUiState.insetFraction,
-                        aspectRatio = STREAM_PIP_ASPECT_RATIO,
                         onTap = swapToStreams,
                         onLongPress = { viewModel.toggleStreamPipEditorModeFromLongPress() },
                         onResizeFractionChange = { next -> viewModel.setStreamPipInsetFraction(next) }
@@ -927,7 +931,6 @@ private fun SplitStreamsAndMap(
 private fun StreamPipInsetFrame(
     editorMode: Boolean,
     insetFraction: Float,
-    aspectRatio: Float,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
     onResizeFractionChange: (Float) -> Unit,
@@ -939,8 +942,7 @@ private fun StreamPipInsetFrame(
         val insetSize = streamPipInsetSize(
             maxWidth = maxWidth.value,
             maxHeight = maxHeight.value,
-            insetFraction = insetFraction,
-            aspectRatio = aspectRatio
+            insetFraction = insetFraction
         )
         val maxInsetWidth = (maxWidth - STREAM_PIP_FRAME_PADDING_DP.dp).coerceAtLeast(1.dp)
         val density = LocalDensity.current

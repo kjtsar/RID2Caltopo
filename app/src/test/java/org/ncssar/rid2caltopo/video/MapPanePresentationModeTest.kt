@@ -7,6 +7,51 @@ import org.junit.Test
 
 class MapPanePresentationModeTest {
     @Test
+    fun viewportRestoreTracker_restoresEveryReplacementExactlyOnce() {
+        val tracker = MapViewportRestoreTracker()
+        val firstMapView = Any()
+        val replacementMapView = Any()
+
+        assertTrue(tracker.needsRestore(firstMapView))
+        tracker.markRestored(firstMapView)
+        assertFalse(tracker.needsRestore(firstMapView))
+        assertTrue(tracker.needsRestore(replacementMapView))
+        tracker.markRestored(replacementMapView)
+        assertFalse(tracker.needsRestore(replacementMapView))
+
+        tracker.reset()
+        assertTrue(tracker.needsRestore(replacementMapView))
+    }
+
+    @Test
+    fun mapViewportBounds_acceptsOperationalBoundsAndRejectsDegenerateBounds() {
+        assertTrue(
+            MapViewportBounds(
+                north = 39.2,
+                east = -120.1,
+                south = 38.8,
+                west = -120.8
+            ).isUsable
+        )
+        assertFalse(
+            MapViewportBounds(
+                north = 38.8,
+                east = -120.1,
+                south = 39.2,
+                west = -120.8
+            ).isUsable
+        )
+        assertFalse(
+            MapViewportBounds(
+                north = 39.2,
+                east = -120.1,
+                south = 38.8,
+                west = -120.1
+            ).isUsable
+        )
+    }
+
+    @Test
     fun extractedViewportAndStartupConstants_remainSharedNamedDeclarations() {
         assertEquals(500L, INSET_FOLLOW_INTERVAL_MS)
         assertEquals(1.0, INSET_FOLLOW_MIN_MOVE_METERS, 0.0)
@@ -208,6 +253,47 @@ class MapPanePresentationModeTest {
                 mapWidthPx = 1280,
                 mapHeightPx = 720,
                 pointCount = 2
+            )
+        )
+    }
+
+    @Test
+    fun localDeviceViewportRescue_neverOverwritesPendingRestoredBounds() {
+        assertFalse(
+            shouldRescueLocalDeviceViewport(
+                hasRestoredViewport = true,
+                presentationMode = MapPanePresentationMode.Full,
+                rescueAlreadyApplied = false,
+                localDeviceVisible = false,
+                defaultViewportCenter = true,
+                operationalContentPresent = false,
+                operatorAdjustedViewport = false
+            )
+        )
+    }
+
+    @Test
+    fun localDeviceViewportRescue_appliesOnlyToUninitializedFullMap() {
+        assertTrue(
+            shouldRescueLocalDeviceViewport(
+                hasRestoredViewport = false,
+                presentationMode = MapPanePresentationMode.Full,
+                rescueAlreadyApplied = false,
+                localDeviceVisible = false,
+                defaultViewportCenter = true,
+                operationalContentPresent = false,
+                operatorAdjustedViewport = false
+            )
+        )
+        assertFalse(
+            shouldRescueLocalDeviceViewport(
+                hasRestoredViewport = false,
+                presentationMode = MapPanePresentationMode.Inset,
+                rescueAlreadyApplied = false,
+                localDeviceVisible = false,
+                defaultViewportCenter = true,
+                operationalContentPresent = false,
+                operatorAdjustedViewport = false
             )
         )
     }

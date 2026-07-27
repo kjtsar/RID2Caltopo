@@ -23,8 +23,11 @@ final class AppleTrackerCoordinator: ObservableObject {
     @Published private(set) var helloAcknowledgedAtMilliseconds: Int64 = 0
     @Published private(set) var heartbeatAcknowledgedAtMilliseconds: Int64 = 0
     @Published private(set) var heartbeatSequenceAcknowledged: Int64 = 0
+    @Published private(set) var recommendedAppVersionCode = 0
+    @Published private(set) var recommendedUpdateURL: URL?
 
     private var usePeers = false
+    private var standaloneR2CCoordinationEnabled = false
     private var trackerURLPrefix = ""
     private var trackerAPIKey = ""
     private var mapID = ""
@@ -72,7 +75,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     var coordinationRequired: Bool {
-        usePeers && !trackerURLPrefix.isEmpty && !trackerAPIKey.isEmpty && !mapID.isEmpty
+        usePeers && !trackerURLPrefix.isEmpty && !trackerAPIKey.isEmpty
+            && (!mapID.isEmpty || standaloneR2CCoordinationEnabled)
     }
 
     var localZoneID: String { zoneID }
@@ -95,17 +99,25 @@ final class AppleTrackerCoordinator: ObservableObject {
         return lines
     }
 
-    func configure(usePeers: Bool, trackerURLPrefix: String, trackerAPIKey: String, mapID: String) {
+    func configure(
+        usePeers: Bool,
+        standaloneR2CCoordinationEnabled: Bool,
+        trackerURLPrefix: String,
+        trackerAPIKey: String,
+        mapID: String
+    ) {
         let normalizedURL = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKey = trackerAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedMapID = mapID.trimmingCharacters(in: .whitespacesAndNewlines)
         let unchanged = self.usePeers == usePeers
+            && self.standaloneR2CCoordinationEnabled == standaloneR2CCoordinationEnabled
             && self.trackerURLPrefix == normalizedURL
             && self.trackerAPIKey == normalizedKey
             && self.mapID == normalizedMapID
         guard !unchanged else { return }
         stopTransport()
         self.usePeers = usePeers
+        self.standaloneR2CCoordinationEnabled = standaloneR2CCoordinationEnabled
         self.trackerURLPrefix = normalizedURL
         self.trackerAPIKey = normalizedKey
         self.mapID = normalizedMapID
@@ -126,6 +138,9 @@ final class AppleTrackerCoordinator: ObservableObject {
             status = .unconfigured
             statusDetail = missingConfigurationDescription
             return
+        }
+        if normalizedMapID.isEmpty {
+            statusDetail = "Connecting to tracker without an active CalTopo map"
         }
         connect()
     }
@@ -319,10 +334,14 @@ final class AppleTrackerCoordinator: ObservableObject {
             let events = try protocolState.handleIncoming(data, receivedAtMilliseconds: Self.nowMilliseconds)
             for event in events {
                 switch event {
-                case .helloAcknowledged:
+                case let .helloAcknowledged(recommendedAppVersionCode, updateURL):
                     helloAcknowledged = true
                     reconnectDelay = .seconds(2)
                     helloAcknowledgedAtMilliseconds = Self.nowMilliseconds
+                    self.recommendedAppVersionCode = max(0, recommendedAppVersionCode ?? 0)
+                    self.recommendedUpdateURL = updateURL.flatMap {
+                        URL(string: $0.trimmingCharacters(in: .whitespacesAndNewlines))
+                    }
                     status = .healthy
                     statusDetail = "Tracker link healthy"
                     flushPendingConfirmations()

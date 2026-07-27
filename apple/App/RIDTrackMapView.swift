@@ -50,6 +50,15 @@ struct AppleOperationalStatusChipLabel: View {
 }
 
 @MainActor
+private final class AppleMapViewportMemory: ObservableObject {
+    var region = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
+        span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
+    )
+    var visibleMapRect: MKMapRect?
+}
+
+@MainActor
 private final class ApplePilotDisplayStore: ObservableObject {
     @Published private(set) var revision = 0
     private let defaults = UserDefaults.standard
@@ -343,6 +352,7 @@ struct RIDTrackMapView: View {
     @StateObject private var artifacts = AppleMapArtifactModel()
     @StateObject private var pilotDisplay = ApplePilotDisplayStore()
     @StateObject private var offlineMaps = AppleMapOfflineManager()
+    @StateObject private var viewportMemory = AppleMapViewportMemory()
     @AppStorage("map.baseLayer") private var storedBaseLayer = OperationalMapBaseLayer.openStreetMap.rawValue
     // Match Android's session-scoped StreamsLayoutMode: every app process starts
     // in Split, while changes remain local to the current Live View session.
@@ -359,7 +369,6 @@ struct RIDTrackMapView: View {
         center: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
         span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
     )
-    @State private var viewportMapPointsPerPoint: Double?
     @State private var showMapItems = false
     @State private var showOfflinePreparation = false
     @State private var showMapManagement = false
@@ -716,19 +725,21 @@ struct RIDTrackMapView: View {
                 tracks: model.tracks,
                 aircraftDisplay: aircraftDisplay,
                 altitudeDisplay: model.altitudeDisplayByAircraftID,
-                clues: inset ? [] : clueStore.records,
-                artifacts: inset ? CaltopoArtifactSnapshot() : renderedArtifacts,
-                airspaceState: inset || !airspace.enabled ? OperationalAirspaceState() : airspace.state,
-                notamState: inset || !notams.showOnMap ? AppleNotamState() : notams.state,
-                landRestrictionState: inset || !landRestrictions.showOnMap ? AppleLandRestrictionState() : landRestrictions.state,
+                clues: clueStore.records,
+                artifacts: renderedArtifacts,
+                airspaceState: airspace.enabled ? airspace.state : OperationalAirspaceState(),
+                notamState: notams.showOnMap ? notams.state : AppleNotamState(),
+                landRestrictionState: landRestrictions.showOnMap
+                    ? landRestrictions.state
+                    : AppleLandRestrictionState(),
                 baseLayer: baseLayer,
-                showContours: showContours && !inset,
+                showContours: showContours,
                 offlineOnly: offlineOnly,
                 tileCacheRevision: offlineMaps.cacheStats.files,
                 operatorCoordinate: locationProvider.lastLocation?.coordinate,
                 operatorStatusLines: peerCoordinator.localDeviceStatusLines,
                 viewport: $viewport,
-                viewportMapPointsPerPoint: $viewportMapPointsPerPoint,
+                viewportMemory: viewportMemory,
                 inset: inset,
                 predictiveHeadEnabled: orgSettings.predictiveHeadEnabled,
                 focusedAircraftID: focusedAircraftID,
@@ -1078,10 +1089,14 @@ struct RIDTrackMapView: View {
         onTap: @escaping () -> Void,
         @ViewBuilder content: () -> Content
     ) -> some View {
+        let fullFrameAspectRatio = size.height > 0
+            ? Double(size.width / size.height)
+            : OperationalPipSizing.aspectRatio
         let insetSize = OperationalPipSizing.insetSize(
             containerWidth: size.width,
             containerHeight: size.height,
-            insetFraction: videoPipInsetFraction
+            insetFraction: videoPipInsetFraction,
+            aspectRatio: fullFrameAspectRatio
         )
         let maximumInsetWidth = max(1, Double(size.width) - OperationalPipSizing.framePadding)
 
@@ -2032,7 +2047,7 @@ private struct PilotDisplaySettingsView: View {
     }
 }
 
-private final class ScalePreservingMKMapView: MKMapView {
+private final class ViewportPreservingMKMapView: MKMapView {
     var onBoundsLayout: ((MKMapView) -> Void)?
 
     override func layoutSubviews() {
@@ -2057,7 +2072,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     let operatorCoordinate: CLLocationCoordinate2D?
     let operatorStatusLines: [String]
     @Binding var viewport: MKCoordinateRegion
-    @Binding var viewportMapPointsPerPoint: Double?
+    let viewportMemory: AppleMapViewportMemory
     let inset: Bool
     let predictiveHeadEnabled: Bool
     let focusedAircraftID: String?
@@ -2070,7 +2085,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             viewport: $viewport,
-            viewportMapPointsPerPoint: $viewportMapPointsPerPoint,
+            viewportMemory: viewportMemory,
             operatorAdjustedViewport: $operatorAdjustedViewport,
             onSelectClue: onSelectClue,
             onSelectAircraft: onSelectAircraft,
@@ -2079,12 +2094,12 @@ private struct OperationalMKMapView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> MKMapView {
-        let map = ScalePreservingMKMapView()
+        let map = ViewportPreservingMKMapView()
         map.delegate = context.coordinator
         map.showsCompass = false
         map.showsScale = !inset
         map.pointOfInterestFilter = .excludingAll
-        map.setRegion(viewport, animated: false)
+        map.setRegion(viewportMemory.region, animated: false)
         if !inset {
             let compass = MKCompassButton(mapView: map)
             compass.compassVisibility = .adaptive
@@ -2098,17 +2113,18 @@ private struct OperationalMKMapView: UIViewRepresentable {
         }
         context.coordinator.installLongPress(on: map)
         map.onBoundsLayout = { [weak coordinator = context.coordinator] map in
-            coordinator?.restoreViewportScaleIfNeeded(on: map)
+            coordinator?.restoreViewportBoundsIfNeeded(on: map)
         }
         return map
     }
 
     static func dismantleUIView(_ map: MKMapView, coordinator: Coordinator) {
-        // Region changes are persisted by the delegate while the view is live.
-        // Writing the SwiftUI binding from dismantleUIView re-enters the same
-        // StoredLocation that SwiftUI is destroying and triggers an exclusivity
-        // trap when the operator navigates back from Live View.
-        (map as? ScalePreservingMKMapView)?.onBoundsLayout = nil
+        // Capture synchronously into reference storage so a full/PiP replacement
+        // cannot outrun SwiftUI binding delivery. Do not write a Binding here:
+        // doing so re-enters StoredLocation teardown and can trigger an
+        // exclusivity trap when leaving Live View.
+        coordinator.captureViewportForTransition(from: map)
+        (map as? ViewportPreservingMKMapView)?.onBoundsLayout = nil
         map.delegate = nil
     }
 
@@ -2168,7 +2184,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         @Binding private var viewport: MKCoordinateRegion
-        @Binding private var viewportMapPointsPerPoint: Double?
+        private let viewportMemory: AppleMapViewportMemory
         @Binding private var operatorAdjustedViewport: Bool
         private var tileFingerprint = ""
         private var staticRenderState: StaticMapRenderState?
@@ -2181,8 +2197,8 @@ private struct OperationalMKMapView: UIViewRepresentable {
         private var currentInset = false
         private var currentFollowFocusedDrone = false
         private var currentFocusedAircraftID: String?
-        private let pendingViewportMapPointsPerPoint: Double?
-        private var restoredViewportScale = false
+        private let pendingVisibleMapRect: MKMapRect?
+        private var restoredViewportBounds = false
         private var regionChangeWasUserGesture = false
         var onSelectClue: (UUID) -> Void
         var onSelectAircraft: (String) -> Void
@@ -2190,16 +2206,16 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
         init(
             viewport: Binding<MKCoordinateRegion>,
-            viewportMapPointsPerPoint: Binding<Double?>,
+            viewportMemory: AppleMapViewportMemory,
             operatorAdjustedViewport: Binding<Bool>,
             onSelectClue: @escaping (UUID) -> Void,
             onSelectAircraft: @escaping (String) -> Void,
             onLongPressTile: @escaping (Int, Int, Int) -> Void
         ) {
             _viewport = viewport
-            _viewportMapPointsPerPoint = viewportMapPointsPerPoint
+            self.viewportMemory = viewportMemory
             _operatorAdjustedViewport = operatorAdjustedViewport
-            pendingViewportMapPointsPerPoint = viewportMapPointsPerPoint.wrappedValue
+            pendingVisibleMapRect = viewportMemory.visibleMapRect
             self.onSelectClue = onSelectClue
             self.onSelectAircraft = onSelectAircraft
             self.onLongPressTile = onLongPressTile
@@ -2330,11 +2346,15 @@ private struct OperationalMKMapView: UIViewRepresentable {
                     animated: false
                 )
                 viewport = map.region
+                viewportMemory.region = map.region
+                viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
             } else {
                 let span = MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
                 let region = MKCoordinateRegion(center: first, span: span)
                 map.setRegion(region, animated: false)
                 viewport = region
+                viewportMemory.region = region
+                viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
             }
         }
 
@@ -2711,14 +2731,14 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             guard !updating else { return }
-            persistViewport(from: mapView, includeScale: regionChangeWasUserGesture)
+            persistViewport(from: mapView)
             regionChangeWasUserGesture = false
         }
 
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             guard !updating, hasActiveUserGesture(in: mapView) else { return }
             regionChangeWasUserGesture = true
-            persistViewport(from: mapView, includeScale: true)
+            persistViewport(from: mapView)
         }
 
         func setCenterAndPersist(_ coordinate: CLLocationCoordinate2D, on map: MKMapView) {
@@ -2727,10 +2747,12 @@ private struct OperationalMKMapView: UIViewRepresentable {
             map.setCenter(coordinate, animated: false)
             updating = false
             viewport.center = coordinate
+            viewportMemory.region.center = coordinate
+            viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
         }
 
-        func persistViewport(from map: MKMapView, includeScale: Bool) {
-            guard restoredViewportScale,
+        func persistViewport(from map: MKMapView) {
+            guard restoredViewportBounds,
                   map.bounds.width >= 32,
                   map.bounds.height >= 32
             else { return }
@@ -2742,53 +2764,61 @@ private struct OperationalMKMapView: UIViewRepresentable {
                   region.span.longitudeDelta > 0
             else { return }
             viewport = region
-            guard includeScale else { return }
-            let width = Double(map.bounds.width)
-            let visibleWidth = map.visibleMapRect.width
-            if width > 0, visibleWidth.isFinite, visibleWidth > 0 {
-                viewportMapPointsPerPoint = visibleWidth / width
-            }
+            viewportMemory.region = region
+            viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
         }
 
-        func restoreViewportScaleIfNeeded(on map: MKMapView) {
-            guard !restoredViewportScale,
+        func captureViewportForTransition(from map: MKMapView) {
+            guard map.bounds.width >= 32,
+                  map.bounds.height >= 32
+            else { return }
+            let region = map.region
+            guard CLLocationCoordinate2DIsValid(region.center),
+                  region.span.latitudeDelta.isFinite,
+                  region.span.longitudeDelta.isFinite,
+                  region.span.latitudeDelta > 0,
+                  region.span.longitudeDelta > 0
+            else { return }
+            viewportMemory.region = region
+            viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
+        }
+
+        func restoreViewportBoundsIfNeeded(on map: MKMapView) {
+            guard !restoredViewportBounds,
                   map.bounds.width >= 32,
                   map.bounds.height >= 32
             else { return }
-            guard let mapPointsPerPoint = pendingViewportMapPointsPerPoint else {
-                restoredViewportScale = true
-                persistViewport(from: map, includeScale: true)
-                return
-            }
-            guard
-                  mapPointsPerPoint.isFinite,
-                  mapPointsPerPoint > 0
+            guard let rect = pendingVisibleMapRect,
+                  rect.width.isFinite,
+                  rect.height.isFinite,
+                  rect.width > 0,
+                  rect.height > 0
             else {
-                restoredViewportScale = true
-                persistViewport(from: map, includeScale: true)
+                restoredViewportBounds = true
+                persistViewport(from: map)
                 return
             }
-            restoredViewportScale = true
-            let center = MKMapPoint(viewport.center)
-            let width = mapPointsPerPoint * Double(map.bounds.width)
-            let height = mapPointsPerPoint * Double(map.bounds.height)
-            let rect = MKMapRect(
-                x: center.x - width / 2,
-                y: center.y - height / 2,
-                width: width,
-                height: height
-            )
+            restoredViewportBounds = true
             updating = true
             map.setVisibleMapRect(rect, animated: false)
             updating = false
-            persistViewport(from: map, includeScale: false)
+            persistViewport(from: map)
+        }
+
+        private func validVisibleMapRect(from map: MKMapView) -> MKMapRect? {
+            let rect = map.visibleMapRect
+            guard rect.width.isFinite,
+                  rect.height.isFinite,
+                  rect.width > 0,
+                  rect.height > 0
+            else { return nil }
+            return rect
         }
 
         func mapView(_ mapView: MKMapView, regionWillChangeAnimated animated: Bool) {
             let userGesture = hasActiveUserGesture(in: mapView)
             regionChangeWasUserGesture = userGesture
-            guard !currentInset,
-                  !(currentFollowFocusedDrone && currentFocusedAircraftID != nil),
+            guard !(currentFollowFocusedDrone && currentFocusedAircraftID != nil),
                   userGesture
             else { return }
             operatorAdjustedViewport = true
@@ -3014,6 +3044,8 @@ private final class AircraftAnnotationView: MKAnnotationView {
 }
 
 private final class CachedMapTileOverlay: MKTileOverlay {
+    private static let baseSourceMaximumZ = 19
+    private static let displayMaximumZ = 22
     private let baseLayer: OperationalMapBaseLayer?
     private let contours: Bool
     private let offlineOnly: Bool
@@ -3026,7 +3058,7 @@ private final class CachedMapTileOverlay: MKTileOverlay {
         cacheRoot = AppleMapCachePaths.root.appendingPathComponent(baseLayer.cacheKey, isDirectory: true)
         super.init(urlTemplate: nil)
         minimumZ = 0
-        maximumZ = 19
+        maximumZ = Self.displayMaximumZ
         tileSize = CGSize(width: 256, height: 256)
     }
 
@@ -3037,7 +3069,7 @@ private final class CachedMapTileOverlay: MKTileOverlay {
         cacheRoot = AppleMapCachePaths.root.appendingPathComponent("usgsContours", isDirectory: true)
         super.init(urlTemplate: nil)
         minimumZ = 0
-        maximumZ = 22
+        maximumZ = Self.displayMaximumZ
         tileSize = CGSize(width: 256, height: 256)
     }
 
@@ -3049,24 +3081,47 @@ private final class CachedMapTileOverlay: MKTileOverlay {
     override func loadTile(at path: MKTileOverlayPath, result: @escaping (Data?, Error?) -> Void) {
         let completion = TileResultTransfer(result: result)
         let ext = contours ? "png" : (baseLayer?.fileExtension ?? "tile")
-        let destination = cacheRoot
-            .appendingPathComponent(String(path.z), isDirectory: true)
-            .appendingPathComponent(String(path.x), isDirectory: true)
-            .appendingPathComponent("\(path.y).\(ext)")
-        if let data = try? Data(contentsOf: destination) {
-            if AppleMapOfflineManager.dataIsUsableTile(data), !AppleBadTilePolicy.isBlocked(data) {
-                completion.result(data, nil)
+        let requestedDestination = cacheDestination(for: path, fileExtension: ext)
+        if let data = usableCachedTile(at: requestedDestination) {
+            completion.result(data, nil)
+            return
+        }
+
+        let overzoom = contours ? nil : OperationalOverzoomTile.resolve(
+            requestedZoom: path.z,
+            requestedX: path.x,
+            requestedY: path.y,
+            sourceMaximumZoom: Self.baseSourceMaximumZ
+        )
+        let sourcePath = overzoom.map {
+            MKTileOverlayPath(
+                x: $0.sourceX,
+                y: $0.sourceY,
+                z: $0.sourceZoom,
+                contentScaleFactor: path.contentScaleFactor
+            )
+        } ?? path
+        let sourceDestination = cacheDestination(for: sourcePath, fileExtension: ext)
+        if let sourceData = usableCachedTile(at: sourceDestination) {
+            guard let output = Self.displayTileData(
+                sourceData: sourceData,
+                overzoom: overzoom,
+                fileExtension: ext
+            ) else {
+                completion.result(nil, CocoaError(.fileReadCorruptFile))
                 return
             }
-            if UserDefaults.standard.object(forKey: "map.autoRemoveBadTiles") as? Bool ?? true {
-                try? FileManager.default.removeItem(at: destination)
-            }
+            cache(output, at: requestedDestination)
+            completion.result(output, nil)
+            return
         }
         guard !offlineOnly else {
             completion.result(nil, CocoaError(.fileNoSuchFile))
             return
         }
-        var request = URLRequest(url: url(forTilePath: path))
+
+        let requestURL = url(forTilePath: sourcePath)
+        var request = URLRequest(url: requestURL)
         request.setValue("RID2Caltopo/Apple (contact: kjtsar@kjt.us)", forHTTPHeaderField: "User-Agent")
         URLSession.shared.dataTask(with: request) { data, response, error in
             guard let data, (response as? HTTPURLResponse)?.statusCode == 200,
@@ -3076,14 +3131,90 @@ private final class CachedMapTileOverlay: MKTileOverlay {
                 completion.result(nil, error ?? CocoaError(.fileReadUnknown))
                 return
             }
-            do {
-                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try data.write(to: destination, options: .atomic)
-            } catch {
-                AppleLog.warning("MapTiles", "Tile cache write failed: \(error.localizedDescription)")
+            Self.cache(data, at: sourceDestination)
+            guard let output = Self.displayTileData(
+                sourceData: data,
+                overzoom: overzoom,
+                fileExtension: ext
+            ) else {
+                completion.result(nil, CocoaError(.fileReadCorruptFile))
+                return
             }
-            completion.result(data, nil)
+            Self.cache(output, at: requestedDestination)
+            completion.result(output, nil)
         }.resume()
+    }
+
+    private func cacheDestination(for path: MKTileOverlayPath, fileExtension: String) -> URL {
+        cacheRoot
+            .appendingPathComponent(String(path.z), isDirectory: true)
+            .appendingPathComponent(String(path.x), isDirectory: true)
+            .appendingPathComponent("\(path.y).\(fileExtension)")
+    }
+
+    private func usableCachedTile(at destination: URL) -> Data? {
+        if let data = try? Data(contentsOf: destination),
+           AppleMapOfflineManager.dataIsUsableTile(data),
+           !AppleBadTilePolicy.isBlocked(data) {
+            return data
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            if UserDefaults.standard.object(forKey: "map.autoRemoveBadTiles") as? Bool ?? true {
+                try? FileManager.default.removeItem(at: destination)
+            }
+        }
+        return nil
+    }
+
+    private static func displayTileData(
+        sourceData: Data,
+        overzoom: OperationalOverzoomTile?,
+        fileExtension: String
+    ) -> Data? {
+        guard let overzoom else { return sourceData }
+        guard let sourceImage = UIImage(data: sourceData) else { return nil }
+        let scale = CGFloat(1 << overzoom.zoomDelta)
+        let sourceSize = sourceImage.size
+        let cropWidth = sourceSize.width / scale
+        let cropHeight = sourceSize.height / scale
+        let cropOrigin = CGPoint(
+            x: CGFloat(overzoom.childX) * cropWidth,
+            y: CGFloat(overzoom.childY) * cropHeight
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = fileExtension == "jpg"
+        let renderer = UIGraphicsImageRenderer(
+            size: CGSize(width: 256, height: 256),
+            format: format
+        )
+        let tile = renderer.image { _ in
+            sourceImage.draw(in: CGRect(
+                x: -cropOrigin.x * scale,
+                y: -cropOrigin.y * scale,
+                width: sourceSize.width * scale,
+                height: sourceSize.height * scale
+            ))
+        }
+        return fileExtension == "jpg"
+            ? tile.jpegData(compressionQuality: 0.9)
+            : tile.pngData()
+    }
+
+    private func cache(_ data: Data, at destination: URL) {
+        Self.cache(data, at: destination)
+    }
+
+    private static func cache(_ data: Data, at destination: URL) {
+        do {
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: destination, options: .atomic)
+        } catch {
+            AppleLog.warning("MapTiles", "Tile cache write failed: \(error.localizedDescription)")
+        }
     }
 
 }

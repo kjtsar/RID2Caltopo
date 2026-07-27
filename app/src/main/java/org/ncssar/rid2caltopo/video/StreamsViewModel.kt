@@ -7,6 +7,7 @@ import android.os.Process
 import android.os.PowerManager
 import android.view.Surface
 import org.osmdroid.api.IGeoPoint
+import org.ncssar.rid2caltopo.video.MapViewportBounds
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -177,7 +178,8 @@ data class MapViewportState(
     val longitude: Double,
     val zoom: Double,
     val widthPx: Int? = null,
-    val heightPx: Int? = null
+    val heightPx: Int? = null,
+    val bounds: MapViewportBounds? = null
 )
 
 private fun isUsablePersistedMapViewportState(latitude: Double, longitude: Double, zoom: Double): Boolean {
@@ -1635,7 +1637,13 @@ class StreamsViewModel(
 
     fun mapViewportState(): MapViewportState? = persistedMapViewportState
 
-    fun persistMapViewportState(center: IGeoPoint?, zoom: Double, widthPx: Int? = null, heightPx: Int? = null) {
+    fun persistMapViewportState(
+        center: IGeoPoint?,
+        zoom: Double,
+        widthPx: Int? = null,
+        heightPx: Int? = null,
+        bounds: MapViewportBounds? = null
+    ) {
         val lat = center?.latitude ?: return
         val lng = center.longitude
         if (!isUsablePersistedMapViewportState(lat, lng, zoom)) return
@@ -1644,7 +1652,8 @@ class StreamsViewModel(
             longitude = lng,
             zoom = zoom,
             widthPx = widthPx?.takeIf { it > 0 },
-            heightPx = heightPx?.takeIf { it > 0 }
+            heightPx = heightPx?.takeIf { it > 0 },
+            bounds = bounds?.takeIf { it.isUsable }
         )
     }
 

@@ -3,19 +3,29 @@ import Foundation
 public struct RidTrackPolicy: Sendable, Equatable {
     /// Matches Android's 293.3 ft/s waypoint-jump ceiling (about 200 mph).
     public var maximumSpeedMetersPerSecond: Double
+    /// Matches Android's minimum accepted waypoint spacing (2 ft by default).
+    public var minimumDistanceMeters: Double
     public var duplicateKeepaliveInterval: TimeInterval
     public var activeTimeout: TimeInterval
+    public var remoteLossGraceDistanceMeters: Double
+    public var remoteLossGraceMultiplier: Double
     public var maximumPointsPerTrack: Int
 
     public init(
         maximumSpeedMetersPerSecond: Double = 89.39784,
+        minimumDistanceMeters: Double = 0.6096,
         duplicateKeepaliveInterval: TimeInterval = 3,
         activeTimeout: TimeInterval = 30,
+        remoteLossGraceDistanceMeters: Double = 15.24,
+        remoteLossGraceMultiplier: Double = 5,
         maximumPointsPerTrack: Int = 5_000
     ) {
         self.maximumSpeedMetersPerSecond = maximumSpeedMetersPerSecond
+        self.minimumDistanceMeters = minimumDistanceMeters
         self.duplicateKeepaliveInterval = duplicateKeepaliveInterval
         self.activeTimeout = activeTimeout
+        self.remoteLossGraceDistanceMeters = remoteLossGraceDistanceMeters
+        self.remoteLossGraceMultiplier = remoteLossGraceMultiplier
         self.maximumPointsPerTrack = maximumPointsPerTrack
     }
 }
@@ -57,6 +67,7 @@ public struct RidAircraftTrack: Sendable, Equatable, Identifiable {
 
 public enum RidTrackSignalOnlyReason: Sendable, Equatable {
     case duplicatePosition
+    case belowMinimumDistance(meters: Double)
     case implausibleSpeed(metersPerSecond: Double)
 }
 
@@ -67,10 +78,14 @@ public enum RidTrackIngestOutcome: Sendable, Equatable {
 }
 
 public actor RidTrackStore {
-    public let policy: RidTrackPolicy
+    public private(set) var policy: RidTrackPolicy
     private var tracksByAircraftID: [String: RidAircraftTrack] = [:]
 
     public init(policy: RidTrackPolicy = RidTrackPolicy()) {
+        self.policy = policy
+    }
+
+    public func updatePolicy(_ policy: RidTrackPolicy) {
         self.policy = policy
     }
 
@@ -122,6 +137,10 @@ public actor RidTrackStore {
             tracksByAircraftID[aircraftID] = track
             return .signalOnly(track, reason: .duplicatePosition)
         }
+        if distance > 0, distance < policy.minimumDistanceMeters {
+            tracksByAircraftID[aircraftID] = track
+            return .signalOnly(track, reason: .belowMinimumDistance(meters: distance))
+        }
         if distance > 0, elapsed > 0 {
             let impliedSpeed = distance / elapsed
             if impliedSpeed > policy.maximumSpeedMetersPerSecond {
@@ -149,12 +168,12 @@ public actor RidTrackStore {
     }
 
     public func activeSnapshot(at date: Date = Date()) -> [RidAircraftTrack] {
-        snapshot().filter { $0.isActive(at: date, timeout: policy.activeTimeout) }
+        snapshot().filter { $0.isActive(at: date, timeout: effectiveTimeout(for: $0)) }
     }
 
     public func removeInactive(at date: Date = Date()) -> [RidAircraftTrack] {
         let removed = tracksByAircraftID.values.filter {
-            !$0.isActive(at: date, timeout: policy.activeTimeout)
+            !$0.isActive(at: date, timeout: effectiveTimeout(for: $0))
         }
         for track in removed {
             tracksByAircraftID.removeValue(forKey: track.aircraftID)
@@ -168,6 +187,22 @@ public actor RidTrackStore {
 
     public static func canonicalAircraftID(_ value: String) -> String {
         value.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+    }
+
+    private func effectiveTimeout(for track: RidAircraftTrack) -> TimeInterval {
+        guard policy.remoteLossGraceMultiplier > 1,
+              let first = track.points.first,
+              let last = track.points.last
+        else { return policy.activeTimeout }
+        let displacement = Self.distanceMeters(
+            fromLatitude: first.latitude,
+            longitude: first.longitude,
+            toLatitude: last.latitude,
+            longitude: last.longitude
+        )
+        return displacement > policy.remoteLossGraceDistanceMeters
+            ? policy.activeTimeout * policy.remoteLossGraceMultiplier
+            : policy.activeTimeout
     }
 
     private static func distanceMeters(

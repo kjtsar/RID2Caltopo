@@ -24,7 +24,11 @@ public struct RidPairSeparation: Sendable, Equatable {
 
 public enum RidTrafficSeparation {
     public static func closestPair(in positions: [RidTrafficPosition]) -> RidPairSeparation? {
-        var best: RidPairSeparation?
+        allPairs(in: positions).min { $0.horizontalMeters < $1.horizontalMeters }
+    }
+
+    public static func allPairs(in positions: [RidTrafficPosition]) -> [RidPairSeparation] {
+        var pairs: [RidPairSeparation] = []
         for firstIndex in positions.indices {
             for secondIndex in positions.indices where secondIndex > firstIndex {
                 let first = positions[firstIndex]
@@ -51,16 +55,18 @@ public enum RidTrafficSeparation {
                     threeDimensionalMeters: threeDimensional
                 )
 
-                if let currentBest = best {
-                    if candidate.horizontalMeters < currentBest.horizontalMeters {
-                        best = candidate
-                    }
-                } else {
-                    best = candidate
-                }
+                pairs.append(candidate)
             }
         }
-        return best
+        return pairs.sorted {
+            if $0.horizontalMeters != $1.horizontalMeters {
+                return $0.horizontalMeters < $1.horizontalMeters
+            }
+            if $0.firstAircraftID != $1.firstAircraftID {
+                return $0.firstAircraftID < $1.firstAircraftID
+            }
+            return $0.secondAircraftID < $1.secondAircraftID
+        }
     }
 
     private static func verticalSeparation(_ first: Double?, _ second: Double?) -> Double? {

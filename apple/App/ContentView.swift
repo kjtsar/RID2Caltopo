@@ -10,6 +10,7 @@ private struct DroneConfirmationRequest: Identifiable {
 struct ContentView: View {
     private let endpoint = MediaStreamEndpoint(designator: "demo")
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     @StateObject private var bluetoothScanner = BluetoothRIDScanner()
     @StateObject private var mediaMTX = MediaMTXViewModel()
     @ObservedObject private var videoFrames = AppleStreamRegistry.shared.primaryModel
@@ -35,6 +36,7 @@ struct ContentView: View {
     @State private var showStatus = false
     @State private var showReleaseNotes = false
     @State private var showAboutPrivacy = false
+    @State private var showProximityPairs = false
     @State private var showImportConfig = false
     @State private var showConfigurationTransfer = false
     @State private var showTeamMaps = false
@@ -45,6 +47,7 @@ struct ContentView: View {
     @State private var controllerRTMPURL = "Connect this device to Wi-Fi"
     @State private var controllerWiFiSSID = "Wi-Fi name unavailable"
     @State private var appStartedAt = Date()
+    @State private var dismissedUpdateVersionCode = 0
     @AppStorage("video.captureStreams") private var captureStreams = false
 
     private var startupRoot: some View {
@@ -61,6 +64,9 @@ struct ContentView: View {
                         }
                         Button("Status", systemImage: "info.circle") { showStatus = true }
                         Button("Release Notes", systemImage: "doc.text") { showReleaseNotes = true }
+                        Button("Proximity Pairs", systemImage: "point.3.connected.trianglepath.dotted") {
+                            showProximityPairs = true
+                        }
                         Divider()
                         Button("Import Config", systemImage: "qrcode.viewfinder") { showImportConfig = true }
                         Button("Backup & Transfer", systemImage: "shippingbox") { showConfigurationTransfer = true }
@@ -125,6 +131,30 @@ struct ContentView: View {
             .navigationDestination(isPresented: $showAboutPrivacy) {
                 AboutPrivacyView()
             }
+            .navigationDestination(isPresented: $showProximityPairs) {
+                List {
+                    if proximityAlerts.pairs.isEmpty {
+                        ContentUnavailableView(
+                            "No active drone pairs",
+                            systemImage: "airplane",
+                            description: Text("Confirmed team drones will appear here when at least two are active.")
+                        )
+                    } else {
+                        ForEach(proximityAlerts.pairs) { pair in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(pair.firstMappedID) ↔ \(pair.secondMappedID)")
+                                    .font(.headline)
+                                Text(
+                                    "Horizontal \(feet(pair.horizontalFeet))  •  Vertical \(optionalFeet(pair.verticalFeet))  •  3D \(optionalFeet(pair.threeDimensionalFeet))"
+                                )
+                                .font(.subheadline)
+                                .foregroundStyle(pair.alerting ? .red : .secondary)
+                            }
+                        }
+                    }
+                }
+                .navigationTitle("Proximity Pairs")
+            }
             .navigationDestination(isPresented: $showImportConfig) {
                 ConfigImportView(
                     initialToken: pendingImportToken,
@@ -158,6 +188,16 @@ struct ContentView: View {
             } message: {
                 Text("You are currently synced with: \(caltopoSettings.mapTitle)")
             }
+            .alert("Update required", isPresented: updateAdvisoryPresented) {
+                if let updateURL = peerCoordinator.recommendedUpdateURL {
+                    Button("Upgrade") { openURL(updateURL) }
+                }
+                Button("Continue", role: .cancel) {
+                    dismissedUpdateVersionCode = peerCoordinator.recommendedAppVersionCode
+                }
+            } message: {
+                Text("Continue with limited functionality until RID2Caltopo is upgraded.")
+            }
             .sheet(item: $pendingDroneConfirmation, onDismiss: queueNextDroneConfirmation) { request in
                 DroneConfirmationView(
                     remoteID: request.id,
@@ -189,6 +229,11 @@ struct ContentView: View {
                 refreshControllerRTMPURL()
                 await refreshControllerWiFiSSID()
                 ridTracks.bind(to: bluetoothScanner.observations, sourceID: "bluetooth")
+                ridTracks.configureClueArchiveProvider(clueStore.archiveClues)
+                _ = orgConfigImporter.restoreActiveProfile(
+                    caltopoSettings: caltopoSettings,
+                    orgSettings: orgConfigSettings
+                )
                 ridTracks.configureCaltopo(
                     caltopoSettings.configuration,
                     trackFolderName: orgConfigSettings.trackFolder
@@ -215,6 +260,7 @@ struct ContentView: View {
                 )
                 configurePeerCoordinator()
                 configureTrackArchive()
+                configureTrackPolicy()
                 if ProcessInfo.processInfo.arguments.contains("--demo-notam") {
                     notams.installSimulatorDemo()
                     airspace.installSimulatorDemo()
@@ -332,6 +378,15 @@ struct ContentView: View {
             .task {
                 await monitorOperationalState()
             }
+            .task {
+                while !Task.isCancelled {
+                    _ = orgConfigImporter.removeExpiredProfiles(
+                        caltopoSettings: caltopoSettings,
+                        orgSettings: orgConfigSettings
+                    )
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            }
             .task(id: scenePhase == .active) {
                 guard scenePhase == .active else { return }
                 while !Task.isCancelled {
@@ -377,7 +432,7 @@ struct ContentView: View {
             }
     }
 
-    private var monitoredRoot: some View {
+    private var lifecycleEventRoot: some View {
         mediaMonitoredRoot
             .onChange(of: videoStatus) { _, status in
                 AppleLog.info("Video", status)
@@ -419,6 +474,10 @@ struct ContentView: View {
                     mediaMTX.ensureHealthy(captureStreams: captureStreams)
                 }
             }
+    }
+
+    private var monitoredRoot: some View {
+        lifecycleEventRoot
             .onChange(of: ridTracks.caltopoRTTMilliseconds) { _, milliseconds in
                 peerCoordinator.updateCaltopoRTT(milliseconds: milliseconds)
             }
@@ -464,6 +523,10 @@ struct ContentView: View {
             }
             .onChange(of: proximityConfigurationFingerprint) { _, _ in
                 updateProximityAlerts()
+            }
+            .onChange(of: trackPolicyConfigurationFingerprint) { _, _ in
+                configureTrackPolicy()
+                updateOperationalAlerts()
             }
         .overlay(alignment: .top) {
             VStack(spacing: 0) {
@@ -547,7 +610,7 @@ struct ContentView: View {
                     androidAircraftTable
                 }
                 .padding(8)
-                .frame(minWidth: 1_360, alignment: .topLeading)
+                .frame(minWidth: 1_120, alignment: .topLeading)
             }
         }
         .background(Color(uiColor: .systemBackground))
@@ -668,7 +731,7 @@ struct ContentView: View {
             if ridTracks.tracks.isEmpty {
                 Text("No aircraft detected — Bluetooth and external Remote ID are monitoring.")
                     .foregroundStyle(.secondary)
-                    .frame(width: 1_358, height: 58)
+                    .frame(width: 1_118, height: 58)
                     .background(Color(uiColor: .secondarySystemBackground))
             } else {
                 ForEach(ridTracks.tracks) { track in androidAircraftRow(track) }
@@ -684,10 +747,10 @@ struct ContentView: View {
             VStack(spacing: 1) {
                 Text("Waypoints Received")
                     .font(.caption.bold())
-                    .frame(width: 640, height: 24)
+                    .frame(width: 400, height: 24)
                     .background(Color.accentColor.opacity(0.16))
                 HStack(spacing: 1) {
-                    ForEach(["BT4:", "BT5:", "WiFi:", "NaN:"], id: \.self) { label in
+                    ForEach(["BT4:", "BT5:"], id: \.self) { label in
                         androidTableHeader(label, width: 120)
                     }
                     androidTableHeader("R2C:", width: 80)
@@ -720,8 +783,6 @@ struct ContentView: View {
             androidTableValue(track.aircraftID, width: 240, monospaced: true)
             androidTransportCell(track, source: .bluetoothLegacy)
             androidTransportCell(track, source: .bluetoothExtended)
-            androidTransportCell(track, source: .wifiBeacon)
-            androidTransportCell(track, source: .wifiNan)
             androidTableValue("\(sourceCount(track, .trackerRelay))", width: 80)
             androidTableValue("\(track.points.count)", width: 80)
             androidTableValue(flightDuration(track), width: 125)
@@ -1159,6 +1220,7 @@ struct ContentView: View {
     private var peerConfigurationFingerprint: String {
         [
             orgConfigSettings.usePeers ? "1" : "0",
+            orgConfigSettings.standaloneR2CCoordinationEnabled ? "1" : "0",
             orgConfigSettings.trackerURLPrefix,
             orgConfigSettings.trackerAPIKey.isEmpty ? "0" : "1",
             caltopoSettings.mapID,
@@ -1175,6 +1237,8 @@ struct ContentView: View {
         peerCoordinator.updatePosition(locationProvider.lastLocation)
         peerCoordinator.configure(
             usePeers: arguments.contains("--tracker-use-peers") || orgConfigSettings.usePeers,
+            standaloneR2CCoordinationEnabled:
+                orgConfigSettings.standaloneR2CCoordinationEnabled,
             trackerURLPrefix: argumentValue("--tracker-url") ?? orgConfigSettings.trackerURLPrefix,
             trackerAPIKey: argumentValue("--tracker-token") ?? orgConfigSettings.trackerAPIKey,
             mapID: argumentValue("--tracker-map") ?? caltopoSettings.mapID
@@ -1259,7 +1323,47 @@ struct ContentView: View {
             altitudeDisplay: ridTracks.altitudeDisplayByAircraftID,
             operatorLocation: locationProvider.lastLocation,
             identityProvider: droneConfirmations.identity,
-            alertEligibility: demoAlerts ? { _ in true } : peerCoordinator.isLocalAlertEligible
+            alertEligibility: demoAlerts ? { _ in true } : peerCoordinator.isLocalAlertEligible,
+            bridgeCheckDistanceFeet: Double(orgConfigSettings.bridgeCheckDistanceFeet),
+            maximumTrackDelaySeconds: Double(orgConfigSettings.newTrackDelaySeconds)
+        )
+    }
+
+    private var trackPolicyConfigurationFingerprint: String {
+        "\(orgConfigSettings.minimumTrackDistanceFeet)|\(orgConfigSettings.newTrackDelaySeconds)|\(orgConfigSettings.bridgeCheckDistanceFeet)"
+    }
+
+    private var updateAdvisoryPresented: Binding<Bool> {
+        Binding(
+            get: {
+                let recommended = peerCoordinator.recommendedAppVersionCode
+                return recommended > currentAppBuildNumber
+                    && recommended != dismissedUpdateVersionCode
+            },
+            set: { presented in
+                if !presented {
+                    dismissedUpdateVersionCode = peerCoordinator.recommendedAppVersionCode
+                }
+            }
+        )
+    }
+
+    private var currentAppBuildNumber: Int {
+        Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0
+    }
+
+    private func feet(_ value: Double) -> String {
+        String(format: "%.1f ft", value)
+    }
+
+    private func optionalFeet(_ value: Double?) -> String {
+        value.map(feet) ?? "unknown"
+    }
+
+    private func configureTrackPolicy() {
+        ridTracks.configureTrackPolicy(
+            minimumDistanceFeet: orgConfigSettings.minimumTrackDistanceFeet,
+            activeTimeoutSeconds: orgConfigSettings.newTrackDelaySeconds
         )
     }
 

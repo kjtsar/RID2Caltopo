@@ -1,25 +1,25 @@
 Latest changes:
 - Matched Android's Main Screen, Live View, MapPane controls, aircraft columns, device naming, stream grid, and anomaly-detector menus.
 - Added signed CalTopo team-map browsing with nested artifacts, hidden-folder defaults, operational markers, lines, polygons, media, and translucent search areas.
-- Live Map now starts at the iPad GPS fix, keeps the focused drone centered, and preserves the operator-selected zoom scale when swapping the map between full, split, and PiP layouts.
+- Live Map starts at the iPad GPS fix, keeps the focused drone centered, and fits the same geographic bounds and operational overlays when swapping between full, split, and PiP layouts.
 - Added Android-style stream focus, telemetry pairing, zoom/pan, double-tap clue capture, close/restart controls, performance diagnostics, and four-stream/external-display support.
 - Hardened native video with automatic MediaMTX startup, RTMP guidance, publisher/listener health checks, stall recovery, lag diagnostics, and reliable first-stream rendering.
 - Fixed blank video, sole-stream fill, grid/focus, Exit FS, Back navigation, PiP startup, and controller connection guidance.
-- Added Capture Streams; fMP4 recordings and local flight archives are available through Files.
+- Added Capture Streams, Android-compatible clue-photo KMZ flight archives, and safe dated-folder cleanup through Developer Tools.
 - Prevented iPad auto-lock while Live View is active and added bounded tracker reconnect backoff.
 - Live View now shows the Wi-Fi SSID, scrolls all settings, and keeps the compass clear of the gear.
-- Added Android-compatible flight Save/Ignore confirmation, ownership, track colors, first-waypoint timestamps, tracker coordination, publishing, retry/replay, and CalTopo folder lifecycle.
+- Added Android-compatible flight confirmation, ownership, track colors, timestamps, publishing, retry/replay, standalone tracker coordination, update advisories, and Proximity Pairs diagnostics.
 - Eliminated duplicate tablet icons and duplicate same-day archive folders; active tracks use Drone Tracks and completed tracks move to the archive folder.
 - Cached CalTopo marker icons locally and matched Android marker symbols.
-- Added offline map/CalTopo packages, USGS DEM terrain/AGL, cache maintenance, corrupt-tile quarantine, export/reload, cancellation, limits, and hit/fetch/fail/rate/ETA progress.
+- Added offline map/CalTopo packages, USGS DEM terrain/AGL, level-19 imagery overzoom beneath detailed contours, cache maintenance, corrupt-tile quarantine, export/reload, cancellation, limits, and hit/fetch/fail/rate/ETA progress.
 - Added FAA NOTAM/TFR retrieval, age diagnostics, refresh controls, FAA grids, and Android-style color status chips on the Main Screen and MapPane.
 - Added cached national park, refuge, wilderness, and Colorado land-restriction checks with agency links and weekly source verification.
-- Added telemetry-loss and 180/200-foot AGL warnings with speech, haptics, Map/Mute controls, and diagnostics.
+- Added telemetry-loss and 180/200-foot AGL warnings with speech, haptics, Map/Mute controls, plus Android track-distance, delay, bridge-distance, and proximity tuning.
 - Added Android-matched session-only anomaly modes, scan-frame/target-size controls, guide preview, ROI colors/crosshairs, hottest-region indicator, defaults, and troubleshooting.
 - Clue capture now preserves visible zoom framing, starts with an empty selected title, includes gimbal/heading/ATO/AGL/distance telemetry, and supports Decimal, UTM, and USNG coordinates.
 - Normalized displayed, projected, stored, and submitted clue headings to 0–359°.
-- Added encrypted configuration import/export, automatic iCloud backup/restore, Keychain passphrases, and mutual-aid map/DEM packages.
-- Matched Android startup: credentials persist, but each launch begins Standalone with Training / Op 1.
+- Added encrypted configuration import/export, automatic iCloud backup/restore, Keychain passphrases, and mutual-aid map/DEM packages with secure home fallback, auto-connect, and expiry cleanup.
+- Matched Android startup: credentials persist, while normal launches begin Standalone with Training / Op 1; active mutual-aid auto-connect is honored.
 - Restored the RID2Caltopo home-screen icon.
 - Wi-Fi NAN/Beacon aircraft now use a DS110 wireless relay into Apple's Bluetooth receiver; the former UDP compatibility relay was removed.
 
@@ -27,4 +27,4 @@ Remaining Android differences:
 - Apple uses iCloud Drive and Files rather than automatic Google Drive sync; Drive remains selectable through Files when installed.
 - iOS does not expose handset Wi-Fi RSSI, so Apple cannot show Android's controller-strength percentage.
 - iOS may suspend video and anomaly processing while locked or backgrounded; Bluetooth restoration is best effort.
-- Apple still lacks Android's advanced track/alert tuning, full Proximity Pairs diagnostics, archive cleanup panel, and AD Person Relevance runtime.
+- Person Relevance filtering is not yet available on iOS.

@@ -5,7 +5,7 @@ import org.junit.Test
 
 class StreamPipInsetFrameTest {
     @Test
-    fun streamPipInsetSize_usesSixteenByNineAspectRatio() {
+    fun streamPipInsetSize_matchesLandscapeFullFrameAspectRatio() {
         val size = streamPipInsetSize(
             maxWidth = 1000f,
             maxHeight = 600f,
@@ -13,21 +13,21 @@ class StreamPipInsetFrameTest {
         )
 
         assertEquals(322.08f, size.width, 0.01f)
-        assertEquals(181.17f, size.height, 0.01f)
-        assertEquals(STREAM_PIP_ASPECT_RATIO, size.width / size.height, 0.0001f)
+        assertEquals(193.25f, size.height, 0.01f)
+        assertEquals(1000f / 600f, size.width / size.height, 0.0001f)
     }
 
     @Test
-    fun streamPipInsetSize_capsWidthWhenHeightWouldOverflow() {
+    fun streamPipInsetSize_matchesPortraitFullFrameAspectRatio() {
         val size = streamPipInsetSize(
-            maxWidth = 1000f,
-            maxHeight = 180f,
-            insetFraction = 0.55f
+            maxWidth = 600f,
+            maxHeight = 1000f,
+            insetFraction = 0.33f
         )
 
-        assertEquals(277.33f, size.width, 0.01f)
-        assertEquals(156.0f, size.height, 0.01f)
-        assertEquals(STREAM_PIP_ASPECT_RATIO, size.width / size.height, 0.0001f)
+        assertEquals(190.08f, size.width, 0.01f)
+        assertEquals(316.8f, size.height, 0.01f)
+        assertEquals(600f / 1000f, size.width / size.height, 0.0001f)
     }
 
     @Test

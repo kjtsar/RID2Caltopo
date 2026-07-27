@@ -18,6 +18,7 @@ struct CaltopoSettingsView: View {
     @ObservedObject private var landRestrictions = AppleLandRestrictionCenter.shared
     @ObservedObject private var externalDisplay = AppleExternalDisplaySettings.shared
     @ObservedObject private var spokenWarnings = AppleSpokenWarningCenter.shared
+    @ObservedObject private var profileLifecycle = AppleCaltopoProfileLifecycle.shared
     @AppStorage("video.captureStreams") private var captureStreams = false
     @AppStorage(AppleDeviceIdentity.storedNameKey) private var deviceName = AppleDeviceIdentity.displayName
     @State private var showingTeamMaps = false
@@ -44,6 +45,26 @@ struct CaltopoSettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+            }
+            Section("CalTopo profiles") {
+                LabeledContent(
+                    "Active profile",
+                    value: profileLifecycle.activeProfileID.isEmpty
+                        ? "Not selected"
+                        : profileLifecycle.activeProfileID
+                )
+                if let name = profileLifecycle.mutualAidDisplayName {
+                    LabeledContent("Mutual aid", value: name)
+                    if let expiresAt = profileLifecycle.mutualAidExpiresAt {
+                        LabeledContent("Expires", value: expiresAt.formatted(date: .abbreviated, time: .shortened))
+                    }
+                } else {
+                    Text("No mutual-aid profile installed")
+                        .foregroundStyle(.secondary)
+                }
+                Text("Home credentials are preserved securely in Keychain. Imported mutual-aid access is removed at expiry and the app falls back to the home profile, matching Android.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             Section("Publishing") {
                 Toggle("Enable live CalTopo publishing", isOn: $settings.enabled)
@@ -81,6 +102,16 @@ struct CaltopoSettingsView: View {
             }
             Section("Traffic safety") {
                 Toggle(
+                    "Standalone R2C coordination",
+                    isOn: Binding(
+                        get: { orgSettings.standaloneR2CCoordinationEnabled },
+                        set: { orgSettings.setStandaloneR2CCoordinationEnabled($0) }
+                    )
+                )
+                Text("Allows tracker ownership and confirmation coordination when no CalTopo map is connected, matching Android.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Toggle(
                     "Predictive Head",
                     isOn: Binding(
                         get: { orgSettings.predictiveHeadEnabled },
@@ -89,11 +120,47 @@ struct CaltopoSettingsView: View {
                         }
                     )
                 )
-                LabeledContent(
-                    "Proximity spacing",
-                    value: "\(orgSettings.proximityAlertSpacingFeet) ft"
+                Stepper(
+                    "Proximity spacing: \(orgSettings.proximityAlertSpacingFeet) ft",
+                    value: Binding(
+                        get: { orgSettings.proximityAlertSpacingFeet },
+                        set: { orgSettings.setProximityAlertSpacingFeet($0) }
+                    ),
+                    in: 1 ... 1_000
                 )
-                Text("Predictive Head projects the latest aircraft motion forward by up to two seconds, matching Android. The spacing threshold comes from the imported organization configuration.")
+                Stepper(
+                    "Min Dist: \(orgSettings.minimumTrackDistanceFeet) ft",
+                    value: Binding(
+                        get: { orgSettings.minimumTrackDistanceFeet },
+                        set: { orgSettings.setMinimumTrackDistanceFeet($0) }
+                    ),
+                    in: 2 ... 1_000
+                )
+                Stepper(
+                    "New Track Delay: \(orgSettings.newTrackDelaySeconds) s",
+                    value: Binding(
+                        get: { orgSettings.newTrackDelaySeconds },
+                        set: { orgSettings.setNewTrackDelaySeconds($0) }
+                    ),
+                    in: 1 ... 600
+                )
+                Stepper(
+                    "Bridge Check Distance: \(orgSettings.bridgeCheckDistanceFeet) ft",
+                    value: Binding(
+                        get: { orgSettings.bridgeCheckDistanceFeet },
+                        set: { orgSettings.setBridgeCheckDistanceFeet($0) }
+                    ),
+                    in: 1 ... 1_000
+                )
+                Stepper(
+                    "Max App Idle Time: \(orgSettings.maximumIdleMinutes) min",
+                    value: Binding(
+                        get: { orgSettings.maximumIdleMinutes },
+                        set: { orgSettings.setMaximumIdleMinutes($0) }
+                    ),
+                    in: 0 ... 1_440
+                )
+                Text("Track filtering, loss timing, bridge distance, and proximity spacing use the same operator-adjustable controls as Android. The idle value is retained for configuration parity; iOS does not permit an app to terminate itself, so the system remains responsible for suspending an idle app.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading) {
@@ -345,6 +412,10 @@ private struct AppleDeveloperToolsView: View {
     @State private var locationError: String?
     @State private var recentDays = 2
     @State private var resubmitting = false
+    @State private var archiveDirectories: [AppleArchiveDirectoryOption] = []
+    @State private var selectedArchiveDirectories: Set<String> = []
+    @State private var loadingArchiveDirectories = false
+    @State private var showingArchiveDeleteConfirmation = false
     @State private var showingResetConfirmation = false
 
     var body: some View {
@@ -381,6 +452,44 @@ private struct AppleDeveloperToolsView: View {
                 }
                 .disabled(resubmitting)
                 Text("Clears the reported marker for the selected recent day folders and submits eligible team-drone tracks again.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Local track archives") {
+                Button(loadingArchiveDirectories ? "Loading…" : "Load Archive Folders") {
+                    loadArchiveDirectories()
+                }
+                .disabled(loadingArchiveDirectories)
+                ForEach(archiveDirectories) { directory in
+                    Toggle(
+                        isOn: Binding(
+                            get: { selectedArchiveDirectories.contains(directory.name) },
+                            set: { selected in
+                                if selected {
+                                    selectedArchiveDirectories.insert(directory.name)
+                                } else {
+                                    selectedArchiveDirectories.remove(directory.name)
+                                }
+                            }
+                        )
+                    ) {
+                        VStack(alignment: .leading) {
+                            Text(directory.name + (directory.isToday ? " • Today" : ""))
+                            Text(
+                                "\(directory.fileCount) files • \(ByteCountFormatter.string(fromByteCount: directory.byteCount, countStyle: .file))"
+                            )
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    .disabled(directory.isToday)
+                }
+                Button("Delete Selected Archive Folders", role: .destructive) {
+                    showingArchiveDeleteConfirmation = true
+                }
+                .disabled(selectedArchiveDirectories.isEmpty)
+                Text("Deletes only selected dated folders under Files > RID2Caltopo > Tracks. Today’s active folder cannot be selected.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -456,6 +565,23 @@ private struct AppleDeveloperToolsView: View {
                 )
             }
         }
+        .confirmationDialog(
+            "Delete selected archive folders?",
+            isPresented: $showingArchiveDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                let selected = selectedArchiveDirectories
+                Task {
+                    manager.status = await trackModel.deleteLocalArchiveDirectories(selected)
+                    selectedArchiveDirectories.removeAll()
+                    loadArchiveDirectories()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes \(selectedArchiveDirectories.count) local track archive folder(s).")
+        }
         .alert("Reset Persisted App State?", isPresented: $showingResetConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Reset", role: .destructive) {
@@ -497,6 +623,17 @@ private struct AppleDeveloperToolsView: View {
         locationProvider.setLocationOverride(latitude: latitude, longitude: longitude)
         locationError = nil
         manager.status = "Temporary MyLocation override applied."
+    }
+
+    private func loadArchiveDirectories() {
+        loadingArchiveDirectories = true
+        Task {
+            archiveDirectories = await trackModel.localArchiveDirectories()
+            selectedArchiveDirectories.formIntersection(
+                archiveDirectories.filter { !$0.isToday }.map(\.name)
+            )
+            loadingArchiveDirectories = false
+        }
     }
 }
 

@@ -491,11 +491,18 @@ internal fun SplitMapPane(
     fun persistFullMapViewport(mapView: MapView) {
         if (isInsetMode) return
         if (mapView.width <= 0 || mapView.height <= 0) return
+        val bounds = mapView.boundingBox
         viewModel.persistMapViewportState(
             center = mapView.mapCenter,
             zoom = mapView.zoomLevelDouble,
             widthPx = mapView.width,
-            heightPx = mapView.height
+            heightPx = mapView.height,
+            bounds = MapViewportBounds(
+                north = bounds.latNorth,
+                east = bounds.lonEast,
+                south = bounds.latSouth,
+                west = bounds.lonWest
+            )
         )
     }
     val baseLayer = viewModel.baseLayer
@@ -594,7 +601,7 @@ internal fun SplitMapPane(
     var lastRenderStats by remember { mutableStateOf("") }
     var lastAlignmentStats by remember { mutableStateOf("") }
     var initialViewportApplied by remember { mutableStateOf(restoredViewport != null) }
-    var insetRestoredViewportApplied by remember { mutableStateOf(false) }
+    val viewportRestoreTracker = remember(presentationMode) { MapViewportRestoreTracker() }
     var initialViewportArtifactCount by remember { mutableStateOf(-1) }
     var restoredViewportStartupCheckComplete by remember { mutableStateOf(true) }
     var restoredViewportStartupWaitLogged by remember { mutableStateOf(false) }
@@ -1850,7 +1857,7 @@ internal fun SplitMapPane(
         lastAlignmentStats = ""
         lastCacheStats = ""
         lastLocalDeviceMarkerStats = ""
-        insetRestoredViewportApplied = false
+        viewportRestoreTracker.reset()
         localDeviceViewportRescueApplied = false
         viewModel.altitudeCoordinator.onMapReconnect()
         renderLatencyKeyByDesignator.clear()
@@ -2370,6 +2377,53 @@ internal fun SplitMapPane(
                 if (mapView.maxZoomLevel != maxZoom) {
                     mapView.setMaxZoomLevel(maxZoom)
                 }
+                if (viewportRestoreTracker.needsRestore(mapView) && restoredViewport != null) {
+                    val viewportWidth = mapView.width
+                    val viewportHeight = mapView.height
+                    if (viewportWidth > 0 && viewportHeight > 0) {
+                        val bounds = restoredViewport.bounds
+                        if (bounds?.isUsable == true) {
+                            mapView.zoomToBoundingBox(
+                                BoundingBox(bounds.north, bounds.east, bounds.south, bounds.west),
+                                false,
+                                0
+                            )
+                        } else {
+                            mapView.controller.setCenter(
+                                GeoPoint(restoredViewport.latitude, restoredViewport.longitude)
+                            )
+                            mapView.controller.setZoom(
+                                if (isInsetMode) {
+                                    mapPaneInsetViewportZoom(
+                                        fullWidthPx = restoredViewport.widthPx,
+                                        fullHeightPx = restoredViewport.heightPx,
+                                        insetWidthPx = viewportWidth,
+                                        insetHeightPx = viewportHeight,
+                                        fullZoom = restoredViewport.zoom,
+                                        maxZoom = baseTileSource.maximumZoomLevel.toDouble()
+                                    )
+                                } else {
+                                    restoredViewport.zoom
+                                }
+                            )
+                        }
+                        viewportRestoreTracker.markRestored(mapView)
+                        CTDebug(
+                            MAP_PANE_TAG,
+                            String.format(
+                                Locale.US,
+                                "Restored viewport bounds mode=%s measured=%dx%d center=%.6f,%.6f zoom=%.2f bounds=%s",
+                                presentationMode.name,
+                                viewportWidth,
+                                viewportHeight,
+                                mapView.mapCenter.latitude,
+                                mapView.mapCenter.longitude,
+                                mapView.zoomLevelDouble,
+                                bounds?.isUsable == true
+                            )
+                        )
+                    }
+                }
                 val currentTileZoom = TileSystem.getInputTileZoomLevel(mapView.zoomLevelDouble)
                 val baseSourceChanged = needsBaseTileProviderRestart(
                     currentSourceName = mapView.tileProvider.tileSource.name(),
@@ -2882,12 +2936,15 @@ internal fun SplitMapPane(
                             kotlin.math.abs(mapCenter.longitude) < 0.000001
                     val operationalContentPresent =
                         dronePoints.isNotEmpty() || artifactOverlayState.totalFeatures > 0
-                    if (!isInsetMode &&
-                        !localDeviceViewportRescueApplied &&
-                        !localDeviceVisible &&
-                        defaultViewportCenter &&
-                        !operationalContentPresent &&
-                        !operatorAdjustedViewport
+                    if (shouldRescueLocalDeviceViewport(
+                            hasRestoredViewport = restoredViewport != null,
+                            presentationMode = presentationMode,
+                            rescueAlreadyApplied = localDeviceViewportRescueApplied,
+                            localDeviceVisible = localDeviceVisible,
+                            defaultViewportCenter = defaultViewportCenter,
+                            operationalContentPresent = operationalContentPresent,
+                            operatorAdjustedViewport = operatorAdjustedViewport
+                        )
                     ) {
                         mapView.controller.setCenter(GeoPoint(myLocation.latitude, myLocation.longitude))
                         mapView.controller.setZoom(STARTUP_MY_LOCATION_MIN_ZOOM)
@@ -3429,24 +3486,6 @@ internal fun SplitMapPane(
                             prevDemMisses = demStats.misses
                             cacheStatsQueryInFlight = false
                         }
-                    }
-                }
-                if (isInsetMode && !insetRestoredViewportApplied && restoredViewport != null) {
-                    val insetWidth = mapView.width
-                    val insetHeight = mapView.height
-                    if (insetWidth > 0 && insetHeight > 0) {
-                        mapView.controller.setCenter(GeoPoint(restoredViewport.latitude, restoredViewport.longitude))
-                        mapView.controller.setZoom(
-                            mapPaneInsetViewportZoom(
-                                fullWidthPx = restoredViewport.widthPx,
-                                fullHeightPx = restoredViewport.heightPx,
-                                insetWidthPx = insetWidth,
-                                insetHeightPx = insetHeight,
-                                fullZoom = restoredViewport.zoom,
-                                maxZoom = baseTileSource.maximumZoomLevel.toDouble()
-                            )
-                        )
-                        insetRestoredViewportApplied = true
                     }
                 }
                 val focusDesignator = focusedPath

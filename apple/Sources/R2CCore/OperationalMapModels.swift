@@ -25,6 +25,39 @@ public enum OperationalMapBaseLayer: String, CaseIterable, Codable, Sendable, Eq
 
 }
 
+public struct OperationalOverzoomTile: Sendable, Equatable {
+    public let sourceZoom: Int
+    public let sourceX: Int
+    public let sourceY: Int
+    public let zoomDelta: Int
+    public let childX: Int
+    public let childY: Int
+
+    public static func resolve(
+        requestedZoom: Int,
+        requestedX: Int,
+        requestedY: Int,
+        sourceMaximumZoom: Int
+    ) -> Self? {
+        guard requestedZoom > sourceMaximumZoom,
+              sourceMaximumZoom >= 0,
+              requestedX >= 0,
+              requestedY >= 0
+        else { return nil }
+        let zoomDelta = requestedZoom - sourceMaximumZoom
+        guard zoomDelta < Int.bitWidth - 1 else { return nil }
+        let scale = 1 << zoomDelta
+        return Self(
+            sourceZoom: sourceMaximumZoom,
+            sourceX: requestedX / scale,
+            sourceY: requestedY / scale,
+            zoomDelta: zoomDelta,
+            childX: requestedX % scale,
+            childY: requestedY % scale
+        )
+    }
+}
+
 public enum OperationalMapVideoLayout: String, CaseIterable, Codable, Sendable, Equatable {
     case map
     case video

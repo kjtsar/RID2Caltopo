@@ -117,6 +117,21 @@ final class AppleCaltopoSettings: ObservableObject {
         status = "Android mutual-aid QR loaded for \(profile.displayName)"
     }
 
+    func apply(storedProfile profile: AppleStoredOperationalProfile, connectMap: Bool) throws {
+        enabled = profile.enabled
+        domainAndPort = profile.domainAndPort.isEmpty ? "caltopo.com" : profile.domainAndPort
+        mapID = connectMap && profile.autoConnect ? profile.mapID : ""
+        mapTitle = mapID.isEmpty ? "" : profile.mapTitle
+        credentialID = profile.credentialID
+        credentialSecret = profile.credentialSecret
+        teamID = profile.teamID
+        defaults.set(teamID, forKey: "caltopo.teamID")
+        _ = save()
+        status = mapID.isEmpty
+            ? "Profile restored; select the incident map"
+            : "Connected to \(profile.mapTitle)"
+    }
+
     func transferSnapshot() -> [String: Any] {
         [
             "enabled": enabled,

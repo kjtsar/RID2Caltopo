@@ -120,6 +120,7 @@ public struct MutualAidSharedProfile: Sendable, Equatable {
     public let trackerURLPrefix: String
     public let autoConnect: Bool
     public let expiresAtEpochMilliseconds: Int64
+    public let quietRemoveOnExpiry: Bool
     public let sourceLabel: String
     public let targetMapID: String
     public let targetMapTitle: String
@@ -217,6 +218,7 @@ public enum AndroidConfigTokenCodec {
             trackerURLPrefix: string(object["tracker_url_prefix"]),
             autoConnect: (object["auto_connect"] as? NSNumber)?.boolValue ?? true,
             expiresAtEpochMilliseconds: (object["expires_at_epoch_ms"] as? NSNumber)?.int64Value ?? 0,
+            quietRemoveOnExpiry: (object["quiet_remove_on_expiry"] as? NSNumber)?.boolValue ?? true,
             sourceLabel: string(object["source_label"]),
             targetMapID: string(object["target_map_id"]),
             targetMapTitle: string(object["target_map_title"]),
@@ -250,6 +252,7 @@ public enum AndroidConfigTokenCodec {
             trackerURLPrefix: string(object["tracker_url_prefix"]),
             autoConnect: (object["auto_connect"] as? NSNumber)?.boolValue ?? true,
             expiresAtEpochMilliseconds: (object["expires_at_epoch_ms"] as? NSNumber)?.int64Value ?? 0,
+            quietRemoveOnExpiry: (object["quiet_remove_on_expiry"] as? NSNumber)?.boolValue ?? true,
             sourceLabel: string(object["source_label"]),
             targetMapID: string(object["target_map_id"]),
             targetMapTitle: string(object["target_map_title"]),

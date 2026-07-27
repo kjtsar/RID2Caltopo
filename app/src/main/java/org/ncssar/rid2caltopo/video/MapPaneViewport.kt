@@ -1,5 +1,38 @@
 package org.ncssar.rid2caltopo.video
 
+data class MapViewportBounds(
+    val north: Double,
+    val east: Double,
+    val south: Double,
+    val west: Double
+) {
+    val isUsable: Boolean
+        get() = north.isFinite() &&
+            east.isFinite() &&
+            south.isFinite() &&
+            west.isFinite() &&
+            north in -85.0..85.0 &&
+            south in -85.0..85.0 &&
+            east in -180.0..180.0 &&
+            west in -180.0..180.0 &&
+            north > south &&
+            east != west
+}
+
+internal class MapViewportRestoreTracker {
+    private var restoredTarget: Any? = null
+
+    fun needsRestore(target: Any): Boolean = restoredTarget !== target
+
+    fun markRestored(target: Any) {
+        restoredTarget = target
+    }
+
+    fun reset() {
+        restoredTarget = null
+    }
+}
+
 internal fun mapPaneMarkerScale(mode: MapPanePresentationMode): Float =
     when (mode) {
         MapPanePresentationMode.Full -> 1.0f
@@ -66,6 +99,23 @@ internal fun mapPaneCanZoomToBoundingBox(
     mapHeightPx: Int,
     pointCount: Int
 ): Boolean = mapWidthPx > 0 && mapHeightPx > 0 && pointCount >= 2
+
+internal fun shouldRescueLocalDeviceViewport(
+    hasRestoredViewport: Boolean,
+    presentationMode: MapPanePresentationMode,
+    rescueAlreadyApplied: Boolean,
+    localDeviceVisible: Boolean,
+    defaultViewportCenter: Boolean,
+    operationalContentPresent: Boolean,
+    operatorAdjustedViewport: Boolean
+): Boolean =
+    !hasRestoredViewport &&
+        presentationMode == MapPanePresentationMode.Full &&
+        !rescueAlreadyApplied &&
+        !localDeviceVisible &&
+        defaultViewportCenter &&
+        !operationalContentPresent &&
+        !operatorAdjustedViewport
 
 internal fun isUsableMapViewportState(latitude: Double, longitude: Double, zoom: Double): Boolean {
     if (!latitude.isFinite() || !longitude.isFinite() || !zoom.isFinite()) return false

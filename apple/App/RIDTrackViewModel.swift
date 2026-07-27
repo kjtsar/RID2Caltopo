@@ -38,6 +38,8 @@ final class RIDTrackViewModel: ObservableObject {
     private var archiveConfiguration: AppleTrackArchiveConfiguration?
     private var localDeviceMarker: CaltopoDeviceMarker?
     private var localDeviceMarkerPublishingEnabled = true
+    private var clueArchiveProvider:
+        ((String, Date, Date) -> [AppleTrackArchiveClue])?
 
     func bind(to observations: AsyncStream<RidObservation>, sourceID: String) {
         guard observationTasks[sourceID] == nil else { return }
@@ -130,6 +132,21 @@ final class RIDTrackViewModel: ObservableObject {
             )
         }
         tracks = await store.snapshot()
+    }
+
+    func configureTrackPolicy(minimumDistanceFeet: Int, activeTimeoutSeconds: Int) {
+        Task { [store] in
+            var policy = await store.policy
+            policy.minimumDistanceMeters = Double(max(2, minimumDistanceFeet)) * 0.3048
+            policy.activeTimeout = TimeInterval(max(1, activeTimeoutSeconds))
+            await store.updatePolicy(policy)
+        }
+    }
+
+    func configureClueArchiveProvider(
+        _ provider: @escaping (String, Date, Date) -> [AppleTrackArchiveClue]
+    ) {
+        clueArchiveProvider = provider
     }
 
     func manualCalibrateAltitude(remoteID: String) {
@@ -445,6 +462,20 @@ final class RIDTrackViewModel: ObservableObject {
         return summary.description
     }
 
+    func localArchiveDirectories() async -> [AppleArchiveDirectoryOption] {
+        await archiveStore.archiveDirectories()
+    }
+
+    func deleteLocalArchiveDirectories(_ names: Set<String>) async -> String {
+        let failed = await archiveStore.deleteArchiveDirectories(names)
+        let deleted = max(0, names.count - failed.count)
+        let message = failed.isEmpty
+            ? "Deleted \(deleted) archive folder\(deleted == 1 ? "" : "s")."
+            : "Deleted \(deleted); failed: \(failed.joined(separator: ", "))."
+        archiveStatus = message
+        return message
+    }
+
     private func archive(_ track: RidAircraftTrack) async {
         let identity = identityProvider?(track.aircraftID)
         let archiveConfiguration = archiveConfiguration
@@ -461,7 +492,13 @@ final class RIDTrackViewModel: ObservableObject {
             buildTime: "Apple"
         )
         do {
-            let outcome = try await archiveStore.archive(track: track, metadata: metadata)
+            let start = track.points.first?.receivedAt ?? track.lastSignalAt
+            let clues = clueArchiveProvider?(track.aircraftID, start, Date()) ?? []
+            let outcome = try await archiveStore.archive(
+                track: track,
+                metadata: metadata,
+                clues: clues
+            )
             archivedTrackCount += 1
             latestArchiveURL = outcome.url
             switch outcome.trackerResult {

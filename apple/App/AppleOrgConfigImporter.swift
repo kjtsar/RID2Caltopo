@@ -5,6 +5,223 @@ import SwiftUI
 import Vision
 import VisionKit
 
+struct AppleStoredOperationalProfile: Codable {
+    let profileID: String
+    let displayName: String
+    let profileType: String
+    let enabled: Bool
+    let organizationName: String
+    let incident: String
+    let operationalPeriod: String
+    let trackFolder: String
+    let teamID: String
+    let trackerURLPrefix: String
+    let trackerAPIKey: String
+    let domainAndPort: String
+    let mapID: String
+    let mapTitle: String
+    let credentialID: String
+    let credentialSecret: String
+    let autoConnect: Bool
+    let expiresAtEpochMilliseconds: Int64
+    let quietRemoveOnExpiry: Bool
+}
+
+@MainActor
+final class AppleCaltopoProfileLifecycle: ObservableObject {
+    static let shared = AppleCaltopoProfileLifecycle()
+    @Published private(set) var activeProfileID: String
+    @Published private(set) var mutualAidDisplayName: String?
+    @Published private(set) var mutualAidExpiresAt: Date?
+
+    private let defaults: UserDefaults
+    private static let service = "org.ncssar.RID2CaltopoApple.caltopo-profiles"
+    private static let homeAccount = "profile.home"
+    private static let mutualAidAccount = "profile.mutual-aid"
+    private static let activeKey = "caltopoProfiles.activeID"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        activeProfileID = defaults.string(forKey: Self.activeKey) ?? ""
+        if let profile = try? Self.load(account: Self.mutualAidAccount) {
+            mutualAidDisplayName = profile.displayName
+            mutualAidExpiresAt = profile.expiresAtEpochMilliseconds > 0
+                ? Date(timeIntervalSince1970: Double(profile.expiresAtEpochMilliseconds) / 1_000)
+                : nil
+        }
+    }
+
+    func captureHome(
+        org: AppleOrgConfigSettings,
+        caltopo: AppleCaltopoSettings
+    ) throws {
+        let configuration = caltopo.configuration
+        let profile = AppleStoredOperationalProfile(
+            profileID: "home",
+            displayName: org.organizationName.isEmpty ? "Home" : org.organizationName,
+            profileType: "HOME",
+            enabled: configuration.enabled,
+            organizationName: org.organizationName,
+            incident: org.incident,
+            operationalPeriod: org.operationalPeriod,
+            trackFolder: org.trackFolder,
+            teamID: configuration.teamID.isEmpty ? org.teamID : configuration.teamID,
+            trackerURLPrefix: org.trackerURLPrefix,
+            trackerAPIKey: org.trackerAPIKey,
+            domainAndPort: configuration.domainAndPort,
+            mapID: "",
+            mapTitle: "",
+            credentialID: configuration.credentialID,
+            credentialSecret: configuration.credentialSecret,
+            autoConnect: false,
+            expiresAtEpochMilliseconds: 0,
+            quietRemoveOnExpiry: false
+        )
+        try Self.store(profile, account: Self.homeAccount)
+        setActive("home")
+    }
+
+    func install(
+        _ profile: MutualAidSharedProfile,
+        org: AppleOrgConfigSettings,
+        caltopo: AppleCaltopoSettings
+    ) throws -> Bool {
+        if (try? Self.load(account: Self.homeAccount)) == nil {
+            try captureHome(org: org, caltopo: caltopo)
+        }
+        let stored = AppleStoredOperationalProfile(
+            profileID: profile.profileID,
+            displayName: profile.displayName,
+            profileType: "MUTUAL_AID",
+            enabled: true,
+            organizationName: profile.sourceLabel,
+            incident: profile.incident,
+            operationalPeriod: profile.operationalPeriod,
+            trackFolder: profile.trackFolder,
+            teamID: profile.teamID,
+            trackerURLPrefix: profile.trackerURLPrefix,
+            trackerAPIKey: profile.trackerAPIKey,
+            domainAndPort: profile.domainAndPort,
+            mapID: profile.targetMapID,
+            mapTitle: profile.targetMapTitle.isEmpty ? profile.displayName : profile.targetMapTitle,
+            credentialID: profile.credentialID,
+            credentialSecret: profile.credentialSecret,
+            autoConnect: profile.autoConnect,
+            expiresAtEpochMilliseconds: profile.expiresAtEpochMilliseconds,
+            quietRemoveOnExpiry: profile.quietRemoveOnExpiry
+        )
+        try Self.store(stored, account: Self.mutualAidAccount)
+        mutualAidDisplayName = stored.displayName
+        mutualAidExpiresAt = stored.expiresAtEpochMilliseconds > 0
+            ? Date(timeIntervalSince1970: Double(stored.expiresAtEpochMilliseconds) / 1_000)
+            : nil
+        let unexpired = stored.expiresAtEpochMilliseconds <= 0
+            || Int64(Date().timeIntervalSince1970 * 1_000) < stored.expiresAtEpochMilliseconds
+        if unexpired {
+            setActive(stored.profileID)
+        }
+        return unexpired
+    }
+
+    @discardableResult
+    func restoreActive(
+        org: AppleOrgConfigSettings,
+        caltopo: AppleCaltopoSettings,
+        now: Date = Date()
+    ) throws -> Bool {
+        guard !activeProfileID.isEmpty, activeProfileID != "home",
+              let mutualAid = try? Self.load(account: Self.mutualAidAccount),
+              mutualAid.profileID == activeProfileID
+        else { return false }
+        if mutualAid.expiresAtEpochMilliseconds > 0,
+           Int64(now.timeIntervalSince1970 * 1_000) >= mutualAid.expiresAtEpochMilliseconds {
+            return try removeExpired(org: org, caltopo: caltopo, now: now)
+        }
+        try org.apply(storedProfile: mutualAid)
+        try caltopo.apply(storedProfile: mutualAid, connectMap: true)
+        return true
+    }
+
+    @discardableResult
+    func removeExpired(
+        org: AppleOrgConfigSettings,
+        caltopo: AppleCaltopoSettings,
+        now: Date = Date()
+    ) throws -> Bool {
+        guard let mutualAid = try? Self.load(account: Self.mutualAidAccount),
+              mutualAid.expiresAtEpochMilliseconds > 0,
+              Int64(now.timeIntervalSince1970 * 1_000) >= mutualAid.expiresAtEpochMilliseconds
+        else { return false }
+        try Self.delete(account: Self.mutualAidAccount)
+        mutualAidDisplayName = nil
+        mutualAidExpiresAt = nil
+        if activeProfileID == mutualAid.profileID,
+           let home = try? Self.load(account: Self.homeAccount) {
+            try org.apply(storedProfile: home)
+            try caltopo.apply(storedProfile: home, connectMap: false)
+            setActive(home.profileID)
+        }
+        AppleLog.info(
+            "OrgConfig",
+            "Removed expired mutual-aid profile id='\(mutualAid.profileID)' quiet=\(mutualAid.quietRemoveOnExpiry)"
+        )
+        return true
+    }
+
+    private func setActive(_ profileID: String) {
+        activeProfileID = profileID
+        defaults.set(profileID, forKey: Self.activeKey)
+    }
+
+    private static func load(account: String) throws -> AppleStoredOperationalProfile {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+        return try JSONDecoder().decode(AppleStoredOperationalProfile.self, from: data)
+    }
+
+    private static func store(_ profile: AppleStoredOperationalProfile, account: String) throws {
+        let key: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let data = try JSONEncoder().encode(profile)
+        let update = SecItemUpdate(key as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if update == errSecSuccess { return }
+        guard update == errSecItemNotFound else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(update))
+        }
+        var insert = key
+        insert[kSecValueData as String] = data
+        let status = SecItemAdd(insert as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+    }
+
+    private static func delete(account: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+    }
+}
+
 @MainActor
 final class AppleOrgConfigSettings: ObservableObject {
     @Published private(set) var organizationName: String
@@ -14,8 +231,13 @@ final class AppleOrgConfigSettings: ObservableObject {
     @Published private(set) var teamID: String
     @Published private(set) var trackerURLPrefix: String
     @Published private(set) var usePeers: Bool
+    @Published private(set) var standaloneR2CCoordinationEnabled: Bool
     @Published private(set) var predictiveHeadEnabled: Bool
     @Published private(set) var proximityAlertSpacingFeet: Int
+    @Published private(set) var minimumTrackDistanceFeet: Int
+    @Published private(set) var newTrackDelaySeconds: Int
+    @Published private(set) var bridgeCheckDistanceFeet: Int
+    @Published private(set) var maximumIdleMinutes: Int
     @Published private(set) var sourceDescription: String
 
     private let defaults: UserDefaults
@@ -38,8 +260,14 @@ final class AppleOrgConfigSettings: ObservableObject {
         teamID = defaults.string(forKey: "org.teamID") ?? ""
         trackerURLPrefix = defaults.string(forKey: "org.trackerURLPrefix") ?? ""
         usePeers = defaults.object(forKey: "org.usePeers") as? Bool ?? true
+        standaloneR2CCoordinationEnabled =
+            defaults.object(forKey: "org.standaloneR2CCoordination") as? Bool ?? false
         predictiveHeadEnabled = defaults.object(forKey: "org.predictiveHead") as? Bool ?? true
         proximityAlertSpacingFeet = defaults.object(forKey: "org.proximityFeet") as? Int ?? 40
+        minimumTrackDistanceFeet = max(2, defaults.object(forKey: "track.minimumDistanceFeet") as? Int ?? 2)
+        newTrackDelaySeconds = max(1, defaults.object(forKey: "track.newTrackDelaySeconds") as? Int ?? 30)
+        bridgeCheckDistanceFeet = max(1, defaults.object(forKey: "track.bridgeCheckDistanceFeet") as? Int ?? 20)
+        maximumIdleMinutes = max(0, defaults.object(forKey: "app.maximumIdleMinutes") as? Int ?? 120)
         sourceDescription = defaults.string(forKey: "org.sourceDescription") ?? "Not loaded"
         defaults.set("Training", forKey: "org.incident")
         defaults.set("1", forKey: "org.operationalPeriod")
@@ -97,6 +325,7 @@ final class AppleOrgConfigSettings: ObservableObject {
         defaults.set(teamID, forKey: "org.teamID")
         defaults.set(trackerURLPrefix, forKey: "org.trackerURLPrefix")
         defaults.set(usePeers, forKey: "org.usePeers")
+        defaults.set(standaloneR2CCoordinationEnabled, forKey: "org.standaloneR2CCoordination")
         defaults.set(predictiveHeadEnabled, forKey: "org.predictiveHead")
         defaults.set(proximityAlertSpacingFeet, forKey: "org.proximityFeet")
         defaults.set(sourceDescription, forKey: "org.sourceDescription")
@@ -128,6 +357,26 @@ final class AppleOrgConfigSettings: ObservableObject {
         try Self.storeSecret(profile.trackerAPIKey, account: Self.trackerAccount)
     }
 
+    func apply(storedProfile profile: AppleStoredOperationalProfile) throws {
+        organizationName = profile.organizationName
+        incident = profile.incident
+        operationalPeriod = profile.operationalPeriod
+        trackFolder = Self.normalizedTrackFolder(profile.trackFolder)
+        teamID = profile.teamID
+        trackerURLPrefix = profile.trackerURLPrefix
+        sourceDescription = profile.profileType == "HOME"
+            ? "Home organization • \(profile.displayName)"
+            : "Mutual aid • \(profile.displayName)"
+        defaults.set(organizationName, forKey: "org.name")
+        defaults.set(incident, forKey: "org.incident")
+        defaults.set(operationalPeriod, forKey: "org.operationalPeriod")
+        defaults.set(trackFolder, forKey: "org.trackFolder")
+        defaults.set(teamID, forKey: "org.teamID")
+        defaults.set(trackerURLPrefix, forKey: "org.trackerURLPrefix")
+        defaults.set(sourceDescription, forKey: "org.sourceDescription")
+        try Self.storeTrackerAPIKey(profile.trackerAPIKey)
+    }
+
     func setPredictiveHeadEnabled(_ enabled: Bool) {
         predictiveHeadEnabled = enabled
         defaults.set(enabled, forKey: "org.predictiveHead")
@@ -139,6 +388,37 @@ final class AppleOrgConfigSettings: ObservableObject {
         AppleLog.info("TrackerPeer", "Peer coordination setting enabled=\(enabled)")
     }
 
+    func setStandaloneR2CCoordinationEnabled(_ enabled: Bool) {
+        standaloneR2CCoordinationEnabled = enabled
+        defaults.set(enabled, forKey: "org.standaloneR2CCoordination")
+        AppleLog.info("TrackerPeer", "Standalone R2C coordination enabled=\(enabled)")
+    }
+
+    func setProximityAlertSpacingFeet(_ value: Int) {
+        proximityAlertSpacingFeet = max(1, value)
+        defaults.set(proximityAlertSpacingFeet, forKey: "org.proximityFeet")
+    }
+
+    func setMinimumTrackDistanceFeet(_ value: Int) {
+        minimumTrackDistanceFeet = max(2, value)
+        defaults.set(minimumTrackDistanceFeet, forKey: "track.minimumDistanceFeet")
+    }
+
+    func setNewTrackDelaySeconds(_ value: Int) {
+        newTrackDelaySeconds = max(1, value)
+        defaults.set(newTrackDelaySeconds, forKey: "track.newTrackDelaySeconds")
+    }
+
+    func setBridgeCheckDistanceFeet(_ value: Int) {
+        bridgeCheckDistanceFeet = max(1, value)
+        defaults.set(bridgeCheckDistanceFeet, forKey: "track.bridgeCheckDistanceFeet")
+    }
+
+    func setMaximumIdleMinutes(_ value: Int) {
+        maximumIdleMinutes = max(0, value)
+        defaults.set(maximumIdleMinutes, forKey: "app.maximumIdleMinutes")
+    }
+
     func resetPersistedState() {
         organizationName = ""
         incident = "Training"
@@ -147,8 +427,13 @@ final class AppleOrgConfigSettings: ObservableObject {
         teamID = ""
         trackerURLPrefix = ""
         usePeers = true
+        standaloneR2CCoordinationEnabled = false
         predictiveHeadEnabled = true
         proximityAlertSpacingFeet = 40
+        minimumTrackDistanceFeet = 2
+        newTrackDelaySeconds = 30
+        bridgeCheckDistanceFeet = 20
+        maximumIdleMinutes = 120
         sourceDescription = "Not loaded"
         for account in [
             Self.trackerAccount,
@@ -193,8 +478,13 @@ final class AppleOrgConfigSettings: ObservableObject {
             "tracker_url_prefix": trackerURLPrefix,
             "tracker_api_key": trackerAPIKey,
             "use_peers": usePeers,
+            "standalone_r2c_coordination_enabled": standaloneR2CCoordinationEnabled,
             "predictive_head": predictiveHeadEnabled,
             "proximity_feet": proximityAlertSpacingFeet,
+            "minimum_track_distance_feet": minimumTrackDistanceFeet,
+            "new_track_delay_seconds": newTrackDelaySeconds,
+            "bridge_check_distance_feet": bridgeCheckDistanceFeet,
+            "maximum_idle_minutes": maximumIdleMinutes,
             "source_description": sourceDescription,
         ]
         if let faaConfiguration {
@@ -228,8 +518,14 @@ final class AppleOrgConfigSettings: ObservableObject {
         teamID = object["team_id"] as? String ?? ""
         trackerURLPrefix = object["tracker_url_prefix"] as? String ?? ""
         usePeers = (object["use_peers"] as? NSNumber)?.boolValue ?? true
+        standaloneR2CCoordinationEnabled =
+            (object["standalone_r2c_coordination_enabled"] as? NSNumber)?.boolValue ?? false
         predictiveHeadEnabled = (object["predictive_head"] as? NSNumber)?.boolValue ?? true
         proximityAlertSpacingFeet = (object["proximity_feet"] as? NSNumber)?.intValue ?? 40
+        minimumTrackDistanceFeet = max(2, (object["minimum_track_distance_feet"] as? NSNumber)?.intValue ?? 2)
+        newTrackDelaySeconds = max(1, (object["new_track_delay_seconds"] as? NSNumber)?.intValue ?? 30)
+        bridgeCheckDistanceFeet = max(1, (object["bridge_check_distance_feet"] as? NSNumber)?.intValue ?? 20)
+        maximumIdleMinutes = max(0, (object["maximum_idle_minutes"] as? NSNumber)?.intValue ?? 120)
         sourceDescription = object["source_description"] as? String ?? "Local backup"
         defaults.set(organizationName, forKey: "org.name")
         defaults.set(incident, forKey: "org.incident")
@@ -238,8 +534,13 @@ final class AppleOrgConfigSettings: ObservableObject {
         defaults.set(teamID, forKey: "org.teamID")
         defaults.set(trackerURLPrefix, forKey: "org.trackerURLPrefix")
         defaults.set(usePeers, forKey: "org.usePeers")
+        defaults.set(standaloneR2CCoordinationEnabled, forKey: "org.standaloneR2CCoordination")
         defaults.set(predictiveHeadEnabled, forKey: "org.predictiveHead")
         defaults.set(proximityAlertSpacingFeet, forKey: "org.proximityFeet")
+        defaults.set(minimumTrackDistanceFeet, forKey: "track.minimumDistanceFeet")
+        defaults.set(newTrackDelaySeconds, forKey: "track.newTrackDelaySeconds")
+        defaults.set(bridgeCheckDistanceFeet, forKey: "track.bridgeCheckDistanceFeet")
+        defaults.set(maximumIdleMinutes, forKey: "app.maximumIdleMinutes")
         defaults.set(sourceDescription, forKey: "org.sourceDescription")
         try Self.storeSecret(object["tracker_api_key"] as? String ?? "", account: Self.trackerAccount)
         if let faa = object["faa"] as? [String: Any] {
@@ -352,6 +653,7 @@ final class AppleOrgConfigImporter: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    let profileLifecycle = AppleCaltopoProfileLifecycle.shared
     var caltopoConfigurationHandler: ((AppleCaltopoConfiguration) -> Void)?
 
     var statusText: String {
@@ -394,6 +696,7 @@ final class AppleOrgConfigImporter: ObservableObject {
                 let bundle = try OrgConfigTokenCodec.parseBundle(data)
                 try orgSettings.apply(bundle: bundle, normalizedToken: normalized)
                 try caltopoSettings.applyImported(credentials: bundle.credentials)
+                try profileLifecycle.captureHome(org: orgSettings, caltopo: caltopoSettings)
                 caltopoConfigurationHandler?(caltopoSettings.configuration)
                 identityStore.applyImportedMappings(bundle.mappings)
                 if let faaConfig = bundle.faaConfig {
@@ -420,10 +723,21 @@ final class AppleOrgConfigImporter: ObservableObject {
                 AppleLog.info("OrgConfig", "Applied Android FAA QR config label='\(config.sourceLabel)'")
             case .mutualAid:
                 let profile = try AndroidConfigTokenCodec.parseMutualAidBundle(data)
-                try orgSettings.apply(mutualAid: profile, normalizedToken: normalized)
-                try caltopoSettings.applyImported(mutualAid: profile)
-                caltopoConfigurationHandler?(caltopoSettings.configuration)
-                state = .applied("Mutual-aid access installed for \(profile.displayName).")
+                let active = try profileLifecycle.install(
+                    profile,
+                    org: orgSettings,
+                    caltopo: caltopoSettings
+                )
+                if active {
+                    try orgSettings.apply(mutualAid: profile, normalizedToken: normalized)
+                    try caltopoSettings.applyImported(mutualAid: profile)
+                    caltopoConfigurationHandler?(caltopoSettings.configuration)
+                }
+                state = .applied(
+                    active
+                        ? "Mutual-aid access installed for \(profile.displayName)."
+                        : "Expired mutual-aid access was not activated."
+                )
                 AppleLog.info("OrgConfig", "Applied Android MA QR profile='\(profile.profileID)' map='\(profile.targetMapID)'")
             }
         } catch {
@@ -460,6 +774,7 @@ final class AppleOrgConfigImporter: ObservableObject {
             let bundle = try OrgConfigTokenCodec.parseBundle(bundleData)
             try orgSettings.apply(bundle: bundle, normalizedToken: "local-file:\(url.lastPathComponent)")
             try caltopoSettings.applyImported(credentials: bundle.credentials)
+            try profileLifecycle.captureHome(org: orgSettings, caltopo: caltopoSettings)
             caltopoConfigurationHandler?(caltopoSettings.configuration)
             if !bundle.mappings.isEmpty {
                 identityStore.applyImportedMappings(bundle.mappings)
@@ -480,6 +795,43 @@ final class AppleOrgConfigImporter: ObservableObject {
         } catch {
             state = .failed("Config file import failed: \(error.localizedDescription)")
             AppleLog.error("OrgConfig", "Local config import failed: \(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func removeExpiredProfiles(
+        caltopoSettings: AppleCaltopoSettings,
+        orgSettings: AppleOrgConfigSettings
+    ) -> Bool {
+        do {
+            let removed = try profileLifecycle.removeExpired(
+                org: orgSettings,
+                caltopo: caltopoSettings
+            )
+            if removed {
+                caltopoConfigurationHandler?(caltopoSettings.configuration)
+                state = .applied("Expired mutual-aid access removed; home organization restored.")
+            }
+            return removed
+        } catch {
+            AppleLog.error("OrgConfig", "Mutual-aid expiry cleanup failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func restoreActiveProfile(
+        caltopoSettings: AppleCaltopoSettings,
+        orgSettings: AppleOrgConfigSettings
+    ) -> Bool {
+        do {
+            return try profileLifecycle.restoreActive(
+                org: orgSettings,
+                caltopo: caltopoSettings
+            )
+        } catch {
+            AppleLog.error("OrgConfig", "Profile restoration failed: \(error.localizedDescription)")
+            return false
         }
     }
 }

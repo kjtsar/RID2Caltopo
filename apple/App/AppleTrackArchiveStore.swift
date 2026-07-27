@@ -9,6 +9,11 @@ struct AppleTrackArchiveConfiguration: Sendable {
     let identities: [String: RidAircraftIdentity]
 }
 
+struct AppleTrackArchiveClue: Sendable {
+    let record: OperationalClueRecord
+    let jpegData: Data?
+}
+
 struct AppleTrackArchiveOutcome: Sendable {
     enum TrackerResult: Sendable {
         case notConfigured
@@ -38,6 +43,14 @@ struct AppleTrackResubmitSummary: Sendable {
     }
 }
 
+struct AppleArchiveDirectoryOption: Sendable, Identifiable, Equatable {
+    var id: String { name }
+    let name: String
+    let byteCount: Int64
+    let fileCount: Int
+    let isToday: Bool
+}
+
 actor AppleTrackArchiveStore {
     enum ArchiveError: Error {
         case documentsDirectoryUnavailable
@@ -61,7 +74,8 @@ actor AppleTrackArchiveStore {
 
     func archive(
         track: RidAircraftTrack,
-        metadata: RidTrackArchiveMetadata
+        metadata: RidTrackArchiveMetadata,
+        clues: [AppleTrackArchiveClue] = []
     ) async throws -> AppleTrackArchiveOutcome {
         guard let rootURL else { throw ArchiveError.documentsDirectoryUnavailable }
         let directory = rootURL.appendingPathComponent(dayDirectoryName(), isDirectory: true)
@@ -69,6 +83,14 @@ actor AppleTrackArchiveStore {
         let destination = directory.appendingPathComponent(RidTrackGeoJSON.suggestedFilename(for: track))
         let data = try RidTrackGeoJSON.encode(track: track, metadata: metadata)
         try data.write(to: destination, options: .atomic)
+        if !clues.isEmpty {
+            try writeKMZ(
+                track: track,
+                title: metadata.mappedID.isEmpty ? track.aircraftID : metadata.mappedID,
+                clues: clues,
+                destination: destination.deletingPathExtension().appendingPathExtension("kmz")
+            )
+        }
         let result = await process(data: data, file: destination)
         return AppleTrackArchiveOutcome(url: destination, trackerResult: result)
     }
@@ -147,6 +169,77 @@ actor AppleTrackArchiveStore {
     }
 
     func archiveRootURL() -> URL? { rootURL }
+
+    func archiveDirectories(now: Date = Date()) -> [AppleArchiveDirectoryOption] {
+        guard let rootURL else { return [] }
+        let today = dayDirectoryName(for: now)
+        let directories = (try? FileManager.default.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return directories.compactMap { directory in
+            guard (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            else { return nil }
+            let enumerator = FileManager.default.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+            var bytes: Int64 = 0
+            var files = 0
+            while let child = enumerator?.nextObject() as? URL {
+                guard let values = try? child.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                      values.isRegularFile == true
+                else { continue }
+                files += 1
+                bytes += Int64(values.fileSize ?? 0)
+            }
+            return AppleArchiveDirectoryOption(
+                name: directory.lastPathComponent,
+                byteCount: bytes,
+                fileCount: files,
+                isToday: directory.lastPathComponent == today
+            )
+        }
+        .sorted { $0.name > $1.name }
+    }
+
+    func deleteArchiveDirectories(_ names: Set<String>, now: Date = Date()) -> [String] {
+        guard let rootURL else { return Array(names).sorted() }
+        let today = dayDirectoryName(for: now)
+        var failed: [String] = []
+        for name in names.sorted() {
+            guard name != today,
+                  !name.isEmpty,
+                  name != ".",
+                  name != "..",
+                  !name.contains("/"),
+                  !name.contains("\\")
+            else {
+                failed.append(name)
+                continue
+            }
+            let target = rootURL.appendingPathComponent(name, isDirectory: true)
+            guard target.deletingLastPathComponent().standardizedFileURL == rootURL.standardizedFileURL,
+                  (try? target.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            else {
+                failed.append(name)
+                continue
+            }
+            do {
+                try FileManager.default.removeItem(at: target)
+                AppleLog.info("Archive", "Deleted local archive folder name=\(name)")
+            } catch {
+                failed.append(name)
+                AppleLog.warning(
+                    "Archive",
+                    "Failed deleting archive folder name=\(name): \(error.localizedDescription)"
+                )
+            }
+        }
+        return failed
+    }
 
     private func process(data: Data, file: URL) async -> AppleTrackArchiveOutcome.TrackerResult {
         guard let configuration, configuration.tracker.isConfigured else { return .notConfigured }
@@ -253,10 +346,87 @@ actor AppleTrackArchiveStore {
     }
 
     private func dayDirectoryName() -> String {
+        dayDirectoryName(for: Date())
+    }
+
+    private func dayDirectoryName(for date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
+        return formatter.string(from: date)
+    }
+
+    private func writeKMZ(
+        track: RidAircraftTrack,
+        title: String,
+        clues: [AppleTrackArchiveClue],
+        destination: URL
+    ) throws {
+        var kml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <kml xmlns="http://www.opengis.net/kml/2.2">
+          <Document>
+            <name>\(Self.escapeXML(title))</name>
+            <Style id="trackStyle"><LineStyle><color>ffff0000</color><width>3</width></LineStyle></Style>
+            <Placemark>
+              <name>\(Self.escapeXML(title))</name>
+              <styleUrl>#trackStyle</styleUrl>
+              <LineString><tessellate>1</tessellate><coordinates>
+
+        """
+        for point in track.points {
+            kml += String(
+                format: "        %.6f,%.6f,%.1f\n",
+                point.longitude,
+                point.latitude,
+                point.altitudeMeters ?? 0
+            )
+        }
+        kml += "      </coordinates></LineString>\n    </Placemark>\n"
+        let iso = ISO8601DateFormatter()
+        for (index, clue) in clues.enumerated() {
+            let record = clue.record
+            kml += "    <Placemark>\n"
+            kml += "      <name>\(Self.escapeXML(record.title))</name>\n"
+            kml += "      <TimeStamp><when>\(iso.string(from: record.capturedAt))</when></TimeStamp>\n"
+            if clue.jpegData != nil {
+                let description = record.clueDescription.replacingOccurrences(of: "]]>", with: "]]&gt;")
+                kml += "      <description><![CDATA[\(description)<br/><img src=\"files/clue_\(index).jpg\"/>]]></description>\n"
+            } else if !record.clueDescription.isEmpty {
+                kml += "      <description>\(Self.escapeXML(record.clueDescription))</description>\n"
+            }
+            kml += String(
+                format: "      <Point><coordinates>%.6f,%.6f,%.1f</coordinates></Point>\n",
+                record.clueLongitude,
+                record.clueLatitude,
+                record.clueAltitudeMeters ?? 0
+            )
+            kml += "    </Placemark>\n"
+        }
+        kml += "  </Document>\n</kml>\n"
+        var entries = [
+            OperationalZipArchive.Entry(path: "doc.kml", data: Data(kml.utf8)),
+        ]
+        for (index, clue) in clues.enumerated() {
+            if let jpegData = clue.jpegData {
+                entries.append(.init(path: "files/clue_\(index).jpg", data: jpegData))
+            }
+        }
+        let archive = try OperationalZipArchive.encode(entries, compress: true)
+        try archive.write(to: destination, options: .atomic)
+        AppleLog.info(
+            "Archive",
+            "Wrote clue KMZ file=\(destination.lastPathComponent) clues=\(clues.count)"
+        )
+    }
+
+    private static func escapeXML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
     }
 }

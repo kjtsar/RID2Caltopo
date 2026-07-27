@@ -231,6 +231,12 @@ final class AppleConfigurationTransferManager: ObservableObject {
            Date().timeIntervalSince1970 * 1_000 >= Double(profile.expiresAtEpochMilliseconds) {
             throw TransferError.expiredPackage
         }
+        let active = try AppleCaltopoProfileLifecycle.shared.install(
+            profile,
+            org: organization,
+            caltopo: caltopo
+        )
+        guard active else { throw TransferError.expiredPackage }
         try organization.apply(mutualAid: profile, normalizedToken: "local-ma-package")
         try caltopo.applyImported(mutualAid: profile)
         var importedTiles = 0

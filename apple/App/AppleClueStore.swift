@@ -145,6 +145,27 @@ final class AppleClueStore: ObservableObject {
         root.appendingPathComponent(record.thumbnailFilename)
     }
 
+    func archiveClues(
+        aircraftID: String,
+        from start: Date,
+        through end: Date
+    ) -> [AppleTrackArchiveClue] {
+        let canonicalID = RidTrackStore.canonicalAircraftID(aircraftID)
+        return records
+            .filter {
+                RidTrackStore.canonicalAircraftID($0.aircraftID) == canonicalID
+                    && $0.capturedAt >= start
+                    && $0.capturedAt <= end
+            }
+            .sorted { $0.capturedAt < $1.capturedAt }
+            .map {
+                AppleTrackArchiveClue(
+                    record: $0,
+                    jpegData: try? Data(contentsOf: imageURL(for: $0))
+                )
+            }
+    }
+
     private func enqueueUpload(_ id: UUID) {
         guard uploadTasks[id] == nil else { return }
         guard client != nil, !teamID.isEmpty else {

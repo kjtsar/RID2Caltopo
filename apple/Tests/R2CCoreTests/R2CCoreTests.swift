@@ -986,6 +986,39 @@ private func proximityDrone(
         == "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/12/1582/657.jpg")
 }
 
+@Test func operationalMapOverzoomSelectsAndOffsetsTheLevelNineteenParent() throws {
+    let level20 = try #require(OperationalOverzoomTile.resolve(
+        requestedZoom: 20,
+        requestedX: 657,
+        requestedY: 1_582,
+        sourceMaximumZoom: 19
+    ))
+    #expect(level20.sourceZoom == 19)
+    #expect(level20.sourceX == 328)
+    #expect(level20.sourceY == 791)
+    #expect(level20.zoomDelta == 1)
+    #expect(level20.childX == 1)
+    #expect(level20.childY == 0)
+
+    let level22 = try #require(OperationalOverzoomTile.resolve(
+        requestedZoom: 22,
+        requestedX: 5_261,
+        requestedY: 12_659,
+        sourceMaximumZoom: 19
+    ))
+    #expect(level22.sourceX == 657)
+    #expect(level22.sourceY == 1_582)
+    #expect(level22.zoomDelta == 3)
+    #expect(level22.childX == 5)
+    #expect(level22.childY == 3)
+    #expect(OperationalOverzoomTile.resolve(
+        requestedZoom: 19,
+        requestedX: 657,
+        requestedY: 1_582,
+        sourceMaximumZoom: 19
+    ) == nil)
+}
+
 @Test func operationalPipSizingMatchesAndroidInsetRules() {
     #expect(OperationalPipSizing.clampInsetFraction(.nan)
         == OperationalPipSizing.defaultInsetFraction)
@@ -997,10 +1030,20 @@ private func proximityDrone(
     let landscape = OperationalPipSizing.insetSize(
         containerWidth: 1024,
         containerHeight: 768,
-        insetFraction: 0.33
+        insetFraction: 0.33,
+        aspectRatio: 1024.0 / 768.0
     )
     #expect(abs(landscape.width - 330) < 0.001)
-    #expect(abs(landscape.height - 185.625) < 0.001)
+    #expect(abs(landscape.height - 247.5) < 0.001)
+
+    let portrait = OperationalPipSizing.insetSize(
+        containerWidth: 768,
+        containerHeight: 1024,
+        insetFraction: 0.33,
+        aspectRatio: 768.0 / 1024.0
+    )
+    #expect(abs(portrait.width - 245.52) < 0.001)
+    #expect(abs(portrait.height - 327.36) < 0.001)
 
     let heightLimited = OperationalPipSizing.insetSize(
         containerWidth: 1000,
@@ -1651,6 +1694,80 @@ private func proximityDrone(
     #expect(await store.activeSnapshot(at: start.addingTimeInterval(32)).count == 1)
     #expect(await store.activeSnapshot(at: start.addingTimeInterval(34)).isEmpty)
     #expect(await store.removeInactive(at: start.addingTimeInterval(34)).map(\.aircraftID) == ["KEEPALIVE"])
+}
+
+@Test func trackStoreAppliesAndroidMinimumDistanceAndRuntimeDelaySettings() async {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = RidTrackStore(policy: .init(
+        minimumDistanceMeters: 2,
+        activeTimeout: 30
+    ))
+    _ = await store.ingest(trackObservation(
+        id: "MINIMUM",
+        at: start,
+        latitude: 39.7392,
+        longitude: -104.9903
+    ))
+    let nearby = await store.ingest(trackObservation(
+        id: "MINIMUM",
+        at: start.addingTimeInterval(5),
+        latitude: 39.73921,
+        longitude: -104.9903
+    ))
+    guard case let .signalOnly(track, reason) = nearby else {
+        Issue.record("Expected a sub-threshold waypoint to be signal-only")
+        return
+    }
+    guard case let .belowMinimumDistance(meters) = reason else {
+        Issue.record("Expected below-minimum-distance reason")
+        return
+    }
+    #expect(meters > 1)
+    #expect(meters < 2)
+    #expect(track.points.count == 1)
+
+    var updated = await store.policy
+    updated.activeTimeout = 10
+    await store.updatePolicy(updated)
+    #expect(await store.activeSnapshot(at: start.addingTimeInterval(14)).count == 1)
+    #expect(await store.activeSnapshot(at: start.addingTimeInterval(16)).isEmpty)
+}
+
+@Test func trackStoreMatchesAndroidRemoteLossGraceMultiplier() async {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = RidTrackStore(policy: .init(
+        minimumDistanceMeters: 0,
+        activeTimeout: 30
+    ))
+    _ = await store.ingest(trackObservation(
+        id: "REMOTE",
+        at: start,
+        latitude: 39.7392,
+        longitude: -104.9903
+    ))
+    _ = await store.ingest(trackObservation(
+        id: "REMOTE",
+        at: start.addingTimeInterval(10),
+        latitude: 39.7400,
+        longitude: -104.9903
+    ))
+    #expect(await store.activeSnapshot(at: start.addingTimeInterval(150)).count == 1)
+    #expect(await store.activeSnapshot(at: start.addingTimeInterval(161)).isEmpty)
+}
+
+@Test func trafficSeparationReturnsEveryPairInDistanceOrder() {
+    let positions = [
+        RidTrafficPosition(aircraftID: "A", latitude: 39, longitude: -105, altitudeMeters: 100),
+        RidTrafficPosition(aircraftID: "B", latitude: 39, longitude: -104.999, altitudeMeters: 110),
+        RidTrafficPosition(aircraftID: "C", latitude: 39, longitude: -104.997, altitudeMeters: 130),
+    ]
+    let pairs = RidTrafficSeparation.allPairs(in: positions)
+    #expect(pairs.count == 3)
+    #expect(pairs[0].firstAircraftID == "A")
+    #expect(pairs[0].secondAircraftID == "B")
+    #expect(pairs[0].verticalMeters == 10)
+    #expect(pairs[2].firstAircraftID == "A")
+    #expect(pairs[2].secondAircraftID == "C")
 }
 
 @Test func trackGeoJsonMatchesAndroidArchiveEnvelope() async throws {
@@ -2314,6 +2431,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
         "op_period": "2",
         "target_map_id": "map-42",
         "expires_at_epoch_ms": 1_900_000_000_000 as Int64,
+        "quiet_remove_on_expiry": false,
     ]
     let profileJSON = String(decoding: try JSONSerialization.data(withJSONObject: profile), as: UTF8.self)
     let maRoot: [String: Any] = [
@@ -2324,6 +2442,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     let mutualAid = try AndroidConfigTokenCodec.parseMutualAidBundle(JSONSerialization.data(withJSONObject: maRoot))
     #expect(mutualAid.profileID == "profile-1")
     #expect(mutualAid.targetMapID == "map-42")
+    #expect(mutualAid.quietRemoveOnExpiry == false)
 }
 
 @Test func trackerCoordinationWireMatchesAndroidContract() throws {

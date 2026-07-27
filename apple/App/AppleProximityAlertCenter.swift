@@ -3,11 +3,24 @@ import R2CCore
 import SwiftUI
 import UIKit
 
+struct AppleProximityPair: Identifiable, Equatable {
+    var id: String { [firstRemoteID, secondRemoteID].sorted().joined(separator: "|") }
+    let firstRemoteID: String
+    let secondRemoteID: String
+    let firstMappedID: String
+    let secondMappedID: String
+    let horizontalFeet: Double
+    let verticalFeet: Double?
+    let threeDimensionalFeet: Double?
+    let alerting: Bool
+}
+
 @MainActor
 final class AppleProximityAlertCenter: ObservableObject {
     @Published private(set) var activeAlert: RidProximityAlertState?
     @Published private(set) var suspendedAlert: RidProximityAlertState?
     @Published private(set) var canResume = false
+    @Published private(set) var pairs: [AppleProximityPair] = []
 
     private var engine = RidProximityAlertEngine()
     private var lastAnnouncementByPair: [String: Date] = [:]
@@ -44,15 +57,35 @@ final class AppleProximityAlertCenter: ObservableObject {
                 localAlertEligible: alertEligibility(track.aircraftID)
             )
         }
-        apply(
-            engine.update(
+        let output = engine.update(
                 drones: drones,
                 thresholdFeet: Double(thresholdFeet),
                 predictiveEnabled: predictiveEnabled,
                 now: now
-            ),
-            now: now
-        )
+            )
+        let mappedByRemoteID = Dictionary(uniqueKeysWithValues: drones.map { ($0.remoteID, $0.mappedID) })
+        let positions = drones.filter(\.teamDrone).map {
+            RidTrafficPosition(
+                aircraftID: $0.remoteID,
+                latitude: $0.latitude,
+                longitude: $0.longitude,
+                altitudeMeters: $0.altitudeMeters
+            )
+        }
+        pairs = RidTrafficSeparation.allPairs(in: positions).map { pair in
+            let pairKey = [pair.firstAircraftID, pair.secondAircraftID].sorted().joined(separator: "|")
+            return AppleProximityPair(
+                firstRemoteID: pair.firstAircraftID,
+                secondRemoteID: pair.secondAircraftID,
+                firstMappedID: mappedByRemoteID[pair.firstAircraftID] ?? pair.firstAircraftID,
+                secondMappedID: mappedByRemoteID[pair.secondAircraftID] ?? pair.secondAircraftID,
+                horizontalFeet: pair.horizontalMeters / 0.3048,
+                verticalFeet: pair.verticalMeters.map { $0 / 0.3048 },
+                threeDimensionalFeet: pair.threeDimensionalMeters.map { $0 / 0.3048 },
+                alerting: output.activeAlert?.pairKey == pairKey
+            )
+        }
+        apply(output, now: now)
     }
 
     func suspend() {

@@ -9,6 +9,7 @@ import org.junit.Before
 import org.junit.Test
 import android.location.Location
 import java.lang.reflect.Field
+import java.lang.reflect.Method
 
 class CaltopoMapTest {
 
@@ -28,6 +29,7 @@ class CaltopoMapTest {
     private lateinit var clientStateField: Field
     private lateinit var lastWaypointTimestampField: Field
     private lateinit var appExitRequestedField: Field
+    private lateinit var setMapStatusMethod: Method
 
     private lateinit var originalMapStatus: CaltopoMap.MapStatusListener.mapStatus
     private var originalMapNode: Any? = null
@@ -68,6 +70,11 @@ class CaltopoMapTest {
         clientStateField = CaltopoClient::class.java.getDeclaredField("Ccstate").apply { isAccessible = true }
         lastWaypointTimestampField = CtDroneSpec::class.java.getDeclaredField("MostRecentWaypointTimestampInMsec").apply { isAccessible = true }
         appExitRequestedField = CaltopoClient::class.java.getDeclaredField("AppExitRequested").apply { isAccessible = true }
+        setMapStatusMethod = CaltopoMap::class.java.getDeclaredMethod(
+            "SetMapStatus",
+            CaltopoMap.MapStatusListener.mapStatus::class.java,
+            String::class.java
+        ).apply { isAccessible = true }
 
         originalMapStatus = mapStatusField.get(null) as CaltopoMap.MapStatusListener.mapStatus
         originalMapNode = mapNodeField.get(null)
@@ -137,6 +144,16 @@ class CaltopoMapTest {
         assertEquals(1, fixture.calTopoSessionGateway.countOperations("deleteMarker"))
         val deleteIndex = operations.indexOfFirst { it.kind == "deleteMarker" }
         assertTrue(operations.toString(), deleteIndex >= 0)
+    }
+
+    @Test
+    fun connectedMap_peerCoordinationUsesStableMapIdInsteadOfDisplayTitle() {
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.connecting)
+
+        setMapStatusMethod.invoke(null, CaltopoMap.MapStatusListener.mapStatus.up, null)
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertEquals("map-test", peerCoordinator.startedMapId)
     }
 
     @Test

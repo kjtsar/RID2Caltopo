@@ -1123,7 +1123,7 @@ public class CaltopoMap {
                             !CaltopoClient.GetTrackerApiKey().isEmpty() &&
                                     !CaltopoClient.GetTrackerUrlPfx().isEmpty()));
                     getCurrentRuntime().getPeerCoordinator().start(
-                            MapNode.getTitle(), GetMyUUID(), R2CActivity.MyDeviceName, null);
+                            MapNode.getId(), GetMyUUID(), R2CActivity.MyDeviceName, null);
                     getCurrentRuntime().getPeerCoordinator()
                             .setCoordinationIndicatorListener(CaltopoMap::onCoordinationIndicatorStateChanged);
                     getCurrentRuntime().getPeerCoordinator().updateMyPosition(

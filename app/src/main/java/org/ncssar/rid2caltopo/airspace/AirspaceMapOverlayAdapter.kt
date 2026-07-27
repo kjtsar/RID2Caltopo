@@ -19,7 +19,7 @@ internal object AirspaceMapOverlayAdapter {
             val stroke = if (record.ceilingFeet == 0) Color.RED else Color.rgb(245, 124, 0)
             val alpha = if (record.ceilingFeet == 0) 0x38 else 0x20
             val fill = Color.argb(alpha, Color.red(stroke), Color.green(stroke), Color.blue(stroke))
-            val ceiling = record.ceilingFeet?.let { "$it ${record.unit.lowercase()}" } ?: "ceiling not published"
+            val gridLimit = record.ceilingFeet?.let { "FAA grid limit: $it ft AGL" } ?: "FAA grid limit not published"
             record.rings.forEachIndexed { index, ring ->
                 val points = ring.map { GeoPoint(it.latitude, it.longitude) }
                 if (points.size >= 3) {
@@ -30,7 +30,7 @@ internal object AirspaceMapOverlayAdapter {
                             strokeColor = stroke,
                             fillColor = fill,
                             strokeWidth = if (record.ceilingFeet == 0) 4f else 2f,
-                            title = "${record.primaryAirportName}: $ceiling"
+                            title = "${record.primaryAirportName}: $gridLimit"
                         )
                     )
                 }

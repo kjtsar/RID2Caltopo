@@ -51,7 +51,6 @@ public struct LiveVideoLagEstimator: Sendable {
 
     public static func label(milliseconds: Int64?) -> String {
         guard let milliseconds else { return "Starting" }
-        if milliseconds >= 5_000 { return "Stalled" }
         if milliseconds < 1_000 { return "lag:\(milliseconds)ms" }
         return String(format: "lag:%.1fs", Double(milliseconds) / 1_000)
     }

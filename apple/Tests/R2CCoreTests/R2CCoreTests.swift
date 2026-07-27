@@ -451,8 +451,44 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(records[0].rings[0][0] == .init(latitude: 39.7, longitude: -105.0))
     let state = OperationalFacilityMap.state(records: records, loading: false, errorMessage: nil)
     #expect(state.severity == .caution)
-    #expect(state.chipLabel.contains("LAANC required"))
-    #expect(state.chipLabel.contains("up to 200 ft"))
+    #expect(state.chipLabel.contains("Authorization required"))
+    #expect(state.chipLabel.contains("FAA grid limit 200 ft AGL"))
+    #expect(state.detail.contains("not the top of the controlled-airspace class"))
+}
+
+@Test func operationalFacilityMapUsesLowestGridLimitRegardlessOfResponseOrder() {
+    func record(objectID: Int64, ceilingFeet: Int) -> OperationalFacilityMapRecord {
+        .init(
+            objectID: objectID,
+            ceilingFeet: ceilingFeet,
+            unit: "FEET",
+            primaryAirportFAAID: "TRK",
+            primaryAirportICAO: "KTRK",
+            primaryAirportName: "Truckee Tahoe Airport",
+            laancAvailable: true,
+            airspaceClasses: ["D"]
+        )
+    }
+
+    let oneHundred = record(objectID: 2, ceilingFeet: 100)
+    let twoHundred = record(objectID: 1, ceilingFeet: 200)
+    let forward = OperationalFacilityMap.state(
+        records: [twoHundred, oneHundred],
+        loading: false,
+        errorMessage: nil
+    )
+    let reverse = OperationalFacilityMap.state(
+        records: [oneHundred, twoHundred],
+        loading: false,
+        errorMessage: nil
+    )
+
+    #expect(forward.chipLabel == reverse.chipLabel)
+    #expect(
+        forward.chipLabel
+            == "Airspace: Authorization required - Truckee Tahoe Airport Class D; FAA grid limit 100 ft AGL"
+    )
+    #expect(forward.detail.contains("lowest FAA UAS Facility Map limit"))
 }
 
 @Test func operationalFacilityMapPreservesAndroidClearAndFailureStates() throws {
@@ -1883,6 +1919,34 @@ private func proximityDrone(
     #expect(coordinates == [-116.202, 43.615])
 }
 
+@Test func caltopoDeviceMarkerDeleteMatchesAndroidDisconnectContract() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        domainAndPort: "caltopo.com",
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let request = try await client.makeDeleteMarkerRequest(
+        markerID: " 28ADC36D-1111-2222-3333-444444444444 ",
+        now: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+
+    #expect(request.httpMethod == "DELETE")
+    #expect(
+        request.url?.path
+            == "/api/v1/map/map123/Marker/28adc36d-1111-2222-3333-444444444444"
+    )
+    let requestURL = try #require(request.url)
+    let components = try #require(
+        URLComponents(url: requestURL, resolvingAgainstBaseURL: false)
+    )
+    let queryItems = components.queryItems ?? []
+    #expect(queryItems.contains { $0.name == "id" && $0.value == "credential" })
+    #expect(queryItems.contains { $0.name == "expires" && $0.value == "1700000120000" })
+    #expect(queryItems.contains { $0.name == "signature" && !($0.value ?? "").isEmpty })
+    #expect(request.httpBody == nil)
+}
+
 @Test func caltopoPhotoClueMatchesAndroidFourRequestContract() async throws {
     let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
         domainAndPort: "caltopo.com",
@@ -1899,7 +1963,8 @@ private func proximityDrone(
         description: "Visible subject",
         createdMilliseconds: 1_700_000_000_000,
         jpegData: Data([0xff, 0xd8, 0xff, 0xd9]),
-        teamID: "team-1"
+        teamID: "team-1",
+        folderID: "drone-folder"
     )
     let requests = try await client.makePhotoClueRequests(
         clue,
@@ -1923,8 +1988,27 @@ private func proximityDrone(
     let markerJSON = try #require(markerFields["json"]?.data(using: .utf8))
     let marker = try #require(JSONSerialization.jsonObject(with: markerJSON) as? [String: Any])
     let markerProperties = try #require(marker["properties"] as? [String: Any])
+    let markerGeometry = try #require(marker["geometry"] as? [String: Any])
+    #expect(marker["id"] as? String == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    #expect(marker["type"] as? String == "Feature")
+    #expect(markerGeometry["type"] as? String == "Point")
+    #expect(markerGeometry["coordinates"] as? [Double] == [-105.2, 39.1])
     #expect(markerProperties["class"] as? String == "Marker")
+    #expect(markerProperties["updated"] as? Int64 == 1_700_000_001_000)
+    #expect(markerProperties["title"] as? String == "Clue One")
     #expect(markerProperties["marker-symbol"] as? String == "Drone")
+    #expect(markerProperties["marker-color"] as? String == "#FF0000")
+    #expect(markerProperties["marker-size"] as? String == "1")
+    #expect(markerProperties["marker-visibility"] as? String == "visible")
+    #expect(markerProperties["folderId"] as? String == "drone-folder")
+    #expect(markerProperties["created"] as? Int64 == 1_700_000_000_000)
+    #expect(markerProperties["description"] as? String == "Visible subject")
+
+    let mediaFields = decodeFormBody(try #require(requests[1].httpBody))
+    let mediaJSON = try #require(mediaFields["json"]?.data(using: .utf8))
+    let media = try #require(JSONSerialization.jsonObject(with: mediaJSON) as? [String: Any])
+    let mediaProperties = try #require(media["properties"] as? [String: Any])
+    #expect(mediaProperties["creator"] as? String == "team-1")
 
     let dataFields = decodeFormBody(try #require(requests[2].httpBody))
     let dataJSON = try #require(dataFields["json"]?.data(using: .utf8))
@@ -1936,8 +2020,19 @@ private func proximityDrone(
     let linkJSON = try #require(linkFields["json"]?.data(using: .utf8))
     let link = try #require(JSONSerialization.jsonObject(with: linkJSON) as? [String: Any])
     let linkProperties = try #require(link["properties"] as? [String: Any])
+    let linkGeometry = try #require(link["geometry"] as? [String: Any])
+    #expect(link["type"] as? String == "Feature")
+    #expect(linkGeometry["type"] as? String == "Point")
+    #expect(linkGeometry["coordinates"] as? [Double] == [-105.2, 39.1])
+    #expect(linkProperties["class"] as? String == "MapMediaObject")
+    #expect(linkProperties["title"] as? String == "Clue One")
+    #expect(linkProperties["description"] as? String == "Visible subject")
     #expect(linkProperties["parentId"] as? String == "Marker:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
     #expect(linkProperties["backendMediaId"] as? String == "11111111-2222-3333-4444-555555555555")
+    #expect(linkProperties["heading"] is NSNull)
+    #expect(linkProperties["marker-symbol"] as? String == "aperture")
+    #expect(linkProperties["marker-color"] as? String == "#FF00FF")
+    #expect(linkProperties["marker-size"] as? Int == 1)
 }
 
 @Test func mediaServerEventDecoderPreservesPublisherIdentity() throws {
@@ -2471,7 +2566,7 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
     #expect(LiveVideoLagEstimator.label(milliseconds: nil) == "Starting")
     #expect(LiveVideoLagEstimator.label(milliseconds: 700) == "lag:700ms")
     #expect(LiveVideoLagEstimator.label(milliseconds: 2_250) == "lag:2.2s")
-    #expect(LiveVideoLagEstimator.label(milliseconds: 5_000) == "Stalled")
+    #expect(LiveVideoLagEstimator.label(milliseconds: 5_000) == "lag:5.0s")
 }
 
 @Test func liveVideoSessionLagIncludesDelayBeforeFirstDecodedFrame() {

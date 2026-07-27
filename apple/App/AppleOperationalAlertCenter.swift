@@ -1,4 +1,3 @@
-import AVFoundation
 import CoreLocation
 import R2CCore
 import SwiftUI
@@ -27,7 +26,6 @@ final class AppleOperationalAlertCenter: ObservableObject {
     @Published private(set) var mutedSignalFlights: Set<String> = []
     @Published private(set) var mutedAltitudeFlights: Set<String> = []
 
-    private let speech = AVSpeechSynthesizer()
     private var exceededBridge: Set<String> = []
     private var lastSpoken: [String: Date] = [:]
 
@@ -147,9 +145,7 @@ final class AppleOperationalAlertCenter: ObservableObject {
 
     private func speak(_ text: String) {
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-        speech.speak(utterance)
+        AppleSpokenWarningCenter.shared.speak(text)
     }
 
     private static func distanceFeet(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) -> Double? {

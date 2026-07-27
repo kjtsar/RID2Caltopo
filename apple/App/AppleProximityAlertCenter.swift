@@ -1,4 +1,3 @@
-import AVFoundation
 import CoreLocation
 import R2CCore
 import SwiftUI
@@ -11,7 +10,6 @@ final class AppleProximityAlertCenter: ObservableObject {
     @Published private(set) var canResume = false
 
     private var engine = RidProximityAlertEngine()
-    private let speech = AVSpeechSynthesizer()
     private var lastAnnouncementByPair: [String: Date] = [:]
 
     func update(
@@ -85,9 +83,7 @@ final class AppleProximityAlertCenter: ObservableObject {
         guard now.timeIntervalSince(last) >= 30 else { return }
         lastAnnouncementByPair[alert.pairKey] = now
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
-        let utterance = AVSpeechUtterance(string: "Proximity warning")
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-        speech.speak(utterance)
+        AppleSpokenWarningCenter.shared.speak("Proximity warning")
         AppleLog.info(
             "ProximityAlert",
             "Alert pair=\(alert.pairKey) horizontalFt=\(Int(alert.horizontalSeparationFeet.rounded())) verticalFt=\(Int(alert.verticalSeparationFeet.rounded())) currentHorizontalFt=\(Int(alert.currentHorizontalSeparationFeet.rounded())) currentVerticalFt=\(Int(alert.currentVerticalSeparationFeet.rounded())) projected=\(alert.usesProjection) thresholdFt=\(Int(alert.thresholdFeet.rounded()))"

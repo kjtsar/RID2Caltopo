@@ -239,6 +239,13 @@ public actor CaltopoLiveClient {
         _ = try await perform(makeDeviceMarkerRequest(marker, folderID: folderID, now: now))
     }
 
+    public func deleteMarker(markerID: String, now: Date = Date()) async throws {
+        _ = try await perform(
+            makeDeleteMarkerRequest(markerID: markerID, now: now),
+            acceptedStatusCodes: [400, 404]
+        )
+    }
+
     func makeDeviceMarkerRequest(
         _ marker: CaltopoDeviceMarker,
         folderID: String?,
@@ -282,6 +289,33 @@ public actor CaltopoLiveClient {
         )
     }
 
+    func makeDeleteMarkerRequest(markerID: String, now: Date) throws -> URLRequest {
+        let normalizedID = markerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedID.isEmpty else { throw CaltopoLiveClientError.invalidConfiguration }
+        let path = "/api/v1/map/\(configuration.mapID)/Marker/\(normalizedID)"
+        let expires = Int64(now.timeIntervalSince1970 * 1_000)
+            + CaltopoRequestSigner.validityMilliseconds
+        let signature = try CaltopoRequestSigner.signature(
+            method: "DELETE",
+            path: path,
+            expiresMilliseconds: expires,
+            payload: "",
+            credentialSecretBase64: configuration.credentialSecretBase64
+        )
+        guard var components = URLComponents(url: httpsURL(path: path)!, resolvingAgainstBaseURL: false)
+        else { throw CaltopoLiveClientError.invalidURL }
+        components.percentEncodedQuery = CaltopoRequestSigner.percentEncodedQuery([
+            ("id", configuration.credentialID),
+            ("expires", String(expires)),
+            ("signature", signature),
+        ])
+        guard let url = components.url else { throw CaltopoLiveClientError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("RID2Caltopo/Apple", forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
     func makePhotoClueRequests(_ clue: CaltopoPhotoClue, now: Date) throws -> [URLRequest] {
         guard !clue.teamID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               clue.latitude.isFinite, clue.longitude.isFinite,
@@ -291,23 +325,32 @@ public actor CaltopoLiveClient {
         let markerID = clue.markerID.uuidString.lowercased()
         let mediaID = clue.mediaID.uuidString.lowercased()
         let markerPath = "/api/v1/map/\(configuration.mapID)/Marker/\(markerID)"
+        var markerProperties: [String: Any] = [
+            "class": "Marker",
+            "updated": Int64(now.timeIntervalSince1970 * 1_000),
+            "created": clue.createdMilliseconds,
+            "title": clue.title,
+            "description": clue.description,
+            "marker-color": "#FF0000",
+            "marker-symbol": "Drone",
+            "marker-size": "1",
+            "marker-visibility": "visible",
+        ]
+        if let folderID = clue.folderID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !folderID.isEmpty {
+            markerProperties["folderId"] = folderID
+        }
         let markerPayload: [String: Any] = [
+            // Android AddMarker() sends the UUID in both the endpoint and the
+            // Feature payload. CalTopo uses the payload id as the parent
+            // identity resolved by MapMediaObject.parentId.
+            "id": markerID,
             "type": "Feature",
             "geometry": [
                 "type": "Point",
                 "coordinates": [clue.longitude, clue.latitude],
             ],
-            "properties": [
-                "class": "Marker",
-                "updated": Int64(now.timeIntervalSince1970 * 1_000),
-                "created": clue.createdMilliseconds,
-                "title": clue.title,
-                "description": clue.description,
-                "marker-color": "#FF0000",
-                "marker-symbol": "Drone",
-                "marker-size": "1",
-                "marker-visibility": "visible",
-            ],
+            "properties": markerProperties,
         ]
         let mediaPath = "/api/v1/media/\(mediaID)"
         let mediaPayload: [String: Any] = ["properties": ["creator": clue.teamID]]

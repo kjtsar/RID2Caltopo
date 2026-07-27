@@ -95,7 +95,7 @@ struct ContentView: View {
             .navigationDestination(isPresented: $showCaltopoSettings) {
                 CaltopoSettingsView(settings: caltopoSettings, orgSettings: orgConfigSettings) { configuration in
                     ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
-                    clueStore.configure(configuration)
+                    clueStore.configure(configuration, trackFolderName: orgConfigSettings.trackFolder)
                 }
             }
             .navigationDestination(isPresented: $showConfigurationTransfer) {
@@ -185,7 +185,10 @@ struct ContentView: View {
                     caltopoSettings.configuration,
                     trackFolderName: orgConfigSettings.trackFolder
                 )
-                clueStore.configure(caltopoSettings.configuration)
+                clueStore.configure(
+                    caltopoSettings.configuration,
+                    trackFolderName: orgConfigSettings.trackFolder
+                )
                 if !caltopoSettings.mapID.isEmpty, caltopoSettings.mapTitle.isEmpty {
                     await caltopoSettings.loadTeamMaps()
                     if !caltopoSettings.mapTitle.isEmpty {
@@ -194,7 +197,7 @@ struct ContentView: View {
                 }
                 orgConfigImporter.caltopoConfigurationHandler = { configuration in
                     ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
-                    clueStore.configure(configuration)
+                    clueStore.configure(configuration, trackFolderName: orgConfigSettings.trackFolder)
                 }
                 ridTracks.configurePeerCoordination(
                     peerCoordinator,
@@ -388,10 +391,19 @@ struct ContentView: View {
             }
             .onChange(of: scenePhase) { _, phase in
                 updateIdleTimerPolicy(for: phase)
-                guard phase == .active else { return }
-                refreshControllerRTMPURL()
-                mediaMTX.ensureHealthy(captureStreams: captureStreams)
-                Task { await refreshControllerWiFiSSID() }
+                switch phase {
+                case .active:
+                    refreshControllerRTMPURL()
+                    mediaMTX.ensureHealthy(captureStreams: captureStreams)
+                    Task { await ridTracks.setLocalDeviceMarkerPublishingEnabled(true) }
+                    Task { await refreshControllerWiFiSSID() }
+                case .background:
+                    removeLocalDeviceMarkerInBackground()
+                case .inactive:
+                    break
+                @unknown default:
+                    break
+                }
             }
             .onChange(of: showTrackMap) { _, showing in
                 updateIdleTimerPolicy(for: scenePhase)
@@ -913,7 +925,7 @@ struct ContentView: View {
             NavigationLink {
                 CaltopoSettingsView(settings: caltopoSettings, orgSettings: orgConfigSettings) { configuration in
                     ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
-                    clueStore.configure(configuration)
+                    clueStore.configure(configuration, trackFolderName: orgConfigSettings.trackFolder)
                 }
             } label: { LabeledContent("CalTopo publishing", value: ridTracks.caltopoStatus) }
             NavigationLink { DiagnosticLogView(diagnostics: diagnostics) } label: {
@@ -1052,7 +1064,7 @@ struct ContentView: View {
             configuration,
             trackFolderName: orgConfigSettings.trackFolder
         )
-        clueStore.configure(configuration)
+        clueStore.configure(configuration, trackFolderName: orgConfigSettings.trackFolder)
         configurePeerCoordinator()
         configureTrackArchive()
     }
@@ -1144,6 +1156,19 @@ struct ContentView: View {
             ),
             force: force
         )
+    }
+
+    private func removeLocalDeviceMarkerInBackground() {
+        let taskID = UIApplication.shared.beginBackgroundTask(
+            withName: "Remove CalTopo device marker",
+            expirationHandler: nil
+        )
+        Task {
+            await ridTracks.setLocalDeviceMarkerPublishingEnabled(false)
+            if taskID != .invalid {
+                UIApplication.shared.endBackgroundTask(taskID)
+            }
+        }
     }
 
     private func configureTrackArchive() {

@@ -30,6 +30,9 @@ final class AppleClueStore: ObservableObject {
     private let indexURL: URL
     private var client: CaltopoLiveClient?
     private var teamID = ""
+    private var trackFolderName = "Drone Tracks"
+    private var trackFolderID: String?
+    private var folderResolver = CaltopoTrackFolderResolver()
     private var uploadTasks: [UUID: Task<Void, Never>] = [:]
 
     init(fileManager: FileManager = .default) {
@@ -44,10 +47,18 @@ final class AppleClueStore: ObservableObject {
         uploadTasks.values.forEach { $0.cancel() }
     }
 
-    func configure(_ configuration: AppleCaltopoConfiguration) {
+    func configure(
+        _ configuration: AppleCaltopoConfiguration,
+        trackFolderName: String = "Drone Tracks"
+    ) {
         uploadTasks.values.forEach { $0.cancel() }
         uploadTasks.removeAll()
         teamID = configuration.teamID
+        self.trackFolderName = trackFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Drone Tracks"
+            : trackFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        trackFolderID = nil
+        folderResolver = CaltopoTrackFolderResolver()
         guard let live = configuration.liveConfiguration, !teamID.isEmpty else {
             client = nil
             status = records.isEmpty ? "No local clues" : "\(records.count) local clues; CalTopo upload not configured"
@@ -162,6 +173,7 @@ final class AppleClueStore: ObservableObject {
                 try? self.persistIndex()
                 self.updateStatus()
                 do {
+                    let folderID = try await self.resolveTrackFolder(using: client)
                     let markerID = try await client.publishPhotoClue(CaltopoPhotoClue(
                         markerID: id,
                         mediaID: record.caltopoMediaID,
@@ -171,7 +183,8 @@ final class AppleClueStore: ObservableObject {
                         description: record.clueDescription,
                         createdMilliseconds: Int64(record.capturedAt.timeIntervalSince1970 * 1_000),
                         jpegData: jpeg,
-                        teamID: self.teamID
+                        teamID: self.teamID,
+                        folderID: folderID
                     ))
                     self.mutate(id) { value in
                         value.uploadState = .published
@@ -200,6 +213,34 @@ final class AppleClueStore: ObservableObject {
             }
             self.uploadTasks.removeValue(forKey: id)
         }
+    }
+
+    private func resolveTrackFolder(using client: CaltopoLiveClient) async throws -> String {
+        if let trackFolderID { return trackFolderID }
+        let folderName = trackFolderName
+        let resolved = try await folderResolver.resolve(
+            trackFolderName: folderName,
+            settleDelay: .milliseconds(500),
+            fetchSnapshot: {
+                try await client.fetchMapArtifacts()
+            },
+            createFolder: { title, visible, labelVisible in
+                try await client.createFolder(
+                    title: title,
+                    visible: visible,
+                    labelVisible: labelVisible
+                )
+            },
+            deleteFolder: { folderID in
+                try await client.deleteFolder(folderID: folderID)
+                AppleLog.info(
+                    "Clue",
+                    "Removed empty duplicate clue folder id=\(folderID)"
+                )
+            }
+        )
+        trackFolderID = resolved.active
+        return resolved.active
     }
 
     private func mutate(_ id: UUID, _ body: (inout OperationalClueRecord) -> Void) {

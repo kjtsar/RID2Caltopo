@@ -119,7 +119,7 @@ struct AppleAirspacePanel: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(record.primaryAirportName.isEmpty ? "Controlled airspace" : record.primaryAirportName).fontWeight(.semibold)
                             Text(record.airspaceClasses.map { "Class \($0)" }.joined(separator: ", "))
-                            LabeledContent("Ceiling", value: record.ceilingFeet.map { "\($0) \(record.unit.lowercased())" } ?? "Not published")
+                            LabeledContent("FAA grid limit", value: record.ceilingFeet.map { "\($0) ft AGL" } ?? "Not published")
                             LabeledContent("LAANC", value: record.laancAvailable ? "Available—authorization required" : "Unavailable—authorization required")
                             if !record.primaryAirportFAAID.isEmpty { LabeledContent("Airport", value: record.primaryAirportFAAID) }
                         }

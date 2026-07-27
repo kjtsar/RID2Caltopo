@@ -1914,7 +1914,10 @@ private struct OperationalMKMapView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ map: MKMapView, coordinator: Coordinator) {
-        coordinator.persistViewport(from: map, includeScale: false)
+        // Region changes are persisted by the delegate while the view is live.
+        // Writing the SwiftUI binding from dismantleUIView re-enters the same
+        // StoredLocation that SwiftUI is destroying and triggers an exclusivity
+        // trap when the operator navigates back from Live View.
         (map as? ScalePreservingMKMapView)?.onBoundsLayout = nil
         map.delegate = nil
     }
@@ -3215,9 +3218,7 @@ private final class ArtifactAnnotationView: MKAnnotationView {
         case "clue": return (nil, "?")
         case "heatsource": return (nil, "×")
         case "fire-hotspot": return (nil, "⊙")
-        default:
-            let compact = raw.filter(\.isLetter).uppercased()
-            return (nil, compact.isEmpty ? "?" : String(compact.prefix(2)))
+        default: return ("mappin.circle.fill", nil)
         }
     }
 }

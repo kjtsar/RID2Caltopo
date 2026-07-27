@@ -26,6 +26,7 @@ actor AppleCaltopoPublisher {
     private var configurationGeneration = 0
     private var configuredConfiguration: AppleCaltopoConfiguration?
     private var lastDeviceMarkerPublishedAt: Date?
+    private var publishedDeviceMarkerID: String?
 
     init() {
         let pair = AsyncStream<AppleCaltopoPublisherEvent>.makeStream(bufferingPolicy: .bufferingNewest(128))
@@ -53,6 +54,7 @@ actor AppleCaltopoPublisher {
             return
         }
 
+        await removeDeviceMarker()
         configurationGeneration += 1
         await folderResolver.reset()
         folderResolver = CaltopoTrackFolderResolver()
@@ -83,15 +85,21 @@ actor AppleCaltopoPublisher {
 
     func publishDeviceMarker(_ marker: CaltopoDeviceMarker, force: Bool = false) async {
         guard let client else { return }
+        let generation = configurationGeneration
         let now = Date()
-        if let lastDeviceMarkerPublishedAt,
+        if !force, let lastDeviceMarkerPublishedAt,
            now.timeIntervalSince(lastDeviceMarkerPublishedAt) < 30 {
             return
         }
         do {
             try await ensureFolders(client: client)
             try await client.publishDeviceMarker(marker, folderID: trackFolderID, now: now)
+            guard generation == configurationGeneration else {
+                try? await client.deleteMarker(markerID: marker.id)
+                return
+            }
             lastDeviceMarkerPublishedAt = now
+            publishedDeviceMarkerID = marker.id
             AppleLog.info(
                 "CalTopo",
                 "Published local device marker id=\(marker.id) folder='\(trackFolderName)'"
@@ -99,6 +107,25 @@ actor AppleCaltopoPublisher {
         } catch {
             continuation.yield(.failed("Device marker: \(error.localizedDescription)"))
         }
+    }
+
+    func removeDeviceMarker() async {
+        guard let client, let markerID = publishedDeviceMarkerID else {
+            publishedDeviceMarkerID = nil
+            lastDeviceMarkerPublishedAt = nil
+            return
+        }
+        do {
+            try await client.deleteMarker(markerID: markerID)
+            AppleLog.info("CalTopo", "Removed local device marker id=\(markerID)")
+        } catch {
+            AppleLog.warning(
+                "CalTopo",
+                "Could not remove local device marker id=\(markerID): \(error.localizedDescription)"
+            )
+        }
+        publishedDeviceMarkerID = nil
+        lastDeviceMarkerPublishedAt = nil
     }
 
     func publish(track: RidAircraftTrack) async {

@@ -35,7 +35,7 @@ class AirspaceMapOverlayAdapterTest {
         assertEquals(1, overlays.size)
         assertEquals(4, overlays.single().points.size)
         assertTrue(overlays.single().title.contains("Boise Air Trml/Gowen Fld"))
-        assertTrue(overlays.single().title.contains("200 feet"))
+        assertTrue(overlays.single().title.contains("FAA grid limit: 200 ft AGL"))
     }
 
     @Test

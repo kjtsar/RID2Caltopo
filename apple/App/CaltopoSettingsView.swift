@@ -9,6 +9,7 @@ struct CaltopoSettingsView: View {
     @ObservedObject private var airspace = AppleAirspaceCenter.shared
     @ObservedObject private var landRestrictions = AppleLandRestrictionCenter.shared
     @ObservedObject private var externalDisplay = AppleExternalDisplaySettings.shared
+    @ObservedObject private var spokenWarnings = AppleSpokenWarningCenter.shared
     @AppStorage("video.captureStreams") private var captureStreams = false
     @AppStorage(AppleDeviceIdentity.storedNameKey) private var deviceName = AppleDeviceIdentity.displayName
     @State private var showingTeamMaps = false
@@ -87,6 +88,21 @@ struct CaltopoSettingsView: View {
                 Text("Predictive Head projects the latest aircraft motion forward by up to two seconds, matching Android. The spacing threshold comes from the imported organization configuration.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                VStack(alignment: .leading) {
+                    Text("Audio Alarm Volume: \(spokenWarnings.volumePercent)%")
+                    Slider(
+                        value: Binding(
+                            get: { Double(spokenWarnings.volumePercent) },
+                            set: { spokenWarnings.setVolumePercent(Int($0.rounded())) }
+                        ),
+                        in: 0 ... 100,
+                        step: 5
+                    )
+                    Button("Audio Alarm Test") {
+                        spokenWarnings.requestAudioAlarmTest()
+                    }
+                    .frame(maxWidth: .infinity)
+                }
             }
             Section("NOTAM / TFR") {
                 Toggle("Enable FAA controlled-airspace lookup", isOn: $airspace.enabled)

@@ -243,15 +243,11 @@ final class AppleTrackerCoordinator: ObservableObject {
         self.session = session
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
+        request.setValue("RID2Caltopo/coordination", forHTTPHeaderField: "User-Agent")
         request.setValue(trackerAPIKey, forHTTPHeaderField: "X-SAR-Token")
         let socket = session.webSocketTask(with: request)
         self.socket = socket
         socket.resume()
-        // URLSessionWebSocketTask queues receives issued before the opening
-        // handshake completes. On the field iPad, starting the first receive
-        // from didOpen races with URLSession's internal connected state and
-        // immediately fails with NSPOSIXErrorDomain 57.
-        startReceiveLoop(socket: socket, generation: currentGeneration)
     }
 
     private func startReceiveLoop(
@@ -292,8 +288,11 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     private func socketOpened(generation: UUID) {
-        guard generation == self.generation else { return }
+        guard generation == self.generation, let socket else { return }
         connected = true
+        // Match Android's WebSocketListener lifecycle: no reads or protocol
+        // messages are started until the transport has reported onOpen.
+        startReceiveLoop(socket: socket, generation: generation)
         let now = Self.nowMilliseconds
         protocolState.transportOpened(helloSentAtMilliseconds: now)
         firstSightingsSent.removeAll()

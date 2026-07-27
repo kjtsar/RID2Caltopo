@@ -37,6 +37,7 @@ final class RIDTrackViewModel: ObservableObject {
     private var ownershipActivationTasks: [String: Task<Void, Never>] = [:]
     private var archiveConfiguration: AppleTrackArchiveConfiguration?
     private var localDeviceMarker: CaltopoDeviceMarker?
+    private var localDeviceMarkerPublishingEnabled = true
 
     func bind(to observations: AsyncStream<RidObservation>, sourceID: String) {
         guard observationTasks[sourceID] == nil else { return }
@@ -222,8 +223,20 @@ final class RIDTrackViewModel: ObservableObject {
 
     func publishLocalDeviceMarker(_ marker: CaltopoDeviceMarker, force: Bool = false) {
         localDeviceMarker = marker
+        guard localDeviceMarkerPublishingEnabled else { return }
         Task { [caltopoPublisher] in
             await caltopoPublisher.publishDeviceMarker(marker, force: force)
+        }
+    }
+
+    func setLocalDeviceMarkerPublishingEnabled(_ enabled: Bool) async {
+        localDeviceMarkerPublishingEnabled = enabled
+        if enabled {
+            if let localDeviceMarker {
+                await caltopoPublisher.publishDeviceMarker(localDeviceMarker, force: true)
+            }
+        } else {
+            await caltopoPublisher.removeDeviceMarker()
         }
     }
 

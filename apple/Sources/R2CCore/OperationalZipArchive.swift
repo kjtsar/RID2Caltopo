@@ -20,7 +20,7 @@ public enum OperationalZipArchive {
         }
     }
 
-    public static func encode(_ entries: [Entry]) throws -> Data {
+    public static func encode(_ entries: [Entry], compress: Bool = false) throws -> Data {
         var output = Data()
         var central = Data()
         for entry in entries {
@@ -28,19 +28,22 @@ public enum OperationalZipArchive {
             guard let name = path.data(using: .utf8), name.count <= Int(UInt16.max), entry.data.count <= Int(UInt32.max) else {
                 throw OperationalZipError.sizeLimitExceeded
             }
+            let compressed = compress ? deflate(entry.data) : nil
+            let payload = compressed.flatMap { $0.count < entry.data.count ? $0 : nil } ?? entry.data
+            let method: UInt16 = payload.count < entry.data.count ? 8 : 0
             let offset = UInt32(output.count)
             let crc = crc32(entry.data)
             output.appendLE(UInt32(0x04034b50))
-            output.appendLE(UInt16(20)); output.appendLE(UInt16(0)); output.appendLE(UInt16(0))
+            output.appendLE(UInt16(20)); output.appendLE(UInt16(0)); output.appendLE(method)
             output.appendLE(UInt16(0)); output.appendLE(UInt16(0)); output.appendLE(crc)
-            output.appendLE(UInt32(entry.data.count)); output.appendLE(UInt32(entry.data.count))
+            output.appendLE(UInt32(payload.count)); output.appendLE(UInt32(entry.data.count))
             output.appendLE(UInt16(name.count)); output.appendLE(UInt16(0))
-            output.append(name); output.append(entry.data)
+            output.append(name); output.append(payload)
 
             central.appendLE(UInt32(0x02014b50))
-            central.appendLE(UInt16(20)); central.appendLE(UInt16(20)); central.appendLE(UInt16(0)); central.appendLE(UInt16(0))
+            central.appendLE(UInt16(20)); central.appendLE(UInt16(20)); central.appendLE(UInt16(0)); central.appendLE(method)
             central.appendLE(UInt16(0)); central.appendLE(UInt16(0)); central.appendLE(crc)
-            central.appendLE(UInt32(entry.data.count)); central.appendLE(UInt32(entry.data.count))
+            central.appendLE(UInt32(payload.count)); central.appendLE(UInt32(entry.data.count))
             central.appendLE(UInt16(name.count)); central.appendLE(UInt16(0)); central.appendLE(UInt16(0))
             central.appendLE(UInt16(0)); central.appendLE(UInt16(0)); central.appendLE(UInt32(0)); central.appendLE(offset)
             central.append(name)
@@ -123,6 +126,24 @@ public enum OperationalZipArchive {
             }
         }
         guard count == expectedSize else { throw OperationalZipError.decompressionFailed }
+        return output
+    }
+
+    private static func deflate(_ input: Data) -> Data? {
+        guard !input.isEmpty else { return nil }
+        let capacity = input.count + max(64, input.count / 1_000 + 16)
+        var output = Data(count: capacity)
+        let count = output.withUnsafeMutableBytes { destination in
+            input.withUnsafeBytes { source in
+                compression_encode_buffer(
+                    destination.bindMemory(to: UInt8.self).baseAddress!, capacity,
+                    source.bindMemory(to: UInt8.self).baseAddress!, input.count,
+                    nil, COMPRESSION_ZLIB
+                )
+            }
+        }
+        guard count > 0 else { return nil }
+        output.removeSubrange(count ..< output.count)
         return output
     }
 

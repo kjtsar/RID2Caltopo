@@ -153,16 +153,34 @@ public enum OperationalFacilityMap {
         if let errorMessage, records.isEmpty {
             return .init(chipLabel: "Airspace unavailable", detail: errorMessage, errorMessage: errorMessage)
         }
-        if let controlled = records.first(where: { !$0.airspaceClasses.isEmpty }) {
-            let airport = shortAirportName(controlled.primaryAirportName)
-            let classes = controlled.airspaceClasses.map { "Class \($0)" }.joined(separator: "/")
-            let ceiling = controlled.ceilingFeet.map { " up to \($0) ft" } ?? ""
-            let prefix = controlled.laancAvailable ? "LAANC required" : "Authorization required"
+        let controlled = records.filter { !$0.airspaceClasses.isEmpty }
+        if !controlled.isEmpty {
+            // FAA guidance says an operation spanning multiple UASFM grids must use the
+            // lowest published altitude. ArcGIS result order is not deterministic.
+            let representative = controlled.min {
+                let leftLimit = $0.ceilingFeet ?? .max
+                let rightLimit = $1.ceilingFeet ?? .max
+                if leftLimit != rightLimit { return leftLimit < rightLimit }
+                if $0.primaryAirportName != $1.primaryAirportName {
+                    return $0.primaryAirportName < $1.primaryAirportName
+                }
+                return $0.objectID < $1.objectID
+            }!
+            let airport = shortAirportName(representative.primaryAirportName)
+            let classes = Array(Set(controlled.flatMap(\.airspaceClasses)))
+                .sorted()
+                .map { "Class \($0)" }
+                .joined(separator: "/")
+            let gridLimit = controlled.compactMap(\.ceilingFeet).min()
+            let gridLimitText = gridLimit.map { "; FAA grid limit \($0) ft AGL" } ?? ""
+            let coordinationText = gridLimit.map {
+                " The displayed \($0) ft AGL value is the lowest FAA UAS Facility Map limit across the area, not the top of the controlled-airspace class. Requests above it require further FAA coordination."
+            } ?? ""
             return .init(
                 severity: .caution,
-                chipLabel: "Airspace: \(prefix) - \(airport) \(classes)\(ceiling)",
+                chipLabel: "Airspace: Authorization required - \(airport) \(classes)\(gridLimitText)",
                 summary: "\(airport) \(classes)",
-                detail: "Controlled airspace intersects the \(operatingAreaLabel). FAA authorization is required before flight.",
+                detail: "Controlled airspace intersects the \(operatingAreaLabel). FAA authorization is required before flight.\(coordinationText)",
                 records: records,
                 errorMessage: errorMessage
             )

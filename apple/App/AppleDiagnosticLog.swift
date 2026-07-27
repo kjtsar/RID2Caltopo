@@ -1,4 +1,5 @@
 import Foundation
+import R2CCore
 import UIKit
 
 struct AppleLogDay: Identifiable, Sendable, Equatable {
@@ -48,9 +49,20 @@ actor AppleDiagnosticLogStore {
         return destination
     }
 
-    func write(level: String, category: String, message: String, at date: Date = Date()) {
-        let cleanMessage = message.replacingOccurrences(of: "\n", with: " ")
-        let line = "\(Self.isoTimestamp(date)) [\(level)] [\(category)] \(cleanMessage)\n"
+    func write(
+        level: String,
+        processAndThread: String,
+        category: String,
+        message: String,
+        at date: Date = Date()
+    ) {
+        let line = OperationalDiagnosticLogFormat.line(
+            level: level,
+            processAndThread: processAndThread,
+            category: category,
+            message: message,
+            at: date
+        )
         guard handle != nil else {
             pendingLines.append(line)
             if pendingLines.count > 256 { pendingLines.removeFirst() }
@@ -85,12 +97,13 @@ actor AppleDiagnosticLogStore {
         guard let rootURL, !selectedDays.isEmpty else { throw CocoaError(.fileNoSuchFile) }
         try handle?.synchronize()
         let destination = FileManager.default.temporaryDirectory
-            .appendingPathComponent("R2C_Logs_\(Self.dayName(for: Date())).txt")
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
-        let output = try FileHandle(forWritingTo: destination)
-        defer { try? output.close() }
-
-        try output.write(contentsOf: Data((manifest + "\n").utf8))
+            .appendingPathComponent("R2C_Logs_\(Self.dayName(for: Date())).zip")
+        var entries = [
+            OperationalZipArchive.Entry(
+                path: "diagnostic_manifest.txt",
+                data: Data((manifest + "\n").utf8)
+            ),
+        ]
         for day in selectedDays.sorted() {
             let directory = rootURL.appendingPathComponent(day, isDirectory: true)
             let logs = try FileManager.default.contentsOfDirectory(
@@ -99,11 +112,17 @@ actor AppleDiagnosticLogStore {
                 options: [.skipsHiddenFiles]
             ).filter { $0.pathExtension.lowercased() == "txt" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
             for log in logs {
-                let separator = "\n\n================ \(day)/\(log.lastPathComponent) ================\n"
-                try output.write(contentsOf: Data(separator.utf8))
-                try output.write(contentsOf: Data(contentsOf: log))
+                entries.append(.init(
+                    path: "\(day)/\(log.lastPathComponent)",
+                    data: try Data(contentsOf: log)
+                ))
             }
         }
+        guard entries.count > 1 else { throw CocoaError(.fileNoSuchFile) }
+        try OperationalZipArchive.encode(entries, compress: true).write(
+            to: destination,
+            options: .atomic
+        )
         return destination
     }
 
@@ -127,26 +146,43 @@ actor AppleDiagnosticLogStore {
         return formatter.string(from: Date())
     }
 
-    private static func isoTimestamp(_ date: Date) -> String {
-        ISO8601DateFormatter().string(from: date)
-    }
 }
 
 enum AppleLog {
     static func debug(_ category: String, _ message: String) {
-        Task { await AppleDiagnosticLogStore.shared.write(level: "DEBUG", category: category, message: message) }
+        write(level: "DEBUG", category: category, message: message)
     }
 
     static func info(_ category: String, _ message: String) {
-        Task { await AppleDiagnosticLogStore.shared.write(level: "INFO", category: category, message: message) }
+        write(level: "INFO", category: category, message: message)
     }
 
     static func warning(_ category: String, _ message: String) {
-        Task { await AppleDiagnosticLogStore.shared.write(level: "WARN", category: category, message: message) }
+        write(level: "WARN", category: category, message: message)
     }
 
     static func error(_ category: String, _ message: String) {
-        Task { await AppleDiagnosticLogStore.shared.write(level: "ERROR", category: category, message: message) }
+        write(level: "ERROR", category: category, message: message)
+    }
+
+    private static func write(level: String, category: String, message: String) {
+        let processAndThread = currentProcessAndThread()
+        Task {
+            await AppleDiagnosticLogStore.shared.write(
+                level: level,
+                processAndThread: processAndThread,
+                category: category,
+                message: message
+            )
+        }
+    }
+
+    private static func currentProcessAndThread() -> String {
+        let processID = ProcessInfo.processInfo.processIdentifier
+        if Thread.isMainThread { return "\(processID)-main" }
+        let threadID = pthread_mach_thread_np(pthread_self())
+        let name = Thread.current.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "\(processID)-\(threadID)" : "\(processID)-\(threadID):\(name)"
     }
 }
 
@@ -210,8 +246,9 @@ final class AppleDiagnosticsCenter: ObservableObject {
             "hardware_identifier": hardwareIdentifier,
             "os": "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
             "locale": Locale.current.identifier,
+            "time_zone": TimeZone.current.identifier,
             "wifi_ipv4": AppleNetworkAddress.preferredIPv4Address() ?? "unavailable",
-            "generated_at": ISO8601DateFormatter().string(from: Date()),
+            "generated_at": OperationalDiagnosticLogFormat.localTimestamp(Date()),
             "note": "No CalTopo credential secret is included.",
         ]
         let data = try? JSONSerialization.data(withJSONObject: fields, options: [.prettyPrinted, .sortedKeys])

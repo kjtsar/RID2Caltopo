@@ -22,17 +22,33 @@ object AirspacePolicy {
                 errorMessage = errorMessage
             )
         }
-        val controlled = records.firstOrNull { it.airspaceClasses.isNotEmpty() }
-        if (controlled != null) {
-            val airport = shortAirportName(controlled.primaryAirportName)
-            val classText = controlled.airspaceClasses.joinToString("/") { "Class $it" }
-            val ceiling = controlled.ceilingFeet?.let { " up to $it ft" }.orEmpty()
-            val prefix = if (controlled.laancAvailable) "LAANC required" else "Authorization required"
+        val controlled = records.filter { it.airspaceClasses.isNotEmpty() }
+        if (controlled.isNotEmpty()) {
+            // FAA guidance says an operation spanning multiple UASFM grids must use the
+            // lowest published altitude. ArcGIS result order is not deterministic.
+            val representative = controlled.minWithOrNull(
+                compareBy<FaaUasFacilityMapRecord>(
+                    { it.ceilingFeet ?: Int.MAX_VALUE },
+                    { it.primaryAirportName },
+                    { it.objectId }
+                )
+            )!!
+            val airport = shortAirportName(representative.primaryAirportName)
+            val classText = controlled
+                .flatMap { it.airspaceClasses }
+                .distinct()
+                .sorted()
+                .joinToString("/") { "Class $it" }
+            val gridLimit = controlled.mapNotNull { it.ceilingFeet }.minOrNull()
+            val gridLimitText = gridLimit?.let { "; FAA grid limit $it ft AGL" }.orEmpty()
+            val coordinationText = gridLimit?.let {
+                " The displayed $it ft AGL value is the lowest FAA UAS Facility Map limit across the area, not the top of the controlled-airspace class. Requests above it require further FAA coordination."
+            }.orEmpty()
             return AirspaceUiState(
                 chipSeverity = AirspaceChipSeverity.Caution,
-                chipLabel = "Airspace: $prefix - $airport $classText$ceiling",
+                chipLabel = "Airspace: Authorization required - $airport $classText$gridLimitText",
                 summary = "$airport $classText",
-                detail = "Controlled airspace intersects the ${OperatingArea.displayLabel}. FAA authorization is required before flight.",
+                detail = "Controlled airspace intersects the ${OperatingArea.displayLabel}. FAA authorization is required before flight.$coordinationText",
                 records = records,
                 errorMessage = errorMessage
             )

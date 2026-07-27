@@ -6,7 +6,7 @@ struct DiagnosticLogView: View {
     var body: some View {
         List {
             Section {
-                Text("Select the same way you would on Android. Today is selected automatically; the resulting text bundle includes device and app details followed by each selected log.")
+                Text("Select the same way you would on Android. Today is selected automatically; the resulting compressed ZIP includes device and app details plus each selected log.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text("You choose where to send it. The bundle can contain Remote IDs, aircraft positions, the app-install coordination identifier, local network addresses, and operational status. It never includes the CalTopo credential secret.")

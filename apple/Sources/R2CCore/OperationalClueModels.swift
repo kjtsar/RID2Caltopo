@@ -181,6 +181,7 @@ public struct CaltopoPhotoClue: Sendable, Equatable {
     public let createdMilliseconds: Int64
     public let jpegData: Data
     public let teamID: String
+    public let folderID: String?
 
     public init(
         markerID: UUID = UUID(),
@@ -191,7 +192,8 @@ public struct CaltopoPhotoClue: Sendable, Equatable {
         description: String,
         createdMilliseconds: Int64,
         jpegData: Data,
-        teamID: String
+        teamID: String,
+        folderID: String? = nil
     ) {
         self.markerID = markerID
         self.mediaID = mediaID
@@ -202,5 +204,6 @@ public struct CaltopoPhotoClue: Sendable, Equatable {
         self.createdMilliseconds = createdMilliseconds
         self.jpegData = jpegData
         self.teamID = teamID
+        self.folderID = folderID
     }
 }

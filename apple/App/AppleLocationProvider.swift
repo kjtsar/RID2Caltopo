@@ -5,9 +5,11 @@ import Foundation
 final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency CLLocationManagerDelegate {
     @Published private(set) var authorizationStatus: CLAuthorizationStatus
     @Published private(set) var lastLocation: CLLocation?
+    @Published private(set) var locationOverride: CLLocation?
     @Published private(set) var errorMessage: String?
 
     private var manager: CLLocationManager?
+    private var physicalLocation: CLLocation?
     private var started = false
 
     override init() {
@@ -56,6 +58,31 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
         }
     }
 
+    func setLocationOverride(latitude: Double, longitude: Double) {
+        guard CLLocationCoordinate2DIsValid(.init(latitude: latitude, longitude: longitude)) else { return }
+        let location = CLLocation(
+            coordinate: .init(latitude: latitude, longitude: longitude),
+            altitude: physicalLocation?.altitude ?? 0,
+            horizontalAccuracy: 1,
+            verticalAccuracy: physicalLocation?.verticalAccuracy ?? -1,
+            timestamp: Date()
+        )
+        locationOverride = location
+        lastLocation = location
+        errorMessage = nil
+        AppleLog.info(
+            "Location",
+            "Developer override enabled latitude=\(String(format: "%.6f", latitude)) longitude=\(String(format: "%.6f", longitude))"
+        )
+    }
+
+    func clearLocationOverride() {
+        guard locationOverride != nil else { return }
+        locationOverride = nil
+        lastLocation = physicalLocation
+        AppleLog.info("Location", "Developer override cleared")
+    }
+
     var statusText: String {
         if let errorMessage { return errorMessage }
         switch authorizationStatus {
@@ -78,7 +105,10 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
               location.horizontalAccuracy >= 0,
               abs(location.timestamp.timeIntervalSinceNow) < 30
         else { return }
-        lastLocation = location
+        physicalLocation = location
+        if locationOverride == nil {
+            lastLocation = location
+        }
         errorMessage = nil
     }
 

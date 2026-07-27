@@ -29,6 +29,15 @@ struct AppleTrackReplaySummary: Sendable {
     var skipped = 0
 }
 
+struct AppleTrackResubmitSummary: Sendable {
+    var directoriesReset = 0
+    var replay = AppleTrackReplaySummary()
+
+    var description: String {
+        "Reset \(directoriesReset) day folder(s); uploaded \(replay.uploaded), pending \(replay.pending), skipped \(replay.skipped)."
+    }
+}
+
 actor AppleTrackArchiveStore {
     enum ArchiveError: Error {
         case documentsDirectoryUnavailable
@@ -103,6 +112,38 @@ actor AppleTrackArchiveStore {
             }
         }
         return summary
+    }
+
+    func resubmitRecent(days: Int, now: Date = Date()) async -> AppleTrackResubmitSummary {
+        guard configuration?.tracker.isConfigured == true, let rootURL else { return .init() }
+        let clampedDays = max(1, days)
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        let oldest = calendar.date(byAdding: .day, value: -(clampedDays - 1), to: today) ?? today
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        var result = AppleTrackResubmitSummary()
+        let directories = (try? FileManager.default.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        for directory in directories {
+            guard (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                  let date = formatter.date(from: directory.lastPathComponent),
+                  date >= oldest,
+                  date <= today
+            else { continue }
+            try? FileManager.default.removeItem(
+                at: directory.appendingPathComponent(reportedFilename)
+            )
+            result.directoriesReset += 1
+        }
+        result.replay = await replayUnreported()
+        AppleLog.info("TrackerArchive", "Recent resubmit: \(result.description)")
+        return result
     }
 
     func archiveRootURL() -> URL? { rootURL }

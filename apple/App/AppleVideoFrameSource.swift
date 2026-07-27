@@ -307,6 +307,9 @@ final class AppleVideoFrameSource: ObservableObject {
     @Published private(set) var lastRecoveryReason = "None"
     @Published private(set) var nextRetryDelaySeconds: Double?
     @Published private(set) var mediaPublisherStatus = "Unknown"
+    @Published private(set) var latestGimbalPitchDegrees: Double?
+    @Published private(set) var latestCameraYawDegrees: Double?
+    @Published private(set) var latestStreamHeadingDegrees: Double?
 
     private var videoOutput: AVPlayerItemVideoOutput?
     private var ffmpegSession: OpaquePointer?
@@ -515,6 +518,9 @@ final class AppleVideoFrameSource: ObservableObject {
         lastRecoveryReason = "None"
         nextRetryDelaySeconds = nil
         mediaPublisherStatus = "Unknown"
+        latestGimbalPitchDegrees = nil
+        latestCameraYawDegrees = nil
+        latestStreamHeadingDegrees = nil
         latestPixelBuffer = nil
         latestFrameCapturedAt = nil
         usesNativeVideoSurface = false
@@ -649,6 +655,46 @@ final class AppleVideoFrameSource: ObservableObject {
             let pixelBuffer = retainedPixelBuffer.takeRetainedValue()
             guard sequence != ffmpegFrameSequence else { return }
             ffmpegFrameSequence = sequence
+            var gimbalPitchDegrees = 0.0
+            if R2CFFmpegSessionCopyLatestGimbalPitchDegrees(
+                ffmpegSession,
+                &gimbalPitchDegrees
+            ) {
+                let selected = OperationalClueGeometry.selectedGimbalAngleDegrees(
+                    streamPitchDegrees: gimbalPitchDegrees
+                )
+                if latestGimbalPitchDegrees != selected {
+                    latestGimbalPitchDegrees = selected
+                    AppleLog.info(
+                        "Video",
+                        "Stream gimbal pitch updated path=\(currentPath ?? "unknown") degrees=\(String(format: "%.1f", selected))"
+                    )
+                }
+            }
+            var cameraYawDegrees = 0.0
+            if R2CFFmpegSessionCopyLatestCameraYawDegrees(
+                ffmpegSession,
+                &cameraYawDegrees
+            ), let normalized = RidHeading.normalized(cameraYawDegrees),
+               latestCameraYawDegrees != normalized {
+                latestCameraYawDegrees = normalized
+                AppleLog.info(
+                    "Video",
+                    "Stream camera yaw updated path=\(currentPath ?? "unknown") degrees=\(String(format: "%.1f", normalized))"
+                )
+            }
+            var streamHeadingDegrees = 0.0
+            if R2CFFmpegSessionCopyLatestHeadingDegrees(
+                ffmpegSession,
+                &streamHeadingDegrees
+            ), let normalized = RidHeading.normalized(streamHeadingDegrees),
+               latestStreamHeadingDegrees != normalized {
+                latestStreamHeadingDegrees = normalized
+                AppleLog.info(
+                    "Video",
+                    "Stream heading updated path=\(currentPath ?? "unknown") degrees=\(String(format: "%.1f", normalized))"
+                )
+            }
             let itemTime = presentationTimeMicroseconds > Int64.min / 2
                 ? CMTime(value: presentationTimeMicroseconds, timescale: 1_000_000)
                 : CMClockGetTime(CMClockGetHostTimeClock())

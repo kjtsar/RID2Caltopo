@@ -24,7 +24,7 @@ class AirspacePolicyTest {
             errorMessage = null
         )
 
-        assertEquals(AirspaceChipSeverity.Caution, state.chipSeverity)
+        assertEquals(AirspaceChipSeverity.Danger, state.chipSeverity)
         assertEquals(
             "Airspace: Authorization required - Fallon NAS Class D; FAA grid limit 400 ft AGL",
             state.chipLabel

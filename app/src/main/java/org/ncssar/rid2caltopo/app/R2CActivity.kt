@@ -124,6 +124,10 @@ internal fun shouldShowBluetoothDisabledPanel(
     bluetoothEnabled: Boolean,
 ): Boolean = adapterPresent && !bluetoothEnabled
 
+internal fun shouldClearTemporaryLocationOverrideOnCreate(
+    hasSavedInstanceState: Boolean,
+): Boolean = !hasSavedInstanceState
+
 @Composable
 private fun BluetoothDisabledDialog(
     onOpenBluetoothSettings: () -> Unit,
@@ -440,6 +444,12 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // Developer location simulation is deliberately process/task scoped.
+        // Android can retain this process after the task is dismissed, so a
+        // static-only override otherwise leaks into the next apparent launch.
+        if (shouldClearTemporaryLocationOverrideOnCreate(savedInstanceState != null)) {
+            CaltopoMap.SetMyLocationOverride(null)
+        }
         setVolumeControlStream(AudioManager.STREAM_ALARM)
         CaltopoClient.MarkAppActive()
         CTDebug(TAG, "onCreate().")
@@ -1050,6 +1060,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         // and the services never start.  Config-change rotations are excluded so that
         // a normal orientation change does not re-trigger service startup.
         if (isFinishing && !isChangingConfigurations) {
+            CaltopoMap.SetMyLocationOverride(null)
             InitializedCalled = false
         }
         super.onDestroy()

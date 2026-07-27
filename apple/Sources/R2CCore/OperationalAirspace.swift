@@ -1,7 +1,7 @@
 import Foundation
 
 public enum OperationalAirspaceSeverity: String, Codable, Sendable, Equatable {
-    case neutral, normal, caution
+    case neutral, normal, caution, danger
 }
 
 public struct OperationalAirspaceCoordinate: Codable, Sendable, Equatable {
@@ -177,7 +177,7 @@ public enum OperationalFacilityMap {
                 " The displayed \($0) ft AGL value is the lowest FAA UAS Facility Map limit across the area, not the top of the controlled-airspace class. Requests above it require further FAA coordination."
             } ?? ""
             return .init(
-                severity: .caution,
+                severity: .danger,
                 chipLabel: "Airspace: Authorization required - \(airport) \(classes)\(gridLimitText)",
                 summary: "\(airport) \(classes)",
                 detail: "Controlled airspace intersects the \(operatingAreaLabel). FAA authorization is required before flight.\(coordinationText)",

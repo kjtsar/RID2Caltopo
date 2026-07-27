@@ -28,6 +28,7 @@ fun NotamStatusChip(
     val useAirspaceLabel = shouldUseAirspaceStatus(state.visible, airspaceState)
     val displaySeverity = when {
         !useAirspaceLabel -> state.chipSeverity
+        airspaceState?.chipSeverity == AirspaceChipSeverity.Danger -> NotamChipSeverity.Danger
         airspaceState?.chipSeverity == AirspaceChipSeverity.Caution -> NotamChipSeverity.Caution
         airspaceState?.chipSeverity == AirspaceChipSeverity.Normal -> NotamChipSeverity.Normal
         else -> NotamChipSeverity.Neutral

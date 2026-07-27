@@ -333,6 +333,10 @@ public enum OrgConfigTokenCodec {
         return plaintext
     }
 
+    public static func encryptPayload(_ plaintext: String) -> String {
+        Data(xor(Array(plaintext.utf8))).base64EncodedString()
+    }
+
     public static func parseBundle(_ data: Data) throws -> OrgConfigBundle {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               root["format"] as? String == "rid2caltopo_org_config",

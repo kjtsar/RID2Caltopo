@@ -3,7 +3,8 @@ package org.ncssar.rid2caltopo.airspace
 enum class AirspaceChipSeverity {
     Neutral,
     Normal,
-    Caution
+    Caution,
+    Danger
 }
 
 data class FaaUasFacilityMapRecord(

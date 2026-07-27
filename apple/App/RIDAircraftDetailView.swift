@@ -338,6 +338,16 @@ final class AppleDroneConfirmationStore: ObservableObject {
         peerIdentities.removeValue(forKey: remoteID)
     }
 
+    func resetPersistedState() {
+        importedIdentities.removeAll()
+        sessionIdentities.removeAll()
+        peerIdentities.removeAll()
+        activeRemoteIDs.removeAll()
+        promptedRemoteIDs.removeAll()
+        ignoredRemoteIDs.removeAll()
+        defaults.removeObject(forKey: "org.ridMappings")
+    }
+
     private static func importedPilotCallsign(mappedID: String, model: String, remoteID: String) -> String {
         RidAircraftIdentity.guessPilotCallsign(mappedID: mappedID, model: model, remoteID: remoteID)
     }

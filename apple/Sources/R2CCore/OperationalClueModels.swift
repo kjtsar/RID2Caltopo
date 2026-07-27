@@ -96,7 +96,53 @@ public struct OperationalClueProjection: Sendable, Equatable {
     }
 }
 
+public struct OperationalClueHeadingSelection: Sendable, Equatable {
+    public let degrees: Double?
+    public let sourceLabel: String?
+
+    public init(degrees: Double?, sourceLabel: String?) {
+        self.degrees = degrees
+        self.sourceLabel = sourceLabel
+    }
+}
+
 public enum OperationalClueGeometry {
+    public static func selectedGimbalAngleDegrees(
+        streamPitchDegrees: Double?,
+        fallbackDegrees: Double = -90
+    ) -> Double {
+        guard let streamPitchDegrees, streamPitchDegrees.isFinite else {
+            return min(0, max(-90, fallbackDegrees))
+        }
+        return min(0, max(-90, streamPitchDegrees))
+    }
+
+    public static func selectedHeading(
+        cameraYawDegrees: Double?,
+        streamHeadingDegrees: Double?,
+        ridHeadingDegrees: Double?
+    ) -> OperationalClueHeadingSelection {
+        if let cameraYaw = RidHeading.normalized(cameraYawDegrees) {
+            return OperationalClueHeadingSelection(
+                degrees: cameraYaw,
+                sourceLabel: "Camera yaw"
+            )
+        }
+        if let streamHeading = RidHeading.normalized(streamHeadingDegrees) {
+            return OperationalClueHeadingSelection(
+                degrees: streamHeading,
+                sourceLabel: "Stream heading"
+            )
+        }
+        if let ridHeading = RidHeading.normalized(ridHeadingDegrees) {
+            return OperationalClueHeadingSelection(
+                degrees: ridHeading,
+                sourceLabel: "RID aircraft track"
+            )
+        }
+        return OperationalClueHeadingSelection(degrees: nil, sourceLabel: nil)
+    }
+
     public static func project(
         droneLatitude: Double,
         droneLongitude: Double,
@@ -147,6 +193,130 @@ public enum OperationalClueGeometry {
             longitude: destination.longitude,
             altitudeMeters: groundAltitude
         )
+    }
+
+    public static func projectWithTerrain(
+        droneLatitude: Double,
+        droneLongitude: Double,
+        droneAltitudeMeters: Double?,
+        headingDegrees: Double?,
+        aglMeters: Double?,
+        gimbalAngleDegrees: Double,
+        sampleElevationMeters: @Sendable (Double, Double) async -> Double?
+    ) async -> OperationalClueProjection {
+        let flatProjection = project(
+            droneLatitude: droneLatitude,
+            droneLongitude: droneLongitude,
+            droneAltitudeMeters: droneAltitudeMeters,
+            headingDegrees: headingDegrees,
+            aglMeters: aglMeters,
+            gimbalAngleDegrees: gimbalAngleDegrees
+        )
+        guard let droneAltitudeMeters, droneAltitudeMeters.isFinite,
+              let headingDegrees, headingDegrees.isFinite,
+              let aglMeters, aglMeters.isFinite, aglMeters > 0
+        else { return flatProjection }
+
+        let angle = min(0, max(-90, gimbalAngleDegrees))
+        let tiltFromHorizon = max(0.1, min(90, abs(angle)))
+        guard tiltFromHorizon < 89.9 else { return flatProjection }
+        let slopeDown = tan(tiltFromHorizon * .pi / 180)
+        guard slopeDown.isFinite, slopeDown > 0 else { return flatProjection }
+        let flatDistance = aglMeters / slopeDown
+        guard flatDistance.isFinite, flatDistance > 0 else { return flatProjection }
+
+        let flatGround = droneAltitudeMeters - aglMeters
+        let droneDEM = await sampleElevationMeters(droneLatitude, droneLongitude)
+        let scale = inferDEMScaleToMeters(
+            droneAltitudeMeters: droneAltitudeMeters,
+            knownGroundMeters: flatGround,
+            droneDEM: droneDEM
+        )
+        let maximumDistance = min(2_500, max(60, max(flatDistance * 3, flatDistance + 250)))
+        let step = maximumDistance <= 180 ? 10.0 : (maximumDistance <= 600 ? 20.0 : 30.0)
+
+        var previousDistance = 0.0
+        var previousGround = flatGround
+        var distance = step
+        while distance <= maximumDistance + 0.001 {
+            let candidate = destinationPoint(
+                latitude: droneLatitude,
+                longitude: droneLongitude,
+                bearingDegrees: headingDegrees,
+                distanceMeters: distance
+            )
+            let candidateDEM = await sampleElevationMeters(candidate.latitude, candidate.longitude)
+            let ground = normalizedDEMGroundMeters(
+                candidateDEM: candidateDEM,
+                droneDEM: droneDEM,
+                flatGroundMeters: flatGround,
+                scaleToMeters: scale
+            ) ?? previousGround
+            let rayAltitude = droneAltitudeMeters - slopeDown * distance
+            if rayAltitude <= ground {
+                var lowDistance = previousDistance
+                var lowGround = previousGround
+                var highDistance = distance
+                var highPoint = candidate
+                var highGround = ground
+                for _ in 0 ..< 6 {
+                    let midDistance = (lowDistance + highDistance) / 2
+                    let midPoint = destinationPoint(
+                        latitude: droneLatitude,
+                        longitude: droneLongitude,
+                        bearingDegrees: headingDegrees,
+                        distanceMeters: midDistance
+                    )
+                    let midDEM = await sampleElevationMeters(midPoint.latitude, midPoint.longitude)
+                    let midGround = normalizedDEMGroundMeters(
+                        candidateDEM: midDEM,
+                        droneDEM: droneDEM,
+                        flatGroundMeters: flatGround,
+                        scaleToMeters: scale
+                    ) ?? ((lowGround + highGround) / 2)
+                    if droneAltitudeMeters - slopeDown * midDistance <= midGround {
+                        highDistance = midDistance
+                        highPoint = midPoint
+                        highGround = midGround
+                    } else {
+                        lowDistance = midDistance
+                        lowGround = midGround
+                    }
+                }
+                return OperationalClueProjection(
+                    latitude: highPoint.latitude,
+                    longitude: highPoint.longitude,
+                    altitudeMeters: highGround
+                )
+            }
+            previousDistance = distance
+            previousGround = ground
+            distance += step
+        }
+        return flatProjection
+    }
+
+    private static func inferDEMScaleToMeters(
+        droneAltitudeMeters: Double,
+        knownGroundMeters: Double,
+        droneDEM: Double?
+    ) -> Double {
+        guard let droneDEM, droneDEM.isFinite else { return 1 }
+        let directError = abs(droneDEM - knownGroundMeters) + abs(droneDEM - droneAltitudeMeters)
+        let converted = droneDEM * 0.3048
+        let feetError = abs(converted - knownGroundMeters) + abs(converted - droneAltitudeMeters)
+        return feetError < directError ? 0.3048 : 1
+    }
+
+    private static func normalizedDEMGroundMeters(
+        candidateDEM: Double?,
+        droneDEM: Double?,
+        flatGroundMeters: Double,
+        scaleToMeters: Double
+    ) -> Double? {
+        guard let candidateDEM, candidateDEM.isFinite else { return nil }
+        guard let droneDEM, droneDEM.isFinite else { return candidateDEM * scaleToMeters }
+        return flatGroundMeters + (candidateDEM - droneDEM) * scaleToMeters
     }
 
     private static func destinationPoint(

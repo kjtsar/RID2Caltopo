@@ -133,6 +133,34 @@ final class AppleOrgConfigSettings: ObservableObject {
         defaults.set(enabled, forKey: "org.predictiveHead")
     }
 
+    func setUsePeers(_ enabled: Bool) {
+        usePeers = enabled
+        defaults.set(enabled, forKey: "org.usePeers")
+        AppleLog.info("TrackerPeer", "Peer coordination setting enabled=\(enabled)")
+    }
+
+    func resetPersistedState() {
+        organizationName = ""
+        incident = "Training"
+        operationalPeriod = "1"
+        trackFolder = "Drone Tracks"
+        teamID = ""
+        trackerURLPrefix = ""
+        usePeers = true
+        predictiveHeadEnabled = true
+        proximityAlertSpacingFeet = 40
+        sourceDescription = "Not loaded"
+        for account in [
+            Self.trackerAccount,
+            Self.faaClientIDAccount,
+            Self.faaClientSecretAccount,
+            Self.mutualAidCredentialIDAccount,
+            Self.mutualAidCredentialSecretAccount,
+        ] {
+            try? Self.storeSecret("", account: account)
+        }
+    }
+
     private static func normalizedTrackFolder(_ value: String?) -> String {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? "Drone Tracks" : trimmed
@@ -401,6 +429,57 @@ final class AppleOrgConfigImporter: ObservableObject {
         } catch {
             state = .failed("Import failed: \(error.localizedDescription)")
             AppleLog.error("OrgConfig", "Import failed: \(error.localizedDescription)")
+        }
+    }
+
+    func importFile(
+        _ url: URL,
+        caltopoSettings: AppleCaltopoSettings,
+        orgSettings: AppleOrgConfigSettings,
+        identityStore: AppleDroneConfirmationStore
+    ) async {
+        state = .downloading
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw OrgConfigInteropError.invalidBundle
+            }
+            let bundleData: Data
+            if root["format"] as? String == "rid2caltopo_org_config" {
+                bundleData = data
+            } else {
+                bundleData = try JSONSerialization.data(withJSONObject: [
+                    "format": "rid2caltopo_org_config",
+                    "version": 1,
+                    "org_name": root["org_name"] as? String ?? "",
+                    "configs": [root],
+                ])
+            }
+            let bundle = try OrgConfigTokenCodec.parseBundle(bundleData)
+            try orgSettings.apply(bundle: bundle, normalizedToken: "local-file:\(url.lastPathComponent)")
+            try caltopoSettings.applyImported(credentials: bundle.credentials)
+            caltopoConfigurationHandler?(caltopoSettings.configuration)
+            if !bundle.mappings.isEmpty {
+                identityStore.applyImportedMappings(bundle.mappings)
+            }
+            if let faaConfig = bundle.faaConfig {
+                try orgSettings.applyEmbedded(faa: faaConfig)
+            }
+            if let mutualAidTemplate = bundle.mutualAidTemplate {
+                try orgSettings.apply(mutualAidTemplate: mutualAidTemplate)
+            }
+            state = .applied(
+                "Loaded \(url.lastPathComponent): \(bundle.mappings.count) RID mapping(s)."
+            )
+            AppleLog.info(
+                "OrgConfig",
+                "Loaded local config file name='\(url.lastPathComponent)' mappings=\(bundle.mappings.count)"
+            )
+        } catch {
+            state = .failed("Config file import failed: \(error.localizedDescription)")
+            AppleLog.error("OrgConfig", "Local config import failed: \(error.localizedDescription)")
         }
     }
 }

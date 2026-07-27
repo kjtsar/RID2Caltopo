@@ -12,6 +12,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,12 @@ struct R2CFFmpegSession {
     uint64_t latestSequence;
     int64_t latestPresentationTimeMicroseconds;
     uint64_t decodedFrameCount;
+    double latestGimbalPitchDegrees;
+    bool hasGimbalPitch;
+    double latestCameraYawDegrees;
+    bool hasCameraYaw;
+    double latestHeadingDegrees;
+    bool hasHeading;
     char lastFFmpegLog[256];
 };
 
@@ -112,6 +120,68 @@ static enum AVPixelFormat select_video_toolbox_format(
     return AV_PIX_FMT_NONE;
 }
 
+static bool metadata_key_contains(const char *key, const char *needle) {
+    if (key == NULL || needle == NULL) {
+        return false;
+    }
+    char lowered[128] = {0};
+    size_t index = 0;
+    for (; key[index] != '\0' && index + 1 < sizeof(lowered); ++index) {
+        lowered[index] = (char) tolower((unsigned char) key[index]);
+    }
+    return strstr(lowered, needle) != NULL;
+}
+
+static void ingest_telemetry_metadata(R2CFFmpegSession *session, AVDictionary *metadata) {
+    if (session == NULL || metadata == NULL) {
+        return;
+    }
+    AVDictionaryEntry *entry = NULL;
+    while ((entry = av_dict_get(metadata, "", entry, AV_DICT_IGNORE_SUFFIX)) != NULL) {
+        char *end = NULL;
+        double value = strtod(entry->value, &end);
+        if (end == entry->value || !isfinite(value)) {
+            continue;
+        }
+        pthread_mutex_lock(&session->lock);
+        if (metadata_key_contains(entry->key, "gimbal") &&
+            metadata_key_contains(entry->key, "pitch")) {
+            session->latestGimbalPitchDegrees = value;
+            session->hasGimbalPitch = true;
+        } else if ((metadata_key_contains(entry->key, "camera") ||
+                    metadata_key_contains(entry->key, "gimbal")) &&
+                   metadata_key_contains(entry->key, "yaw")) {
+            session->latestCameraYawDegrees = value;
+            session->hasCameraYaw = true;
+        } else if (metadata_key_contains(entry->key, "heading") ||
+                   metadata_key_contains(entry->key, "course")) {
+            session->latestHeadingDegrees = value;
+            session->hasHeading = true;
+        }
+        pthread_mutex_unlock(&session->lock);
+    }
+}
+
+static void ingest_packet_telemetry_metadata(R2CFFmpegSession *session, AVPacket *packet) {
+    if (session == NULL || packet == NULL) {
+        return;
+    }
+    size_t metadataSize = 0;
+    uint8_t *metadataBytes = av_packet_get_side_data(
+        packet,
+        AV_PKT_DATA_STRINGS_METADATA,
+        &metadataSize
+    );
+    if (metadataBytes == NULL || metadataSize == 0) {
+        return;
+    }
+    AVDictionary *metadata = NULL;
+    if (av_packet_unpack_dictionary(metadataBytes, (int) metadataSize, &metadata) >= 0) {
+        ingest_telemetry_metadata(session, metadata);
+    }
+    av_dict_free(&metadata);
+}
+
 static void publish_frame(
     R2CFFmpegSession *session,
     CVPixelBufferRef frame,
@@ -190,6 +260,8 @@ static void *decode_worker(void *opaque) {
     }
 
     AVStream *stream = format->streams[videoStreamIndex];
+    ingest_telemetry_metadata(session, format->metadata);
+    ingest_telemetry_metadata(session, stream->metadata);
     const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
     if (decoder == NULL) {
         set_status(session, R2C_FFMPEG_STATUS_FAILED, "H.264 decoder unavailable");
@@ -250,6 +322,7 @@ static void *decode_worker(void *opaque) {
             av_packet_unref(packet);
             continue;
         }
+        ingest_packet_telemetry_metadata(session, packet);
         int packetFlags = packet->flags;
         int packetSize = packet->size;
         result = avcodec_send_packet(codec, packet);
@@ -290,6 +363,7 @@ static void *decode_worker(void *opaque) {
                 set_status(session, R2C_FFMPEG_STATUS_FAILED, "Decoder returned a non-VideoToolbox frame");
                 goto finished;
             }
+            ingest_telemetry_metadata(session, frame->metadata);
             int64_t ptsMicroseconds = AV_NOPTS_VALUE;
             if (frame->best_effort_timestamp != AV_NOPTS_VALUE) {
                 ptsMicroseconds = av_rescale_q(
@@ -429,6 +503,54 @@ uint64_t R2CFFmpegSessionDecodedFrameCount(R2CFFmpegSession *session) {
     uint64_t count = session->decodedFrameCount;
     pthread_mutex_unlock(&session->lock);
     return count;
+}
+
+bool R2CFFmpegSessionCopyLatestGimbalPitchDegrees(
+    R2CFFmpegSession *session,
+    double *gimbalPitchDegrees
+) {
+    if (session == NULL || gimbalPitchDegrees == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&session->lock);
+    bool available = session->hasGimbalPitch;
+    if (available) {
+        *gimbalPitchDegrees = session->latestGimbalPitchDegrees;
+    }
+    pthread_mutex_unlock(&session->lock);
+    return available;
+}
+
+bool R2CFFmpegSessionCopyLatestCameraYawDegrees(
+    R2CFFmpegSession *session,
+    double *cameraYawDegrees
+) {
+    if (session == NULL || cameraYawDegrees == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&session->lock);
+    bool available = session->hasCameraYaw;
+    if (available) {
+        *cameraYawDegrees = session->latestCameraYawDegrees;
+    }
+    pthread_mutex_unlock(&session->lock);
+    return available;
+}
+
+bool R2CFFmpegSessionCopyLatestHeadingDegrees(
+    R2CFFmpegSession *session,
+    double *headingDegrees
+) {
+    if (session == NULL || headingDegrees == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&session->lock);
+    bool available = session->hasHeading;
+    if (available) {
+        *headingDegrees = session->latestHeadingDegrees;
+    }
+    pthread_mutex_unlock(&session->lock);
+    return available;
 }
 
 const char *R2CFFmpegVersion(void) {

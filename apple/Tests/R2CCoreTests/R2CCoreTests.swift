@@ -450,7 +450,7 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(records[0].rings.count == 1)
     #expect(records[0].rings[0][0] == .init(latitude: 39.7, longitude: -105.0))
     let state = OperationalFacilityMap.state(records: records, loading: false, errorMessage: nil)
-    #expect(state.severity == .caution)
+    #expect(state.severity == .danger)
     #expect(state.chipLabel.contains("Authorization required"))
     #expect(state.chipLabel.contains("FAA grid limit 200 ft AGL"))
     #expect(state.detail.contains("not the top of the controlled-airspace class"))
@@ -1196,6 +1196,57 @@ private func proximityDrone(
     #expect(abs((relative?.distanceMeters ?? 0) - 100) < 0.1)
     #expect(abs((relative?.bearingDegrees ?? 0) - 90) < 0.1)
     #expect(forward.altitudeMeters == 400)
+}
+
+@Test func operationalClueProjectionIntersectsRisingDEMTerrain() async {
+    let projected = await OperationalClueGeometry.projectWithTerrain(
+        droneLatitude: 39,
+        droneLongitude: -105,
+        droneAltitudeMeters: 100,
+        headingDegrees: 0,
+        aglMeters: 100,
+        gimbalAngleDegrees: -45,
+        sampleElevationMeters: { latitude, _ in
+            let northMeters = (latitude - 39) * 111_195
+            return max(0, northMeters * 0.5)
+        }
+    )
+    let northMeters = (projected.latitude - 39) * 111_195
+    #expect(northMeters > 66)
+    #expect(northMeters < 68)
+    #expect((projected.altitudeMeters ?? 0) > 33)
+    #expect((projected.altitudeMeters ?? 0) < 34)
+}
+
+@Test func operationalClueGimbalSelectionMatchesAndroidTelemetryFallback() {
+    #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: -44.5) == -44.5)
+    #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: -120) == -90)
+    #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: 12) == 0)
+    #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: nil) == -90)
+    #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: .nan) == -90)
+}
+
+@Test func operationalClueHeadingSelectionMatchesAndroidTelemetryPriority() {
+    #expect(OperationalClueGeometry.selectedHeading(
+        cameraYawDegrees: 725,
+        streamHeadingDegrees: 180,
+        ridHeadingDegrees: 90
+    ) == OperationalClueHeadingSelection(degrees: 5, sourceLabel: "Camera yaw"))
+    #expect(OperationalClueGeometry.selectedHeading(
+        cameraYawDegrees: nil,
+        streamHeadingDegrees: -10,
+        ridHeadingDegrees: 90
+    ) == OperationalClueHeadingSelection(degrees: 350, sourceLabel: "Stream heading"))
+    #expect(OperationalClueGeometry.selectedHeading(
+        cameraYawDegrees: .nan,
+        streamHeadingDegrees: nil,
+        ridHeadingDegrees: 361
+    ) == OperationalClueHeadingSelection(degrees: 1, sourceLabel: "RID aircraft track"))
+    #expect(OperationalClueGeometry.selectedHeading(
+        cameraYawDegrees: nil,
+        streamHeadingDegrees: nil,
+        ridHeadingDegrees: nil
+    ) == OperationalClueHeadingSelection(degrees: nil, sourceLabel: nil))
 }
 
 @Test func operationalClueRecordRoundTripsDurableUploadState() throws {
@@ -2145,6 +2196,13 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(OrgConfigTokenCodec.decode("r2c1://\(token.dropFirst(5))") == original)
     #expect(OrgConfigTokenCodec.decode("R2C1:UGedORwNSuM8Sk4NMR5dSs25A0m0NDWVPNAFSA0IcrmsQv0MDCPiKRszONFNFvEC") == original)
     #expect(OrgConfigTokenCodec.decode("R2C1:not-valid") == nil)
+}
+
+@Test func orgConfigCredentialPayloadEncryptsForAndroidBundleWrapper() throws {
+    let plaintext = #"{"type":"ct_credentials","tracker_api_key":"secret"}"#
+    let encrypted = OrgConfigTokenCodec.encryptPayload(plaintext)
+    #expect(encrypted != plaintext)
+    #expect(try OrgConfigTokenCodec.decryptPayload(encrypted) == plaintext)
 }
 
 @Test func orgConfigBundleDecryptsCredentialsAndReadsRidmap() throws {

@@ -93,7 +93,15 @@ struct ContentView: View {
                     }
             }
             .navigationDestination(isPresented: $showCaltopoSettings) {
-                CaltopoSettingsView(settings: caltopoSettings, orgSettings: orgConfigSettings) { configuration in
+                CaltopoSettingsView(
+                    settings: caltopoSettings,
+                    orgSettings: orgConfigSettings,
+                    locationProvider: locationProvider,
+                    importer: orgConfigImporter,
+                    identityStore: droneConfirmations,
+                    trackModel: ridTracks,
+                    iCloudBackup: iCloudBackup
+                ) { configuration in
                     ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
                     clueStore.configure(configuration, trackFolderName: orgConfigSettings.trackFolder)
                 }
@@ -923,7 +931,15 @@ struct ContentView: View {
             }
             Button("Archive Active Tracks") { ridTracks.archiveActiveTracks() }.disabled(ridTracks.tracks.isEmpty)
             NavigationLink {
-                CaltopoSettingsView(settings: caltopoSettings, orgSettings: orgConfigSettings) { configuration in
+                CaltopoSettingsView(
+                    settings: caltopoSettings,
+                    orgSettings: orgConfigSettings,
+                    locationProvider: locationProvider,
+                    importer: orgConfigImporter,
+                    identityStore: droneConfirmations,
+                    trackModel: ridTracks,
+                    iCloudBackup: iCloudBackup
+                ) { configuration in
                     ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
                     clueStore.configure(configuration, trackFolderName: orgConfigSettings.trackFolder)
                 }

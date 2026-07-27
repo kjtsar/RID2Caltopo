@@ -2,6 +2,7 @@
 #define R2C_FFMPEG_MOBILE_H
 
 #include <CoreVideo/CoreVideo.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -40,6 +41,22 @@ R2CFFmpegStatus R2CFFmpegSessionGetStatus(
 );
 
 uint64_t R2CFFmpegSessionDecodedFrameCount(R2CFFmpegSession *session);
+
+// Copies the newest gimbal pitch carried by FFmpeg format, stream, packet, or
+// frame metadata. Returns false until the stream has supplied a finite value.
+bool R2CFFmpegSessionCopyLatestGimbalPitchDegrees(
+    R2CFFmpegSession *session,
+    double *gimbalPitchDegrees
+);
+bool R2CFFmpegSessionCopyLatestCameraYawDegrees(
+    R2CFFmpegSession *session,
+    double *cameraYawDegrees
+);
+bool R2CFFmpegSessionCopyLatestHeadingDegrees(
+    R2CFFmpegSession *session,
+    double *headingDegrees
+);
+
 const char *R2CFFmpegVersion(void);
 
 #ifdef __cplusplus

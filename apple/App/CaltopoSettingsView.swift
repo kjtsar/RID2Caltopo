@@ -1,9 +1,17 @@
+import Foundation
 import R2CCore
+import Security
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct CaltopoSettingsView: View {
     @ObservedObject var settings: AppleCaltopoSettings
     @ObservedObject var orgSettings: AppleOrgConfigSettings
+    @ObservedObject var locationProvider: AppleLocationProvider
+    @ObservedObject var importer: AppleOrgConfigImporter
+    @ObservedObject var identityStore: AppleDroneConfirmationStore
+    @ObservedObject var trackModel: RIDTrackViewModel
+    let iCloudBackup: AppleICloudBackupCenter
     let onSave: (AppleCaltopoConfiguration) -> Void
     @ObservedObject private var notams = AppleNotamCenter.shared
     @ObservedObject private var airspace = AppleAirspaceCenter.shared
@@ -159,6 +167,21 @@ struct CaltopoSettingsView: View {
                 Text("OS mirroring uses the system display controls. App-managed mode presents the selected streams/map layout independently on an attached display.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            Section("Advanced") {
+                NavigationLink {
+                    AppleDeveloperToolsView(
+                        caltopo: settings,
+                        organization: orgSettings,
+                        locationProvider: locationProvider,
+                        importer: importer,
+                        identities: identityStore,
+                        trackModel: trackModel,
+                        iCloudBackup: iCloudBackup
+                    )
+                } label: {
+                    Label("Developer Tools", systemImage: "hammer")
+                }
+            }
             Section {
                 Button("Save CalTopo Configuration") {
                     onSave(settings.save())
@@ -176,6 +199,304 @@ struct CaltopoSettingsView: View {
                 showingTeamMaps = false
             }
         }
+    }
+}
+
+@MainActor
+private final class AppleDeveloperToolsManager: ObservableObject {
+    @Published var status = "Ready"
+    @Published private(set) var exportURL: URL?
+    @Published private(set) var isWorking = false
+
+    func prepareOrgConfig(
+        caltopo: AppleCaltopoSettings,
+        organization: AppleOrgConfigSettings,
+        identities: AppleDroneConfirmationStore
+    ) {
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let ridMap: [String: Any] = [
+                "type": "ct_ridmap",
+                "file_version": "1.0",
+                "load_type": "replace",
+                "map": identities.importedMappings.map {
+                    [
+                        "remoteId": $0.remoteID,
+                        "mappedId": $0.mappedID,
+                        "org": $0.organization,
+                        "model": $0.droneDescription,
+                        "owner": $0.pilotCallsign,
+                    ]
+                },
+            ]
+            var credentials: [String: Any] = [
+                "type": "ct_credentials",
+                "file_version": "1.0",
+                "org_name": organization.organizationName,
+                "team_id": caltopo.teamID,
+                "credential_id": caltopo.credentialID,
+                "credential_secret": caltopo.credentialSecret,
+                "domain_and_port": caltopo.domainAndPort,
+                "track_folder": organization.trackFolder,
+                "incident": organization.incident,
+                "op_period": organization.operationalPeriod,
+                "tracker_api_key": organization.trackerAPIKey,
+                "tracker_url_pfx": organization.trackerURLPrefix,
+                "tracker_url_prefix": organization.trackerURLPrefix,
+                "use_peers": organization.usePeers,
+                "predictive_head_enabled": organization.predictiveHeadEnabled,
+                "proximity_alert_spacing_feet": organization.proximityAlertSpacingFeet,
+            ]
+            credentials = credentials.filter { value in
+                if let text = value.value as? String { return !text.isEmpty }
+                return true
+            }
+            let credentialData = try JSONSerialization.data(
+                withJSONObject: credentials,
+                options: [.sortedKeys]
+            )
+            let credentialText = String(decoding: credentialData, as: UTF8.self)
+            var configs: [[String: Any]] = [
+                ridMap,
+                [
+                    "type": "ct_credentials_enc",
+                    "enc": OrgConfigTokenCodec.encryptPayload(credentialText),
+                ],
+            ]
+            if let faa = organization.faaConfiguration {
+                let faaObject: [String: Any] = [
+                    "type": "ct_faa_credentials",
+                    "source_label": faa.sourceLabel,
+                    "notam_api_base_url": faa.apiBaseURL,
+                    "notam_token_url": faa.tokenURL,
+                    "notam_client_id": faa.clientID,
+                    "notam_client_secret": faa.clientSecret,
+                    "notam_scope": faa.scope,
+                ]
+                let faaData = try JSONSerialization.data(withJSONObject: faaObject, options: [.sortedKeys])
+                configs.append([
+                    "type": "ct_faa_credentials_enc",
+                    "enc": OrgConfigTokenCodec.encryptPayload(
+                        String(decoding: faaData, as: UTF8.self)
+                    ),
+                ])
+            }
+            let bundle: [String: Any] = [
+                "format": "rid2caltopo_org_config",
+                "version": 1,
+                "org_name": organization.organizationName,
+                "generated": ISO8601DateFormatter().string(from: Date()),
+                "configs": configs,
+            ]
+            let data = try JSONSerialization.data(
+                withJSONObject: bundle,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            let root = (FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+                ?? FileManager.default.temporaryDirectory)
+                .appendingPathComponent("RID2Caltopo/Exports", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let safeOrg = organization.organizationName
+                .replacingOccurrences(of: "/", with: "-")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = safeOrg.isEmpty ? "RID2Caltopo_Org_Config.json" : "\(safeOrg)_Org_Config.json"
+            let destination = root.appendingPathComponent(name)
+            try data.write(to: destination, options: .atomic)
+            exportURL = destination
+            status = "Android-compatible organization config ready to share."
+        } catch {
+            status = "Organization export failed: \(error.localizedDescription)"
+        }
+    }
+
+    func resetPersistedState(
+        caltopo: AppleCaltopoSettings,
+        organization: AppleOrgConfigSettings,
+        identities: AppleDroneConfirmationStore,
+        locationProvider: AppleLocationProvider,
+        iCloudBackup: AppleICloudBackupCenter
+    ) {
+        if let bundleID = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: bundleID)
+        }
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword] as CFDictionary)
+        caltopo.resetPersistedState()
+        organization.resetPersistedState()
+        identities.resetPersistedState()
+        locationProvider.clearLocationOverride()
+        iCloudBackup.setEnabled(false, passphrase: "")
+        status = "Persisted app state reset. Quit and reopen RID2Caltopo to rebuild all runtime settings."
+        AppleLog.warning("DeveloperTools", "Persisted app state reset")
+    }
+}
+
+private struct AppleDeveloperToolsView: View {
+    @ObservedObject var caltopo: AppleCaltopoSettings
+    @ObservedObject var organization: AppleOrgConfigSettings
+    @ObservedObject var locationProvider: AppleLocationProvider
+    @ObservedObject var importer: AppleOrgConfigImporter
+    @ObservedObject var identities: AppleDroneConfirmationStore
+    @ObservedObject var trackModel: RIDTrackViewModel
+    let iCloudBackup: AppleICloudBackupCenter
+    @StateObject private var manager = AppleDeveloperToolsManager()
+    @State private var importingConfig = false
+    @State private var locationText = ""
+    @State private var locationError: String?
+    @State private var recentDays = 2
+    @State private var resubmitting = false
+    @State private var showingResetConfirmation = false
+
+    var body: some View {
+        Form {
+            Section("Configuration") {
+                Button("Load Config File", systemImage: "doc.badge.plus") {
+                    importingConfig = true
+                }
+                Button("Export Org Config", systemImage: "square.and.arrow.up") {
+                    manager.prepareOrgConfig(
+                        caltopo: caltopo,
+                        organization: organization,
+                        identities: identities
+                    )
+                }
+                if let exportURL = manager.exportURL {
+                    ShareLink(item: exportURL) {
+                        Label("Share Prepared Org Config", systemImage: "square.and.arrow.up")
+                    }
+                }
+                Text(importer.statusText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Tracker archive") {
+                Stepper("Recent days: \(recentDays)", value: $recentDays, in: 1 ... 30)
+                Button(resubmitting ? "Resubmitting…" : "Resubmit Recent Tracks To Tracker") {
+                    resubmitting = true
+                    Task {
+                        manager.status = await trackModel.resubmitRecentTracks(days: recentDays)
+                        resubmitting = false
+                    }
+                }
+                .disabled(resubmitting)
+                Text("Clears the reported marker for the selected recent day folders and submits eligible team-drone tracks again.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Simulate MyLocation") {
+                TextField("Latitude, longitude", text: $locationText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Apply Temporary Location") { applyLocationOverride() }
+                Button("Clear Location Override", role: .destructive) {
+                    locationProvider.clearLocationOverride()
+                    locationText = ""
+                    locationError = nil
+                }
+                .disabled(locationProvider.locationOverride == nil)
+                if let override = locationProvider.locationOverride {
+                    LabeledContent(
+                        "Active override",
+                        value: String(
+                            format: "%.6f, %.6f",
+                            override.coordinate.latitude,
+                            override.coordinate.longitude
+                        )
+                    )
+                }
+                if let locationError {
+                    Text(locationError).foregroundStyle(.red)
+                }
+                Text("The override is temporary and drives iOS airspace, NOTAM/TFR, protected-land, map-marker, and proximity checks until cleared or the app exits.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Peer coordination") {
+                Toggle(
+                    "Disable Peer Coordination",
+                    isOn: Binding(
+                        get: { !organization.usePeers },
+                        set: { organization.setUsePeers(!$0) }
+                    )
+                )
+                Text("Disable only for isolated testing. Multiple standalone instances can publish duplicate CalTopo updates.")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            Section("Persistent state") {
+                Button("Reset Persisted App State", role: .destructive) {
+                    showingResetConfirmation = true
+                }
+                Text("Clears saved configuration, mappings, preferences, and app Keychain secrets. Local tracks, clues, logs, captured video, and cached maps are retained.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Status") {
+                if manager.isWorking || resubmitting { ProgressView() }
+                Text(manager.status).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Developer Tools")
+        .fileImporter(
+            isPresented: $importingConfig,
+            allowedContentTypes: [.json, .plainText, .data]
+        ) { result in
+            guard case let .success(url) = result else { return }
+            Task {
+                await importer.importFile(
+                    url,
+                    caltopoSettings: caltopo,
+                    orgSettings: organization,
+                    identityStore: identities
+                )
+            }
+        }
+        .alert("Reset Persisted App State?", isPresented: $showingResetConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset", role: .destructive) {
+                manager.resetPersistedState(
+                    caltopo: caltopo,
+                    organization: organization,
+                    identities: identities,
+                    locationProvider: locationProvider,
+                    iCloudBackup: iCloudBackup
+                )
+            }
+        } message: {
+            Text("This clears saved settings and credentials. Local operational files are retained. You must quit and reopen the app afterward.")
+        }
+        .onAppear {
+            if let override = locationProvider.locationOverride {
+                locationText = String(
+                    format: "%.6f, %.6f",
+                    override.coordinate.latitude,
+                    override.coordinate.longitude
+                )
+            }
+        }
+    }
+
+    private func applyLocationOverride() {
+        let fields = locationText
+            .split(separator: ",", maxSplits: 1)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard fields.count == 2,
+              let latitude = Double(fields[0]),
+              let longitude = Double(fields[1]),
+              (-90 ... 90).contains(latitude),
+              (-180 ... 180).contains(longitude)
+        else {
+            locationError = "Enter decimal latitude and longitude separated by a comma."
+            return
+        }
+        locationProvider.setLocationOverride(latitude: latitude, longitude: longitude)
+        locationError = nil
+        manager.status = "Temporary MyLocation override applied."
     }
 }
 

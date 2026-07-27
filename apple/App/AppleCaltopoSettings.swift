@@ -198,6 +198,19 @@ final class AppleCaltopoSettings: ObservableObject {
         return configuration
     }
 
+    func resetPersistedState() {
+        enabled = false
+        domainAndPort = "caltopo.com"
+        mapID = ""
+        mapTitle = ""
+        credentialID = ""
+        credentialSecret = ""
+        teamID = ""
+        teamMaps = []
+        status = "Not configured"
+        try? Self.storeSecret("")
+    }
+
     private func findMap(id: String, in nodes: [CaltopoTeamMapNode]) -> CaltopoTeamMap? {
         for node in nodes {
             if let map = node.map, map.id == id { return map }

@@ -468,6 +468,7 @@ struct RIDTrackMapView: View {
         .sheet(item: $pendingSnapshot) { pending in
             ClueSubmissionView(
                 pending: pending,
+                model: model,
                 tracks: model.tracks,
                 altitudeDisplay: model.altitudeDisplayByAircraftID,
                 identityStore: identityStore,
@@ -510,7 +511,18 @@ struct RIDTrackMapView: View {
             try? await Task.sleep(for: .seconds(2))
             guard let track = model.tracks.first, let snapshot = Self.demoClueSnapshot() else { return }
             if arguments.contains("--demo-clue-sheet") {
-                pendingSnapshot = PendingClueSnapshot(snapshot: snapshot, defaultAircraftID: track.aircraftID)
+                pendingSnapshot = PendingClueSnapshot(
+                    snapshot: snapshot,
+                    defaultAircraftID: track.aircraftID,
+                    gimbalAngleDegrees: -60,
+                    observation: track.lastObservation,
+                    altitudeDisplay: model.altitudeDisplayByAircraftID[track.aircraftID],
+                    heading: OperationalClueGeometry.selectedHeading(
+                        cameraYawDegrees: nil,
+                        streamHeadingDegrees: nil,
+                        ridHeadingDegrees: track.lastObservation.headingDegrees
+                    )
+                )
             }
             if arguments.contains("--demo-local-clue"),
                !clueStore.records.contains(where: { $0.title == "Simulator clue" }) {
@@ -951,6 +963,27 @@ struct RIDTrackMapView: View {
         let session = requestedStreamID.flatMap { requested in
             streamRegistry.sessions.first(where: { $0.id == requested })
         } ?? streamRegistry.focusedSession
+        guard !model.tracks.isEmpty else {
+            clueError = "No active aircraft is available to associate with this snapshot."
+            return
+        }
+        let streamID = session.id
+        guard let defaultAircraftID = aircraftID(for: streamID) else {
+            clueError = "Long-press stream \(streamID) and pair it with a drone before capturing a clue."
+            return
+        }
+        guard let captureTrack = model.tracks.first(where: { $0.aircraftID == defaultAircraftID }) else {
+            clueError = "The paired aircraft telemetry is no longer available."
+            return
+        }
+        let captureObservation = captureTrack.lastObservation
+        let captureAltitudeDisplay = model.altitudeDisplayByAircraftID[defaultAircraftID]
+        let captureGimbalPitch = session.model.latestGimbalPitchDegrees
+        let captureHeading = OperationalClueGeometry.selectedHeading(
+            cameraYawDegrees: session.model.latestCameraYawDegrees,
+            streamHeadingDegrees: session.model.latestStreamHeadingDegrees,
+            ridHeadingDegrees: captureObservation.headingDegrees
+        )
         capturingSnapshot = true
         Task {
             defer { capturingSnapshot = false }
@@ -959,16 +992,16 @@ struct RIDTrackMapView: View {
                     zoomScale: zoomScale,
                     normalizedPan: normalizedPan
                 )
-                guard !model.tracks.isEmpty else {
-                    clueError = "No active aircraft is available to associate with this snapshot."
-                    return
-                }
-                let streamID = session.id
-                guard let defaultAircraftID = aircraftID(for: streamID) else {
-                    clueError = "Long-press stream \(streamID) and pair it with a drone before capturing a clue."
-                    return
-                }
-                pendingSnapshot = PendingClueSnapshot(snapshot: snapshot, defaultAircraftID: defaultAircraftID)
+                pendingSnapshot = PendingClueSnapshot(
+                    snapshot: snapshot,
+                    defaultAircraftID: defaultAircraftID,
+                    gimbalAngleDegrees: OperationalClueGeometry.selectedGimbalAngleDegrees(
+                        streamPitchDegrees: captureGimbalPitch
+                    ),
+                    observation: captureObservation,
+                    altitudeDisplay: captureAltitudeDisplay,
+                    heading: captureHeading
+                )
             } catch {
                 clueError = error.localizedDescription
             }
@@ -1075,16 +1108,19 @@ struct RIDTrackMapView: View {
                 Label("\(model.tracks.count) active", systemImage: "airplane.circle")
                 Text("\(model.acceptedObservationCount) points")
             if airspace.enabled || notams.enabled {
-                Button(
-                    usesAirspaceRestrictionStatus
-                        ? airspace.state.chipLabel
-                        : notams.state.chipLabel
-                ) {
+                Button {
                     if usesAirspaceRestrictionStatus { showAirspace = true }
                     else { showNotams = true }
-                }
+                } label: {
+                    Text(
+                        usesAirspaceRestrictionStatus
+                            ? airspace.state.chipLabel
+                            : notams.state.chipLabel
+                    )
                     .foregroundStyle(usesAirspaceRestrictionStatus ? airspaceColor : notamColor)
                     .lineLimit(1)
+                }
+                .buttonStyle(.plain)
             }
             if landRestrictions.enabled {
                 Button(landRestrictions.state.chipLabel) { showLandRestrictions = true }
@@ -1115,6 +1151,7 @@ struct RIDTrackMapView: View {
 
     private var airspaceColor: Color {
         switch airspace.state.severity {
+        case .danger: .red
         case .caution: .orange
         case .normal: .green
         case .neutral: .secondary
@@ -1294,6 +1331,10 @@ private struct PendingClueSnapshot: Identifiable {
     let id = UUID()
     let snapshot: AppleVideoSnapshot
     let defaultAircraftID: String
+    let gimbalAngleDegrees: Double
+    let observation: RidObservation
+    let altitudeDisplay: OperationalAircraftAltitudeDisplay?
+    let heading: OperationalClueHeadingSelection
 }
 
 private struct ClueSubmissionView: View {
@@ -1303,6 +1344,7 @@ private struct ClueSubmissionView: View {
     }
 
     let pending: PendingClueSnapshot
+    let model: RIDTrackViewModel
     let tracks: [RidAircraftTrack]
     let altitudeDisplay: [String: OperationalAircraftAltitudeDisplay]
     @ObservedObject var identityStore: AppleDroneConfirmationStore
@@ -1312,11 +1354,14 @@ private struct ClueSubmissionView: View {
     @State private var selectedAircraftID: String
     @State private var title: String
     @State private var description: String
-    @State private var gimbalAngle = -90.0
+    @State private var gimbalAngle: Double
+    @State private var terrainProjection: OperationalClueProjection?
+    @State private var terrainProjectionPending = false
     @FocusState private var focusedField: FocusedField?
 
     init(
         pending: PendingClueSnapshot,
+        model: RIDTrackViewModel,
         tracks: [RidAircraftTrack],
         altitudeDisplay: [String: OperationalAircraftAltitudeDisplay],
         identityStore: AppleDroneConfirmationStore,
@@ -1324,12 +1369,14 @@ private struct ClueSubmissionView: View {
         onCancel: @escaping () -> Void
     ) {
         self.pending = pending
+        self.model = model
         self.tracks = tracks
         self.altitudeDisplay = altitudeDisplay
         self.identityStore = identityStore
         self.onSubmit = onSubmit
         self.onCancel = onCancel
         _selectedAircraftID = State(initialValue: pending.defaultAircraftID)
+        _gimbalAngle = State(initialValue: pending.gimbalAngleDegrees)
         // Android deliberately opens on an empty, focused title so the
         // operator can immediately type the clue name without clearing a
         // generated value.
@@ -1338,25 +1385,54 @@ private struct ClueSubmissionView: View {
     }
 
     private var track: RidAircraftTrack? { tracks.first { $0.aircraftID == selectedAircraftID } }
-    private var display: OperationalAircraftAltitudeDisplay? { altitudeDisplay[selectedAircraftID] }
+    private var usesCaptureTelemetry: Bool { selectedAircraftID == pending.defaultAircraftID }
+    private var observation: RidObservation? {
+        usesCaptureTelemetry ? pending.observation : track?.lastObservation
+    }
+    private var display: OperationalAircraftAltitudeDisplay? {
+        usesCaptureTelemetry ? pending.altitudeDisplay : altitudeDisplay[selectedAircraftID]
+    }
+    private var heading: OperationalClueHeadingSelection {
+        if usesCaptureTelemetry {
+            return pending.heading
+        }
+        return OperationalClueGeometry.selectedHeading(
+            cameraYawDegrees: nil,
+            streamHeadingDegrees: nil,
+            ridHeadingDegrees: observation?.headingDegrees
+        )
+    }
     private var designator: String {
         identityStore.identity(for: selectedAircraftID)?.mappedID ?? selectedAircraftID
     }
     private var aglMeters: Double? { display?.aglFeet.map { $0 * 0.3048 } }
     private var atoMeters: Double? { display?.atoFeet.map { $0 * 0.3048 } }
-    private var projection: OperationalClueProjection? {
-        guard let observation = track?.lastObservation else { return nil }
+    private var flatProjection: OperationalClueProjection? {
+        guard let observation else { return nil }
         return OperationalClueGeometry.project(
             droneLatitude: observation.latitude,
             droneLongitude: observation.longitude,
             droneAltitudeMeters: observation.altitudeMeters,
-            headingDegrees: observation.headingDegrees,
+            headingDegrees: heading.degrees,
+            aglMeters: aglMeters,
+            gimbalAngleDegrees: gimbalAngle
+        )
+    }
+    private var projection: OperationalClueProjection? { terrainProjection ?? flatProjection }
+    private var projectionInput: ClueProjectionInput? {
+        guard let observation else { return nil }
+        return ClueProjectionInput(
+            aircraftID: selectedAircraftID,
+            latitude: observation.latitude,
+            longitude: observation.longitude,
+            altitudeMeters: observation.altitudeMeters,
+            headingDegrees: heading.degrees,
             aglMeters: aglMeters,
             gimbalAngleDegrees: gimbalAngle
         )
     }
     private var clueDistanceFeet: Double? {
-        guard let observation = track?.lastObservation, let projection else { return nil }
+        guard let observation, let projection else { return nil }
         return CLLocation(
             latitude: observation.latitude,
             longitude: observation.longitude
@@ -1385,10 +1461,11 @@ private struct ClueSubmissionView: View {
                                 .tag(track.aircraftID)
                         }
                     }
-                    if let observation = track?.lastObservation, let projection {
+                    if let observation, let projection {
                         LabeledContent("Drone", value: coordinate(observation.latitude, observation.longitude))
                         LabeledContent("Clue", value: coordinate(projection.latitude, projection.longitude))
-                        LabeledContent("Heading", value: headingMeasurement(observation.headingDegrees))
+                        LabeledContent("Heading", value: headingMeasurement(heading.degrees))
+                        LabeledContent("Heading source", value: heading.sourceLabel ?? "Unavailable")
                         LabeledContent("AGL", value: measurement(display?.aglFeet, suffix: display?.aglStale == true ? "? ft" : " ft"))
                         LabeledContent("ATO", value: measurement(display?.atoFeet, suffix: " ft"))
                         LabeledContent("Distance", value: measurement(clueDistanceFeet, suffix: " ft"))
@@ -1400,6 +1477,13 @@ private struct ClueSubmissionView: View {
                     Text("-90° is straight down; 0° is the horizon.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if terrainProjectionPending {
+                        ProgressView("Intersecting camera sightline with DEM…")
+                    } else if terrainProjection != nil {
+                        Label("DEM terrain projection applied", systemImage: "mountain.2")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Section("Report") {
                     TextField("Title", text: $title)
@@ -1414,16 +1498,20 @@ private struct ClueSubmissionView: View {
                     Button("Local Marker Only", systemImage: "mappin.and.ellipse") {
                         submit(publish: false)
                     }
-                    HStack {
-                        Button("Cancel", role: .cancel, action: onCancel)
+                    .disabled(terrainProjectionPending)
+                    Button {
+                        submit(publish: true)
+                    } label: {
+                        Label("Submit", systemImage: "icloud.and.arrow.up")
                             .frame(maxWidth: .infinity)
-                        Button("Submit", systemImage: "icloud.and.arrow.up") {
-                            submit(publish: true)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || terrainProjectionPending
+                    )
+                } footer: {
+                    Text("Submit saves the clue locally before starting its CalTopo upload.")
                 }
             }
             .navigationTitle("Submit Clue")
@@ -1437,11 +1525,48 @@ private struct ClueSubmissionView: View {
                     focusedField = .title
                 }
             }
+            .task(id: projectionInput) {
+                terrainProjection = nil
+                guard let input = projectionInput, let observation else { return }
+                terrainProjectionPending = true
+                let refined = await model.projectClueWithTerrain(
+                    observation: observation,
+                    headingDegrees: input.headingDegrees,
+                    aglMeters: input.aglMeters,
+                    gimbalAngleDegrees: input.gimbalAngleDegrees
+                )
+                guard !Task.isCancelled, projectionInput == input else { return }
+                terrainProjection = refined
+                terrainProjectionPending = false
+                AppleLog.info(
+                    "Clue",
+                    String(
+                        format: "DEM projection aircraft=%@ lat=%.6f lng=%.6f heading=%@ aglM=%@ gimbal=%.1f",
+                        input.aircraftID,
+                        refined.latitude,
+                        refined.longitude,
+                        input.headingDegrees.map { String(format: "%.1f", $0) } ?? "nil",
+                        input.aglMeters.map { String(format: "%.1f", $0) } ?? "nil",
+                        input.gimbalAngleDegrees
+                    )
+                )
+            }
         }
     }
 
     private func submit(publish: Bool) {
-        guard let observation = track?.lastObservation, let projection else { return }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        AppleLog.info(
+            "Clue",
+            "Clue form action publish=\(publish) aircraft=\(selectedAircraftID) titleLength=\(trimmedTitle.count)"
+        )
+        guard let observation, let projection else {
+            AppleLog.error(
+                "Clue",
+                "Clue form submission blocked because aircraft telemetry is no longer available aircraft=\(selectedAircraftID)"
+            )
+            return
+        }
         let clueAltitude = projection.altitudeMeters.map { String(format: "%.0f'", $0 * 3.28084) } ?? "N/A"
         let usng = OperationalCoordinateFormatter.format(
             latitude: projection.latitude,
@@ -1452,8 +1577,8 @@ private struct ClueSubmissionView: View {
         Projected clue location:
           Position: \(String(format: "%.6f, %.6f", projection.latitude, projection.longitude)) alt \(clueAltitude)
           USNG: \(usng)
-          Heading used for clue: \(headingMeasurement(observation.headingDegrees))
-          Heading source: RID
+          Heading used for clue: \(headingMeasurement(heading.degrees))
+          Heading source: \(heading.sourceLabel ?? "N/A")
           Gimbal angle at capture: \(String(format: "%.1f°", gimbalAngle))
           AGL: \(measurement(display?.aglFeet, suffix: display?.aglStale == true ? "? ft" : " ft"))
           ATO: \(measurement(display?.atoFeet, suffix: " ft"))
@@ -1471,11 +1596,11 @@ private struct ClueSubmissionView: View {
             clueLatitude: projection.latitude,
             clueLongitude: projection.longitude,
             clueAltitudeMeters: projection.altitudeMeters,
-            headingDegrees: RidHeading.normalized(observation.headingDegrees),
+            headingDegrees: heading.degrees,
             aglMeters: aglMeters,
             atoMeters: atoMeters,
             gimbalAngleDegrees: gimbalAngle,
-            title: title,
+            title: trimmedTitle,
             description: finalDescription
         ), pending.snapshot.jpegData, publish)
     }
@@ -1503,6 +1628,16 @@ private struct ClueSubmissionView: View {
     private static func clueDescriptionTemplate(_ date: Date) -> String {
         "time: \(timestampFormatter.string(from: date))\nfound by: \nreported to IC: yes|no\n"
     }
+}
+
+private struct ClueProjectionInput: Hashable {
+    let aircraftID: String
+    let latitude: Double
+    let longitude: Double
+    let altitudeMeters: Double?
+    let headingDegrees: Double?
+    let aglMeters: Double?
+    let gimbalAngleDegrees: Double
 }
 
 private struct ClueDetailView: View {

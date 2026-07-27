@@ -133,6 +133,7 @@ struct AppleAirspacePanel: View {
 
     private var severityColor: Color {
         switch center.state.severity {
+        case .danger: .red
         case .caution: .orange
         case .normal: .green
         case .neutral: .secondary

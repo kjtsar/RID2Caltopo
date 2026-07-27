@@ -45,7 +45,7 @@ object AirspacePolicy {
                 " The displayed $it ft AGL value is the lowest FAA UAS Facility Map limit across the area, not the top of the controlled-airspace class. Requests above it require further FAA coordination."
             }.orEmpty()
             return AirspaceUiState(
-                chipSeverity = AirspaceChipSeverity.Caution,
+                chipSeverity = AirspaceChipSeverity.Danger,
                 chipLabel = "Airspace: Authorization required - $airport $classText$gridLimitText",
                 summary = "$airport $classText",
                 detail = "Controlled airspace intersects the ${OperatingArea.displayLabel}. FAA authorization is required before flight.$coordinationText",

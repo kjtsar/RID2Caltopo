@@ -141,6 +141,26 @@ final class RIDTrackViewModel: ObservableObject {
         AppleLog.info("Terrain", "Manual ATO/AGL calibration remoteId=\(remoteID) targetFt=50")
     }
 
+    func projectClueWithTerrain(
+        observation: RidObservation,
+        headingDegrees: Double?,
+        aglMeters: Double?,
+        gimbalAngleDegrees: Double
+    ) async -> OperationalClueProjection {
+        let terrainService = self.terrainService
+        return await OperationalClueGeometry.projectWithTerrain(
+            droneLatitude: observation.latitude,
+            droneLongitude: observation.longitude,
+            droneAltitudeMeters: observation.altitudeMeters,
+            headingDegrees: headingDegrees,
+            aglMeters: aglMeters,
+            gimbalAngleDegrees: gimbalAngleDegrees,
+            sampleElevationMeters: { latitude, longitude in
+                await terrainService.sample(latitude: latitude, longitude: longitude)?.elevationMeters
+            }
+        )
+    }
+
     private func updateAltitude(for track: RidAircraftTrack) {
         var coordinator = altitudeCoordinatorByAircraftID[track.aircraftID] ?? OperationalAltitudeCoordinator()
         coordinator.ingest(track.lastObservation)
@@ -416,6 +436,13 @@ final class RIDTrackViewModel: ObservableObject {
                 await archive(track)
             }
         }
+    }
+
+    func resubmitRecentTracks(days: Int) async -> String {
+        trackerArchiveStatus = "Resubmitting recent tracks…"
+        let summary = await archiveStore.resubmitRecent(days: days)
+        trackerArchiveStatus = summary.description
+        return summary.description
     }
 
     private func archive(_ track: RidAircraftTrack) async {

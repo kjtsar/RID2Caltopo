@@ -606,18 +606,25 @@ struct ContentView: View {
                         AppleNotamPanel(center: notams, location: locationProvider.lastLocation)
                     }
                 } label: {
-                    Label(
-                        usesAirspaceRestrictionStatus ? airspace.state.chipLabel : notams.state.chipLabel,
-                        systemImage: usesAirspaceRestrictionStatus ? "building.columns" : "exclamationmark.triangle"
+                    AppleOperationalStatusChipLabel(
+                        title: usesAirspaceRestrictionStatus
+                            ? airspace.state.chipLabel
+                            : notams.state.chipLabel,
+                        tone: usesAirspaceRestrictionStatus ? airspaceChipTone : notamChipTone
                     )
                 }
+                .buttonStyle(.plain)
             }
             if landRestrictions.enabled {
                 NavigationLink {
                     AppleLandRestrictionPanel(center: landRestrictions, location: locationProvider.lastLocation)
                 } label: {
-                    Label(landRestrictions.state.chipLabel, systemImage: "leaf")
+                    AppleOperationalStatusChipLabel(
+                        title: landRestrictions.state.chipLabel,
+                        tone: landRestrictionChipTone
+                    )
                 }
+                .buttonStyle(.plain)
             }
             Spacer(minLength: 0)
         }
@@ -626,6 +633,33 @@ struct ContentView: View {
 
     private var usesAirspaceRestrictionStatus: Bool {
         !notams.state.visible || airspace.state.severity != .normal
+    }
+
+    private var notamChipTone: AppleOperationalStatusChipTone {
+        switch notams.state.chipSeverity {
+        case .danger: .danger
+        case .caution: .caution
+        case .normal: .normal
+        case .neutral: .neutral
+        }
+    }
+
+    private var airspaceChipTone: AppleOperationalStatusChipTone {
+        switch airspace.state.severity {
+        case .danger: .danger
+        case .caution: .caution
+        case .normal: .normal
+        case .neutral: .neutral
+        }
+    }
+
+    private var landRestrictionChipTone: AppleOperationalStatusChipTone {
+        switch landRestrictions.state.severity {
+        case .danger: .danger
+        case .caution: .caution
+        case .normal: .normal
+        case .neutral: .neutral
+        }
     }
 
     private var androidAircraftTable: some View {

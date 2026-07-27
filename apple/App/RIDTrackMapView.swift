@@ -4,6 +4,51 @@ import MapKit
 import R2CCore
 import SwiftUI
 
+enum AppleOperationalStatusChipTone {
+    case danger
+    case caution
+    case normal
+    case neutral
+
+    var backgroundColor: Color {
+        switch self {
+        case .danger: Color(red: 0.827, green: 0.184, blue: 0.184)
+        case .caution: Color(red: 0.961, green: 0.486, blue: 0)
+        case .normal: Color(red: 0.180, green: 0.490, blue: 0.196)
+        case .neutral: Color.secondary.opacity(0.18)
+        }
+    }
+
+    var foregroundColor: Color {
+        self == .neutral ? .primary : .white
+    }
+}
+
+struct AppleOperationalStatusChipLabel: View {
+    let title: String
+    let tone: AppleOperationalStatusChipTone
+
+    var body: some View {
+        Text(title)
+            .fontWeight(.medium)
+            .foregroundStyle(tone.foregroundColor)
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                tone.backgroundColor,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        tone == .neutral ? Color.secondary.opacity(0.35) : Color.clear,
+                        lineWidth: 1
+                    )
+            }
+    }
+}
+
 @MainActor
 private final class ApplePilotDisplayStore: ObservableObject {
     @Published private(set) var revision = 0
@@ -1108,24 +1153,23 @@ struct RIDTrackMapView: View {
                 Label("\(model.tracks.count) active", systemImage: "airplane.circle")
                 Text("\(model.acceptedObservationCount) points")
             if airspace.enabled || notams.enabled {
-                Button {
+                operationalStatusChip(
+                    usesAirspaceRestrictionStatus
+                        ? airspace.state.chipLabel
+                        : notams.state.chipLabel,
+                    tone: usesAirspaceRestrictionStatus ? airspaceTone : notamTone
+                ) {
                     if usesAirspaceRestrictionStatus { showAirspace = true }
                     else { showNotams = true }
-                } label: {
-                    Text(
-                        usesAirspaceRestrictionStatus
-                            ? airspace.state.chipLabel
-                            : notams.state.chipLabel
-                    )
-                    .foregroundStyle(usesAirspaceRestrictionStatus ? airspaceColor : notamColor)
-                    .lineLimit(1)
                 }
-                .buttonStyle(.plain)
             }
             if landRestrictions.enabled {
-                Button(landRestrictions.state.chipLabel) { showLandRestrictions = true }
-                    .foregroundStyle(landRestrictionColor)
-                    .lineLimit(1)
+                operationalStatusChip(
+                    landRestrictions.state.chipLabel,
+                    tone: landRestrictionTone
+                ) {
+                    showLandRestrictions = true
+                }
             }
             if offlineOnly { Label("Offline", systemImage: "wifi.slash") }
             }
@@ -1140,30 +1184,41 @@ struct RIDTrackMapView: View {
         !notams.state.visible || airspace.state.severity != .normal
     }
 
-    private var notamColor: Color {
+    private func operationalStatusChip(
+        _ title: String,
+        tone: AppleOperationalStatusChipTone,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            AppleOperationalStatusChipLabel(title: title, tone: tone)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var notamTone: AppleOperationalStatusChipTone {
         switch notams.state.chipSeverity {
-        case .danger: .red
-        case .caution: .orange
-        case .normal: .green
-        case .neutral: .secondary
+        case .danger: .danger
+        case .caution: .caution
+        case .normal: .normal
+        case .neutral: .neutral
         }
     }
 
-    private var airspaceColor: Color {
+    private var airspaceTone: AppleOperationalStatusChipTone {
         switch airspace.state.severity {
-        case .danger: .red
-        case .caution: .orange
-        case .normal: .green
-        case .neutral: .secondary
+        case .danger: .danger
+        case .caution: .caution
+        case .normal: .normal
+        case .neutral: .neutral
         }
     }
 
-    private var landRestrictionColor: Color {
+    private var landRestrictionTone: AppleOperationalStatusChipTone {
         switch landRestrictions.state.severity {
-        case .danger: .red
-        case .caution: .orange
-        case .normal: .green
-        case .neutral: .secondary
+        case .danger: .danger
+        case .caution: .caution
+        case .normal: .normal
+        case .neutral: .neutral
         }
     }
 

@@ -12,7 +12,7 @@ Latest changes:
 - Eliminated duplicate tablet icons and duplicate same-day archive folders; active tracks use Drone Tracks and completed tracks move to the archive folder.
 - Cached CalTopo marker icons locally and matched Android marker symbols.
 - Added offline map/CalTopo packages, USGS DEM terrain/AGL, cache maintenance, corrupt-tile quarantine, export/reload, cancellation, limits, and hit/fetch/fail/rate/ETA progress.
-- Added FAA NOTAM/TFR retrieval, age diagnostics, refresh controls, severity overlays, FAA grids, and the tablet antenna/one-mile BVLOS ring.
+- Added FAA NOTAM/TFR retrieval, age diagnostics, refresh controls, FAA grids, and Android-style color status chips on the Main Screen and MapPane.
 - Added cached national park, refuge, wilderness, and Colorado land-restriction checks with agency links and weekly source verification.
 - Added telemetry-loss and 180/200-foot AGL warnings with speech, haptics, Map/Mute controls, and diagnostics.
 - Added Android-matched session-only anomaly modes, scan-frame/target-size controls, guide preview, ROI colors/crosshairs, hottest-region indicator, defaults, and troubleshooting.

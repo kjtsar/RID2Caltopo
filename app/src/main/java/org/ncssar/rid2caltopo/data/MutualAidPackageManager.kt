@@ -300,7 +300,7 @@ object MutualAidPackageManager {
             expiresAtEpochMs = expiresAtEpochMs
         )
         if (profileEnc.isNullOrBlank()) {
-            throw IllegalStateException("Load ct_mutual_aid_credentials before exporting an MA package.")
+            throw IllegalStateException("Configure the Mutual Aid account in Settings before exporting an MA package.")
         }
         ZipOutputStream(rawOut).use { zip ->
             forEachTileIndexForBounds(bounds, minZoom, maxZoom, clipBoundary) { tileIndex ->

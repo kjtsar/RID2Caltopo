@@ -1,6 +1,6 @@
 # RID2Caltopo Privacy Policy
 
-Last updated: July 21, 2026
+Last updated: July 27, 2026
 
 RID2Caltopo is an incident-support application for Android, iPhone, and iPad.
 It does not contain advertising or analytics SDKs, does not track people across
@@ -33,6 +33,13 @@ sends the app-install zone identifier, device zone name, operator position,
 confirmed drone identity, and aircraft sightings to the configured tracker.
 This is used to prevent field devices from independently publishing or warning
 for the same aircraft.
+
+When nearby NOTAM monitoring is enabled, the app sends the operator's current
+latitude, longitude, and selected search radius to the configured tracker. The
+tracker authenticates to the FAA NOTAM service, forwards the geographic query,
+and returns the FAA response to the app. RID2Caltopo does not send FAA client
+credentials from the app or request an FAA bearer token. The tracker may cache
+the FAA response briefly for a small geographic area.
 
 Apple MapKit or the configured Android map provider may contact its map service
 to load map content. A configuration import may contact its specified public

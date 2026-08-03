@@ -3658,7 +3658,7 @@ internal fun SplitMapPane(
                 onOpenMutualAidPackage = {
                     mapManagementMenuExpanded = false
                     if (!CaltopoClient.HasMutualAidTemplate()) {
-                        CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting an MA package.")
+                        CaltopoClient.ShowToast("Configure the Mutual Aid account in Settings before exporting an MA package.")
                     } else if (CaltopoMap.GetMapId().isBlank()) {
                         CaltopoClient.ShowToast("Connect to a CalTopo map before exporting an MA package.")
                     } else {

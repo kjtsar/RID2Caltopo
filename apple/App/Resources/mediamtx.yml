@@ -4,7 +4,8 @@ logDestinations: [stdout]
 logStructured: no
 
 api: false
-metrics: false
+metrics: yes
+metricsAddress: 127.0.0.1:9998
 pprof: false
 
 readTimeout: 90s
@@ -20,7 +21,15 @@ hlsAlwaysRemux: no
 hlsVariant: fmp4
 hlsSegmentCount: 7
 hlsSegmentDuration: 1s
-webrtc: no
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ['http://127.0.0.1', 'http://localhost']
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: yes
+webrtcAdditionalHosts: []
+webrtcICEServers2:
+  - url: stun:stun.cloudflare.com:3478
 srt: no
 
 pathDefaults:

@@ -17,11 +17,13 @@ class AirspacePolicyTest {
                     primaryAirportIcao = "KNFL",
                     primaryAirportName = "Fallon NAS (Van Voorhis Fld)",
                     laancAvailable = true,
-                    airspaceClasses = listOf("D")
+                    airspaceClasses = listOf("D"),
+                    rings = containingRing
                 )
             ),
             loading = false,
-            errorMessage = null
+            errorMessage = null,
+            pilotCoordinate = pilotCoordinate
         )
 
         assertEquals(AirspaceChipSeverity.Danger, state.chipSeverity)
@@ -31,7 +33,8 @@ class AirspacePolicyTest {
         )
         assertEquals("Fallon NAS Class D", state.summary)
         assertEquals(
-            "Controlled airspace intersects the 1 mi operating area. FAA authorization is required before flight. " +
+            "The current location is inside an FAA UAS Facility Map grid identified as Class D. " +
+                "FAA authorization is required before flight. " +
                 "The displayed 400 ft AGL value is the lowest FAA UAS Facility Map limit across the area, " +
                 "not the top of the controlled-airspace class. Requests above it require further FAA coordination.",
             state.detail
@@ -46,12 +49,14 @@ class AirspacePolicyTest {
         val forward = AirspacePolicy.buildUiState(
             records = listOf(twoHundred, oneHundred),
             loading = false,
-            errorMessage = null
+            errorMessage = null,
+            pilotCoordinate = pilotCoordinate
         )
         val reverse = AirspacePolicy.buildUiState(
             records = listOf(oneHundred, twoHundred),
             loading = false,
-            errorMessage = null
+            errorMessage = null,
+            pilotCoordinate = pilotCoordinate
         )
 
         assertEquals(forward.chipLabel, reverse.chipLabel)
@@ -60,6 +65,41 @@ class AirspacePolicyTest {
             forward.chipLabel
         )
         assertTrue(forward.detail.contains("lowest FAA UAS Facility Map limit"))
+    }
+
+    @Test
+    fun nearbyGridDoesNotClaimAuthorizationRequiredAtCurrentLocation() {
+        val reddingGrid = FaaUasFacilityMapRecord(
+            objectId = 145193L,
+            ceilingFeet = 400,
+            unit = "Feet",
+            primaryAirportFaaId = "RDD",
+            primaryAirportIcao = "KRDD",
+            primaryAirportName = "Redding Rgnl",
+            laancAvailable = true,
+            airspaceClasses = listOf("D"),
+            rings = listOf(
+                listOf(
+                    AirspaceCoordinate(40.58, -122.3242),
+                    AirspaceCoordinate(40.61, -122.3242),
+                    AirspaceCoordinate(40.61, -122.30),
+                    AirspaceCoordinate(40.58, -122.30),
+                    AirspaceCoordinate(40.58, -122.3242)
+                )
+            )
+        )
+
+        val state = AirspacePolicy.buildUiState(
+            records = listOf(reddingGrid),
+            loading = false,
+            errorMessage = null,
+            pilotCoordinate = AirspaceCoordinate(40.59122, -122.33465)
+        )
+
+        assertEquals(AirspaceChipSeverity.Caution, state.chipSeverity)
+        assertEquals("Airspace nearby - Redding Rgnl Class D 0.5 mi", state.chipLabel)
+        assertTrue(state.detail.contains("No FAA UAS Facility Map grid covers the current location."))
+        assertTrue(state.detail.contains("authorization is required only if"))
     }
 
     @Test
@@ -82,6 +122,18 @@ class AirspacePolicyTest {
         primaryAirportIcao = "KTRK",
         primaryAirportName = "Truckee Tahoe Airport",
         laancAvailable = true,
-        airspaceClasses = listOf("D")
+        airspaceClasses = listOf("D"),
+        rings = containingRing
+    )
+
+    private val pilotCoordinate = AirspaceCoordinate(40.0, -120.0)
+    private val containingRing = listOf(
+        listOf(
+            AirspaceCoordinate(39.9, -120.1),
+            AirspaceCoordinate(40.1, -120.1),
+            AirspaceCoordinate(40.1, -119.9),
+            AirspaceCoordinate(39.9, -119.9),
+            AirspaceCoordinate(39.9, -120.1)
+        )
     )
 }

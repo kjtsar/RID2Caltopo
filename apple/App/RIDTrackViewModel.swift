@@ -7,6 +7,7 @@ final class RIDTrackViewModel: ObservableObject {
     @Published private(set) var tracks: [RidAircraftTrack] = []
     @Published private(set) var acceptedObservationCount = 0
     @Published private(set) var filteredObservationCount = 0
+    @Published private(set) var invalidObservationCount = 0
     @Published private(set) var archivedTrackCount = 0
     @Published private(set) var archiveStatus = "No archived tracks"
     @Published private(set) var trackerArchiveStatus = "Tracker archive not configured"
@@ -23,6 +24,7 @@ final class RIDTrackViewModel: ObservableObject {
     private var terrainTasks: [String: Task<Void, Never>] = [:]
     private var terrainRequestKeyByAircraftID: [String: String] = [:]
     private var terrainResolvedKeyByAircraftID: [String: String] = [:]
+    private var lastHorizontalAccuracyCodeByAircraftID: [String: UInt8] = [:]
     private var observationTasks: [String: Task<Void, Never>] = [:]
     private var agingTask: Task<Void, Never>?
     private var demoTask: Task<Void, Never>?
@@ -62,6 +64,7 @@ final class RIDTrackViewModel: ObservableObject {
                     self.terrainTasks.removeValue(forKey: track.aircraftID)?.cancel()
                     self.terrainRequestKeyByAircraftID.removeValue(forKey: track.aircraftID)
                     self.terrainResolvedKeyByAircraftID.removeValue(forKey: track.aircraftID)
+                    self.lastHorizontalAccuracyCodeByAircraftID.removeValue(forKey: track.aircraftID)
                     self.altitudeCoordinatorByAircraftID.removeValue(forKey: track.aircraftID)
                     self.altitudeDisplayByAircraftID.removeValue(forKey: track.aircraftID)
                 }
@@ -98,6 +101,9 @@ final class RIDTrackViewModel: ObservableObject {
         switch await store.ingest(observation) {
         case let .accepted(track):
             acceptedObservationCount += 1
+            if let code = observation.horizontalAccuracyCode {
+                lastHorizontalAccuracyCodeByAircraftID[track.aircraftID] = code
+            }
             logAcceptedObservation(track)
             updateAltitude(for: track)
             peerCoordinator?.observe(track: track, identity: identityProvider?(track.aircraftID))
@@ -124,8 +130,19 @@ final class RIDTrackViewModel: ObservableObject {
                     )
                 )
             }
+        case let .rejectedHorizontalAccuracy(code, track):
+            filteredObservationCount += 1
+            let remoteID = track?.aircraftID ?? RidTrackStore.canonicalAircraftID(observation.aircraftId)
+            if lastHorizontalAccuracyCodeByAircraftID[remoteID] != code {
+                AppleLog.warning(
+                    "RemoteID",
+                    "rid_filter remoteId=\(remoteID) reason=horizontal_accuracy code=\(code) requiredCode=10 transport=\(observation.source.rawValue)"
+                )
+            }
+            lastHorizontalAccuracyCodeByAircraftID[remoteID] = code
         case .rejectedInvalidObservation:
             filteredObservationCount += 1
+            invalidObservationCount += 1
             AppleLog.warning(
                 "RemoteID",
                 "rid_reject remoteId=\(observation.aircraftId) reason=invalid_observation transport=\(observation.source.rawValue)"
@@ -488,8 +505,8 @@ final class RIDTrackViewModel: ObservableObject {
             operationalPeriod: archiveConfiguration?.operationalPeriod ?? "",
             mapID: archiveConfiguration?.mapID ?? "",
             deviceName: AppleDeviceIdentity.displayName,
-            buildVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
-            buildTime: "Apple"
+            buildVersion: AppleBuildMetadata.version,
+            buildTime: AppleBuildMetadata.buildTime
         )
         do {
             let start = track.points.first?.receivedAt ?? track.lastSignalAt

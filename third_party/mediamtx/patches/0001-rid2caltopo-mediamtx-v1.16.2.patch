@@ -1,0 +1,1910 @@
+diff --git a/go.mod b/go.mod
+index 24128c44..8d9327d5 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/bluenviron/mediamtx
+ 
+-go 1.26.0
++go 1.25.0
+ 
+ require (
+ 	code.cloudfoundry.org/bytefmt v0.64.0
+@@ -101,3 +101,5 @@ require (
+ 	gopkg.in/warnings.v0 v0.1.2 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ )
++
++replace github.com/wlynxg/anet => ./third_party/anet
+diff --git a/internal/conf/conf.go b/internal/conf/conf.go
+index 2a2871c7..d5a91666 100644
+--- a/internal/conf/conf.go
++++ b/internal/conf/conf.go
+@@ -52,7 +52,8 @@ func setAllNilSlicesToEmptyRecursive(rv reflect.Value) {
+ 	}
+ 
+ 	if rv.Kind() == reflect.Struct {
+-		for _, field := range rv.Fields() {
++		for i := 0; i < rv.NumField(); i++ {
++			field := rv.Field(i)
+ 			switch field.Kind() {
+ 			case reflect.Slice:
+ 				if field.IsNil() {
+diff --git a/internal/conf/conf_test.go b/internal/conf/conf_test.go
+index 42c8bf65..f52b9aa1 100644
+--- a/internal/conf/conf_test.go
++++ b/internal/conf/conf_test.go
+@@ -48,11 +48,14 @@ func TestConfFromFile(t *testing.T) {
+ 		pa, ok := conf.Paths["cam1"]
+ 		require.Equal(t, true, ok)
+ 		require.Equal(t, &Path{
+-			Name:                       "cam1",
+-			Source:                     "publisher",
+-			SourceOnDemandStartTimeout: 10 * Duration(time.Second),
+-			SourceOnDemandCloseAfter:   10 * Duration(time.Second),
+-			OverridePublisher:          true,
++			Name:                          "cam1",
++			Source:                        "publisher",
++			SourceOnDemandStartTimeout:    10 * Duration(time.Second),
++			SourceOnDemandCloseAfter:      10 * Duration(time.Second),
++			OverridePublisher:             true,
++			PublisherCloseAfter:           0,
++			PublisherInactivityCloseAfter: 0,
++			RTMPPublishYieldEvery:         0,
+ 			AlwaysAvailableTracks: []AlwaysAvailableTrack{
+ 				{Codec: "H264"},
+ 			},
+diff --git a/internal/conf/path.go b/internal/conf/path.go
+index be0c6a22..83877e47 100644
+--- a/internal/conf/path.go
++++ b/internal/conf/path.go
+@@ -207,9 +207,13 @@ type Path struct {
+ 	ReadIPs     *IPNetworks `json:"readIPs,omitempty"`     // deprecated
+ 
+ 	// Publisher source
+-	OverridePublisher        bool   `json:"overridePublisher"`
+-	DisablePublisherOverride *bool  `json:"disablePublisherOverride,omitempty"` // deprecated
+-	SRTPublishPassphrase     string `json:"srtPublishPassphrase"`
++	OverridePublisher             bool     `json:"overridePublisher"`
++	PublisherCloseAfter           Duration `json:"publisherCloseAfter"`
++	PublisherInactivityCloseAfter Duration `json:"publisherInactivityCloseAfter"`
++	RTMPPublishVideoOnly          bool     `json:"rtmpPublishVideoOnly"`
++	RTMPPublishYieldEvery         int      `json:"rtmpPublishYieldEvery"`
++	DisablePublisherOverride      *bool    `json:"disablePublisherOverride,omitempty"` // deprecated
++	SRTPublishPassphrase          string   `json:"srtPublishPassphrase"`
+ 
+ 	// RTSP source
+ 	RTSPTransport          RTSPTransport  `json:"rtspTransport"`
+@@ -417,6 +421,14 @@ func (pconf *Path) validate(
+ 
+ 	switch {
+ 	case pconf.Source == "publisher":
++		if pconf.PublisherInactivityCloseAfter < 0 {
++			return fmt.Errorf("'publisherInactivityCloseAfter' must be greater than or equal to zero")
++		}
++
++		if pconf.RTMPPublishYieldEvery < 0 {
++			return fmt.Errorf("'rtmpPublishYieldEvery' must be greater than or equal to zero")
++		}
++
+ 		if pconf.DisablePublisherOverride != nil {
+ 			l.Log(logger.Warn, "parameter 'disablePublisherOverride' is deprecated "+
+ 				"and has been replaced with 'overridePublisher'")
+diff --git a/internal/core/metrics_test.go b/internal/core/metrics_test.go
+index 1391dfea..aea98319 100644
+--- a/internal/core/metrics_test.go
++++ b/internal/core/metrics_test.go
+@@ -77,6 +77,8 @@ func TestMetrics(t *testing.T) {
+ 
+ 		require.Equal(t, `paths 0
+ paths_bytes_received 0
++paths_packets_received 0
++paths_units_received 0
+ paths_bytes_sent 0
+ paths_readers 0
+ hls_muxers 0
+@@ -360,26 +362,38 @@ webrtc_sessions_rtcp_packets_sent 0
+ 		require.Regexp(t,
+ 			`^paths\{name=".*?",state="ready"\} 1`+"\n"+
+ 				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_packets_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_units_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_readers\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths\{name=".*?",state="ready"\} 1`+"\n"+
+ 				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_packets_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_units_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_readers\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths\{name=".*?",state="ready"\} 1`+"\n"+
+ 				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_packets_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_units_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_readers\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths\{name=".*?",state="ready"\} 1`+"\n"+
+ 				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_packets_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_units_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_readers\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths\{name=".*?",state="ready"\} 1`+"\n"+
+ 				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_packets_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_units_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_readers\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths\{name=".*?",state="ready"\} 1`+"\n"+
+ 				`paths_bytes_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_packets_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
++				`paths_units_received\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_bytes_sent\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`paths_readers\{name=".*?",state="ready"\} [0-9]+`+"\n"+
+ 				`hls_muxers\{name=".*?"\} 1`+"\n"+
+@@ -511,6 +525,8 @@ webrtc_sessions_rtcp_packets_sent 0
+ 
+ 		require.Equal(t, "paths 0\n"+
+ 			"paths_bytes_received 0\n"+
++			"paths_packets_received 0\n"+
++			"paths_units_received 0\n"+
+ 			"paths_bytes_sent 0\n"+
+ 			"paths_readers 0\n",
+ 			string(bo))
+diff --git a/internal/core/path.go b/internal/core/path.go
+index 55869b5c..c6d274e7 100644
+--- a/internal/core/path.go
++++ b/internal/core/path.go
+@@ -107,6 +107,8 @@ type path struct {
+ 	onDemandPublisherState         pathOnDemandState
+ 	onDemandPublisherReadyTimer    *time.Timer
+ 	onDemandPublisherCloseTimer    *time.Timer
++	publisherCloseTimer            *time.Timer
++	publisherCloseTimerRunning     bool
+ 
+ 	// in
+ 	chReloadConf              chan *conf.Path
+@@ -135,6 +137,7 @@ func (pa *path) initialize() {
+ 	pa.onDemandStaticSourceCloseTimer = emptyTimer()
+ 	pa.onDemandPublisherReadyTimer = emptyTimer()
+ 	pa.onDemandPublisherCloseTimer = emptyTimer()
++	pa.publisherCloseTimer = emptyTimer()
+ 	pa.chReloadConf = make(chan *conf.Path)
+ 	pa.chStaticSourceSetReady = make(chan defs.PathSourceStaticSetReadyReq)
+ 	pa.chStaticSourceSetNotReady = make(chan defs.PathSourceStaticSetNotReadyReq)
+@@ -229,6 +232,7 @@ func (pa *path) run() {
+ 	pa.onDemandStaticSourceCloseTimer.Stop()
+ 	pa.onDemandPublisherReadyTimer.Stop()
+ 	pa.onDemandPublisherCloseTimer.Stop()
++	pa.publisherCloseTimer.Stop()
+ 
+ 	onUnInitHook()
+ 
+@@ -288,6 +292,13 @@ func (pa *path) runInner() error {
+ 		case <-pa.onDemandPublisherCloseTimer.C:
+ 			pa.doOnDemandPublisherCloseTimer()
+ 
++		case <-pa.publisherCloseTimer.C:
++			pa.doPublisherCloseTimer()
++
++			if pa.shouldClose() {
++				pa.parent.closePathIfIdle(pa)
++			}
++
+ 		case newConf := <-pa.chReloadConf:
+ 			pa.doReloadConf(newConf)
+ 
+@@ -387,6 +398,38 @@ func (pa *path) doOnDemandPublisherCloseTimer() {
+ 	pa.onDemandPublisherStop("not needed by anyone")
+ }
+ 
++func (pa *path) stopPublisherCloseTimer() {
++	if pa.publisherCloseTimerRunning {
++		pa.publisherCloseTimer.Stop()
++		pa.publisherCloseTimer = emptyTimer()
++		pa.publisherCloseTimerRunning = false
++	}
++}
++
++func (pa *path) schedulePublisherClose() {
++	if pa.conf.PublisherCloseAfter == 0 {
++		pa.executeRemovePublisher()
++		return
++	}
++
++	pa.stopPublisherCloseTimer()
++	pa.publisherCloseTimer = time.NewTimer(time.Duration(pa.conf.PublisherCloseAfter))
++	pa.publisherCloseTimerRunning = true
++	pa.source = nil
++}
++
++func (pa *path) doPublisherCloseTimer() {
++	pa.publisherCloseTimerRunning = false
++	pa.publisherCloseTimer = emptyTimer()
++
++	if len(pa.readers) != 0 {
++		pa.Log(logger.Info, "publisher is offline, keeping stream available for existing readers")
++		return
++	}
++
++	pa.executeRemovePublisher()
++}
++
+ func (pa *path) doReloadConf(newConf *conf.Path) {
+ 	pa.confMutex.Lock()
+ 	oldConf := pa.conf
+@@ -511,7 +554,7 @@ func (pa *path) doDescribe(req defs.PathDescribeReq) {
+ 
+ func (pa *path) doRemovePublisher(req defs.PathRemovePublisherReq) {
+ 	if pa.source == req.Author {
+-		pa.executeRemovePublisher()
++		pa.schedulePublisherClose()
+ 	}
+ 	close(req.Res)
+ }
+@@ -524,15 +567,43 @@ func (pa *path) doAddPublisher(req defs.PathAddPublisherReq) {
+ 		return
+ 	}
+ 
++	reuseExistingStream := false
++
++	if pa.source == nil && pa.stream != nil {
++		if pa.conf.AlwaysAvailable || pa.publisherCloseTimerRunning {
++			err := stream.MediasAreReplaceCompatible(pa.stream.Desc.Medias, req.Desc.Medias)
++			if err != nil {
++				req.Res <- defs.PathAddPublisherRes{Err: err}
++				return
++			}
++
++			reuseExistingStream = true
++			pa.stopPublisherCloseTimer()
++		}
++	}
++
+ 	if pa.source != nil {
+ 		if !pa.conf.OverridePublisher {
+ 			req.Res <- defs.PathAddPublisherRes{Err: fmt.Errorf("someone is already publishing to path '%s'", pa.name)}
+ 			return
+ 		}
+ 
++		if pa.stream != nil {
++			err := stream.MediasAreReplaceCompatible(pa.stream.Desc.Medias, req.Desc.Medias)
++			if err != nil {
++				req.Res <- defs.PathAddPublisherRes{Err: err}
++				return
++			}
++
++			reuseExistingStream = true
++		}
++
+ 		pa.Log(logger.Info, "closing existing publisher")
+ 		pa.source.(defs.Publisher).Close()
+-		pa.executeRemovePublisher()
++
++		if !reuseExistingStream {
++			pa.executeRemovePublisher()
++		}
+ 	}
+ 
+ 	pa.source = req.Author
+@@ -541,7 +612,7 @@ func (pa *path) doAddPublisher(req defs.PathAddPublisherReq) {
+ 	req.Author.Log(logger.Info, "is publishing to path '%s'",
+ 		pa.name)
+ 
+-	if !pa.conf.AlwaysAvailable {
++	if !pa.conf.AlwaysAvailable && !reuseExistingStream {
+ 		err := pa.setAvailable(req.Desc, req.ReplaceNTP)
+ 		if err != nil {
+ 			pa.source = nil
+@@ -552,11 +623,9 @@ func (pa *path) doAddPublisher(req defs.PathAddPublisherReq) {
+ 
+ 	subStream := &stream.SubStream{
+ 		Stream:        pa.stream,
++		CurDesc:       req.Desc,
+ 		UseRTPPackets: req.UseRTPPackets,
+ 	}
+-	if pa.conf.AlwaysAvailable {
+-		subStream.CurDesc = req.Desc
+-	}
+ 	err := subStream.Initialize()
+ 	if err != nil {
+ 		req.Res <- defs.PathAddPublisherRes{Err: err}
+@@ -613,6 +682,18 @@ func (pa *path) doRemoveReader(req defs.PathRemoveReaderReq) {
+ 	close(req.Res)
+ 
+ 	if len(pa.readers) == 0 {
++		if pa.source == nil &&
++			pa.stream != nil &&
++			!pa.conf.AlwaysAvailable &&
++			!pa.publisherCloseTimerRunning {
++			pa.setNotAvailable()
++
++			if pa.shouldClose() {
++				pa.parent.closePathIfIdle(pa)
++			}
++			return
++		}
++
+ 		if pa.conf.HasOnDemandStaticSource() {
+ 			if pa.onDemandStaticSourceState == pathOnDemandStateReady {
+ 				pa.onDemandStaticSourceScheduleClose()
+@@ -673,6 +754,18 @@ func (pa *path) doAPIPathsGet(req pathAPIPathsGetReq) {
+ 				}
+ 				return pa.stream.BytesReceived()
+ 			}(),
++			PacketsReceived: func() uint64 {
++				if !pa.isAvailable() {
++					return 0
++				}
++				return pa.stream.PacketsReceived()
++			}(),
++			UnitsReceived: func() uint64 {
++				if !pa.isAvailable() {
++					return 0
++				}
++				return pa.stream.UnitsReceived()
++			}(),
+ 			BytesSent: func() uint64 {
+ 				if !pa.isAvailable() {
+ 					return 0
+@@ -717,6 +810,7 @@ func (pa *path) ExternalCmdEnv() externalcmd.Environment {
+ 
+ func (pa *path) shouldClose() bool {
+ 	return pa.conf.Regexp != nil &&
++		pa.stream == nil &&
+ 		pa.source == nil &&
+ 		len(pa.readers) == 0 &&
+ 		len(pa.describeRequestsOnHold) == 0 &&
+diff --git a/internal/core/path_test.go b/internal/core/path_test.go
+index 563e9954..2394c49f 100644
+--- a/internal/core/path_test.go
++++ b/internal/core/path_test.go
+@@ -1010,3 +1010,275 @@ func TestPathOverridePublisher(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestPathOverridePublisherKeepsExistingReaders(t *testing.T) {
++	p, ok := newInstance("rtmp: no\n" +
++		"paths:\n" +
++		"  all_others:\n")
++	require.Equal(t, true, ok)
++	defer p.Close()
++
++	medi := test.UniqueMediaH264()
++
++	s1 := gortsplib.Client{}
++	err := s1.StartRecording("rtsp://localhost:8554/teststream",
++		&description.Session{Medias: []*description.Media{medi}})
++	require.NoError(t, err)
++	defer s1.Close()
++
++	u, err := base.ParseURL("rtsp://localhost:8554/teststream")
++	require.NoError(t, err)
++
++	reader := gortsplib.Client{
++		Scheme: u.Scheme,
++		Host:   u.Host,
++	}
++
++	err = reader.Start()
++	require.NoError(t, err)
++	defer reader.Close()
++
++	desc, _, err := reader.Describe(u)
++	require.NoError(t, err)
++
++	err = reader.SetupAll(desc.BaseURL, desc.Medias)
++	require.NoError(t, err)
++
++	firstPacketReceived := make(chan struct{})
++	secondPacketReceived := make(chan struct{})
++	packetCount := 0
++
++	reader.OnPacketRTP(desc.Medias[0], desc.Medias[0].Formats[0], func(pkt *rtp.Packet) {
++		packetCount++
++
++		switch packetCount {
++		case 1:
++			require.Equal(t, []byte{5, 11, 12, 13, 14}, pkt.Payload)
++			close(firstPacketReceived)
++
++		case 2:
++			require.Equal(t, []byte{5, 15, 16, 17, 18}, pkt.Payload)
++			close(secondPacketReceived)
++		}
++	})
++
++	_, err = reader.Play(nil)
++	require.NoError(t, err)
++
++	err = s1.WritePacketRTP(medi, &rtp.Packet{
++		Header: rtp.Header{
++			Version:        0x02,
++			PayloadType:    96,
++			SequenceNumber: 57898,
++			Timestamp:      345234000,
++			SSRC:           978651231,
++			Marker:         true,
++		},
++		Payload: []byte{5, 11, 12, 13, 14},
++	})
++	require.NoError(t, err)
++
++	<-firstPacketReceived
++
++	s2 := gortsplib.Client{}
++	err = s2.StartRecording("rtsp://localhost:8554/teststream",
++		&description.Session{Medias: []*description.Media{medi}})
++	require.NoError(t, err)
++	defer s2.Close()
++
++	err = s1.Wait()
++	require.EqualError(t, err, "EOF")
++
++	err = s2.WritePacketRTP(medi, &rtp.Packet{
++		Header: rtp.Header{
++			Version:        0x02,
++			PayloadType:    96,
++			SequenceNumber: 57899,
++			Timestamp:      345234345,
++			SSRC:           978651231,
++			Marker:         true,
++		},
++		Payload: []byte{5, 15, 16, 17, 18},
++	})
++	require.NoError(t, err)
++
++	select {
++	case <-secondPacketReceived:
++	case <-time.After(2 * time.Second):
++		t.Fatal("reader was disconnected during publisher override")
++	}
++}
++
++func TestPathOverridePublisherAcceptsAudioOnlyReplacement(t *testing.T) {
++	p, ok := newInstance("rtmp: no\n" +
++		"paths:\n" +
++		"  all_others:\n")
++	require.Equal(t, true, ok)
++	defer p.Close()
++
++	videoMedia := test.UniqueMediaH264()
++	audioMedia := test.UniqueMediaMPEG4Audio()
++
++	s1 := gortsplib.Client{}
++	err := s1.StartRecording("rtsp://localhost:8554/teststream",
++		&description.Session{Medias: []*description.Media{videoMedia, audioMedia}})
++	require.NoError(t, err)
++	defer s1.Close()
++
++	u, err := base.ParseURL("rtsp://localhost:8554/teststream")
++	require.NoError(t, err)
++
++	reader := gortsplib.Client{
++		Scheme: u.Scheme,
++		Host:   u.Host,
++	}
++
++	err = reader.Start()
++	require.NoError(t, err)
++	defer reader.Close()
++
++	desc, _, err := reader.Describe(u)
++	require.NoError(t, err)
++	require.Len(t, desc.Medias, 2)
++
++	err = reader.SetupAll(desc.BaseURL, desc.Medias)
++	require.NoError(t, err)
++
++	audioPacketReceived := make(chan struct{})
++
++	reader.OnPacketRTP(desc.Medias[1], desc.Medias[1].Formats[0], func(pkt *rtp.Packet) {
++		require.Equal(t, []byte{1, 2, 3, 4}, pkt.Payload)
++		close(audioPacketReceived)
++	})
++
++	_, err = reader.Play(nil)
++	require.NoError(t, err)
++
++	replacementAudioMedia := test.UniqueMediaMPEG4Audio()
++
++	s2 := gortsplib.Client{}
++	err = s2.StartRecording("rtsp://localhost:8554/teststream",
++		&description.Session{Medias: []*description.Media{replacementAudioMedia}})
++	require.NoError(t, err)
++	defer s2.Close()
++
++	err = s1.Wait()
++	require.EqualError(t, err, "EOF")
++
++	err = s2.WritePacketRTP(replacementAudioMedia, &rtp.Packet{
++		Header: rtp.Header{
++			Version:        0x02,
++			PayloadType:    96,
++			SequenceNumber: 57899,
++			Timestamp:      345234345,
++			SSRC:           978651231,
++			Marker:         true,
++		},
++		Payload: []byte{1, 2, 3, 4},
++	})
++	require.NoError(t, err)
++
++	select {
++	case <-audioPacketReceived:
++	case <-time.After(2 * time.Second):
++		t.Fatal("audio-only replacement was not accepted")
++	}
++}
++
++func TestPathPublisherCloseAfterKeepsReadersAlive(t *testing.T) {
++	p, ok := newInstance("rtmp: no\n" +
++		"paths:\n" +
++		"  all_others:\n" +
++		"    publisherCloseAfter: 2s\n")
++	require.Equal(t, true, ok)
++	defer p.Close()
++
++	medi := test.UniqueMediaH264()
++
++	s1 := gortsplib.Client{}
++	err := s1.StartRecording("rtsp://localhost:8554/teststream",
++		&description.Session{Medias: []*description.Media{medi}})
++	require.NoError(t, err)
++
++	u, err := base.ParseURL("rtsp://localhost:8554/teststream")
++	require.NoError(t, err)
++
++	reader := gortsplib.Client{
++		Scheme: u.Scheme,
++		Host:   u.Host,
++	}
++
++	err = reader.Start()
++	require.NoError(t, err)
++	defer reader.Close()
++
++	desc, _, err := reader.Describe(u)
++	require.NoError(t, err)
++
++	err = reader.SetupAll(desc.BaseURL, desc.Medias)
++	require.NoError(t, err)
++
++	firstPacketReceived := make(chan struct{})
++	secondPacketReceived := make(chan struct{})
++	packetCount := 0
++
++	reader.OnPacketRTP(desc.Medias[0], desc.Medias[0].Formats[0], func(pkt *rtp.Packet) {
++		packetCount++
++
++		switch packetCount {
++		case 1:
++			require.Equal(t, []byte{5, 11, 12, 13, 14}, pkt.Payload)
++			close(firstPacketReceived)
++
++		case 2:
++			require.Equal(t, []byte{5, 15, 16, 17, 18}, pkt.Payload)
++			close(secondPacketReceived)
++		}
++	})
++
++	_, err = reader.Play(nil)
++	require.NoError(t, err)
++
++	err = s1.WritePacketRTP(medi, &rtp.Packet{
++		Header: rtp.Header{
++			Version:        0x02,
++			PayloadType:    96,
++			SequenceNumber: 57898,
++			Timestamp:      345234000,
++			SSRC:           978651231,
++			Marker:         true,
++		},
++		Payload: []byte{5, 11, 12, 13, 14},
++	})
++	require.NoError(t, err)
++
++	<-firstPacketReceived
++
++	s1.Close()
++	time.Sleep(500 * time.Millisecond)
++
++	s2 := gortsplib.Client{}
++	err = s2.StartRecording("rtsp://localhost:8554/teststream",
++		&description.Session{Medias: []*description.Media{medi}})
++	require.NoError(t, err)
++	defer s2.Close()
++
++	err = s2.WritePacketRTP(medi, &rtp.Packet{
++		Header: rtp.Header{
++			Version:        0x02,
++			PayloadType:    96,
++			SequenceNumber: 57899,
++			Timestamp:      345234345,
++			SSRC:           978651231,
++			Marker:         true,
++		},
++		Payload: []byte{5, 15, 16, 17, 18},
++	})
++	require.NoError(t, err)
++
++	select {
++	case <-secondPacketReceived:
++	case <-time.After(2 * time.Second):
++		t.Fatal("reader was disconnected during publisher reconnect")
++	}
++}
+diff --git a/internal/core/versiongetter/main.go b/internal/core/versiongetter/main.go
+index 0bfe5398..f3cd6970 100644
+--- a/internal/core/versiongetter/main.go
++++ b/internal/core/versiongetter/main.go
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 	"log"
+ 	"os"
++	"os/exec"
+ 	"path/filepath"
+ 	"strconv"
+ 	"strings"
+@@ -17,6 +18,50 @@ import (
+ 	"github.com/go-git/go-git/v5/storage/filesystem"
+ )
+ 
++func tagFromGitCommand(workTreeAbs string) (string, error) {
++	cmd := exec.Command("git", "describe", "--tags", "--dirty", "--always")
++	cmd.Dir = workTreeAbs
++	cmd.Stderr = os.Stderr
++
++	out, err := cmd.Output()
++	if err != nil {
++		return "", fmt.Errorf("git describe failed: %w", err)
++	}
++
++	return strings.TrimSpace(string(out)), nil
++}
++
++func resolveGitDir(repoRootAbs string) (string, error) {
++	dotGitAbs := filepath.Join(repoRootAbs, ".git")
++
++	info, err := os.Stat(dotGitAbs)
++	if err != nil {
++		return "", fmt.Errorf("failed to stat .git: %w", err)
++	}
++
++	if info.IsDir() {
++		return dotGitAbs, nil
++	}
++
++	content, err := os.ReadFile(dotGitAbs)
++	if err != nil {
++		return "", fmt.Errorf("failed to read .git file: %w", err)
++	}
++
++	line := strings.TrimSpace(string(content))
++	const prefix = "gitdir: "
++	if !strings.HasPrefix(line, prefix) {
++		return "", fmt.Errorf("unsupported .git file format")
++	}
++
++	gitDir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
++	if !filepath.IsAbs(gitDir) {
++		gitDir = filepath.Join(repoRootAbs, gitDir)
++	}
++
++	return filepath.Clean(gitDir), nil
++}
++
+ // Golang version of git describe --tags
+ func gitDescribeTags(repo *git.Repository) (string, error) {
+ 	head, err := repo.Head()
+@@ -73,25 +118,40 @@ func gitDescribeTags(repo *git.Repository) (string, error) {
+ }
+ 
+ func tagFromGit() error {
++	workTreeAbs, _ := filepath.Abs("../../")
++
++	version, err := tagFromGitCommand(workTreeAbs)
++	if err == nil {
++		err = os.WriteFile("VERSION", []byte(version), 0o644)
++		if err != nil {
++			return fmt.Errorf("failed to write version file: %w", err)
++		}
++
++		log.Printf("ok (%s)", version)
++		return nil
++	}
++
+ 	// [git.PlainOpen] uses a ChrootOS that limits filesystem access to the .git directory only.
+ 	//
+ 	// Unfortunately, this can cause issues with package build environments such as Arch Linux's,
+ 	// where .git/objects/info/alternates points to a directory outside of the .git directory.
+ 	//
+ 	// To work around this, specify an AlternatesFS that allows access to the entire filesystem.
+-	dotGitAbs, _ := filepath.Abs("../../.git")
++	dotGitAbs, err := resolveGitDir(workTreeAbs)
++	if err != nil {
++		return fmt.Errorf("failed to resolve .git directory: %w", err)
++	}
+ 	storerFs := osfs.New(dotGitAbs, osfs.WithBoundOS())
+ 	storer := filesystem.NewStorageWithOptions(storerFs, cache.NewObjectLRUDefault(), filesystem.Options{
+ 		AlternatesFS: osfs.New("/", osfs.WithBoundOS()),
+ 	})
+-	workTreeAbs, _ := filepath.Abs("../../")
+ 	worktreeFs := osfs.New(workTreeAbs, osfs.WithBoundOS())
+ 	repo, err := git.Open(storer, worktreeFs)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to open repository: %w", err)
+ 	}
+ 
+-	version, err := gitDescribeTags(repo)
++	version, err = gitDescribeTags(repo)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to get version: %w", err)
+ 	}
+diff --git a/internal/defs/api.go b/internal/defs/api.go
+index 627d7ed4..06f24392 100644
+--- a/internal/defs/api.go
++++ b/internal/defs/api.go
+@@ -88,19 +88,21 @@ type APIPathReader struct {
+ 
+ // APIPath is a path.
+ type APIPath struct {
+-	Name          string          `json:"name"`
+-	ConfName      string          `json:"confName"`
+-	Ready         bool            `json:"ready"`     // deprecated
+-	ReadyTime     *time.Time      `json:"readyTime"` // deprecated
+-	Available     bool            `json:"available"`
+-	AvailableTime *time.Time      `json:"availableTime"`
+-	Online        bool            `json:"online"`
+-	OnlineTime    *time.Time      `json:"onlineTime"`
+-	Source        *APIPathSource  `json:"source"`
+-	Tracks        []string        `json:"tracks"`
+-	BytesReceived uint64          `json:"bytesReceived"`
+-	BytesSent     uint64          `json:"bytesSent"`
+-	Readers       []APIPathReader `json:"readers"`
++	Name            string          `json:"name"`
++	ConfName        string          `json:"confName"`
++	Ready           bool            `json:"ready"`     // deprecated
++	ReadyTime       *time.Time      `json:"readyTime"` // deprecated
++	Available       bool            `json:"available"`
++	AvailableTime   *time.Time      `json:"availableTime"`
++	Online          bool            `json:"online"`
++	OnlineTime      *time.Time      `json:"onlineTime"`
++	Source          *APIPathSource  `json:"source"`
++	Tracks          []string        `json:"tracks"`
++	BytesReceived   uint64          `json:"bytesReceived"`
++	PacketsReceived uint64          `json:"packetsReceived"`
++	UnitsReceived   uint64          `json:"unitsReceived"`
++	BytesSent       uint64          `json:"bytesSent"`
++	Readers         []APIPathReader `json:"readers"`
+ }
+ 
+ // APIPathList is a list of paths.
+diff --git a/internal/metrics/metrics.go b/internal/metrics/metrics.go
+index e6ed0875..2de633aa 100644
+--- a/internal/metrics/metrics.go
++++ b/internal/metrics/metrics.go
+@@ -224,6 +224,8 @@ func (m *Metrics) onMetrics(ctx *gin.Context) {
+ 					})
+ 					out += metric("paths", ta, 1)
+ 					out += metric("paths_bytes_received", ta, int64(i.BytesReceived))
++					out += metric("paths_packets_received", ta, int64(i.PacketsReceived))
++					out += metric("paths_units_received", ta, int64(i.UnitsReceived))
+ 					out += metric("paths_bytes_sent", ta, int64(i.BytesSent))
+ 					out += metric("paths_readers", ta, int64(len(i.Readers)))
+ 				}
+@@ -231,6 +233,8 @@ func (m *Metrics) onMetrics(ctx *gin.Context) {
+ 		} else if pathFilter == "" {
+ 			out += metric("paths", "", 0)
+ 			out += metric("paths_bytes_received", "", 0)
++			out += metric("paths_packets_received", "", 0)
++			out += metric("paths_units_received", "", 0)
+ 			out += metric("paths_bytes_sent", "", 0)
+ 			out += metric("paths_readers", "", 0)
+ 		}
+diff --git a/internal/metrics/metrics_test.go b/internal/metrics/metrics_test.go
+index 5e09711c..8cdacb98 100644
+--- a/internal/metrics/metrics_test.go
++++ b/internal/metrics/metrics_test.go
+@@ -35,11 +35,13 @@ func (dummyPathManager) APIPathsList() (*defs.APIPathList, error) {
+ 				Type: "testing",
+ 				ID:   "123324354",
+ 			},
+-			Ready:         true,
+-			ReadyTime:     ptrOf(time.Date(2003, 11, 4, 23, 15, 7, 0, time.UTC)),
+-			Tracks:        []string{"H264", "H265"},
+-			BytesReceived: 123,
+-			BytesSent:     456,
++			Ready:           true,
++			ReadyTime:       ptrOf(time.Date(2003, 11, 4, 23, 15, 7, 0, time.UTC)),
++			Tracks:          []string{"H264", "H265"},
++			BytesReceived:   123,
++			PacketsReceived: 78,
++			UnitsReceived:   9,
++			BytesSent:       456,
+ 			Readers: []defs.APIPathReader{
+ 				{
+ 					Type: "testing",
+@@ -276,6 +278,8 @@ func TestMetrics(t *testing.T) {
+ 	require.Equal(t,
+ 		`paths{name="mypath",state="ready"} 1`+"\n"+
+ 			`paths_bytes_received{name="mypath",state="ready"} 123`+"\n"+
++			`paths_packets_received{name="mypath",state="ready"} 78`+"\n"+
++			`paths_units_received{name="mypath",state="ready"} 9`+"\n"+
+ 			`paths_bytes_sent{name="mypath",state="ready"} 456`+"\n"+
+ 			`paths_readers{name="mypath",state="ready"} 1`+"\n"+
+ 			`hls_muxers{name="mypath"} 1`+"\n"+
+@@ -474,6 +478,8 @@ func TestFilter(t *testing.T) {
+ 				require.Equal(t,
+ 					`paths{name="mypath",state="ready"} 1`+"\n"+
+ 						`paths_bytes_received{name="mypath",state="ready"} 123`+"\n"+
++						`paths_packets_received{name="mypath",state="ready"} 78`+"\n"+
++						`paths_units_received{name="mypath",state="ready"} 9`+"\n"+
+ 						`paths_bytes_sent{name="mypath",state="ready"} 456`+"\n"+
+ 						`paths_readers{name="mypath",state="ready"} 1`+"\n",
+ 					string(byts))
+diff --git a/internal/protocols/rtmp/to_stream.go b/internal/protocols/rtmp/to_stream.go
+index 4b195064..c0e3dd5f 100644
+--- a/internal/protocols/rtmp/to_stream.go
++++ b/internal/protocols/rtmp/to_stream.go
+@@ -35,6 +35,8 @@ func fourCCToString(c message.FourCC) string {
+ func ToStream(
+ 	r *gortmplib.Reader,
+ 	subStream **stream.SubStream,
++	onData func(),
++	videoOnly bool,
+ ) ([]*description.Media, error) {
+ 	var medias []*description.Media
+ 
+@@ -51,6 +53,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataAV1(track, func(pts time.Duration, tu [][]byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadAV1(tu),
+@@ -68,6 +73,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataVP9(track, func(pts time.Duration, frame []byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadVP9(frame),
+@@ -88,6 +96,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataH265(track, func(pts time.Duration, _ time.Duration, au [][]byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadH265(au),
+@@ -108,6 +119,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataH264(track, func(pts time.Duration, _ time.Duration, au [][]byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadH264(au),
+@@ -115,6 +129,10 @@ func ToStream(
+ 			})
+ 
+ 		case *codecs.Opus:
++			if videoOnly {
++				continue
++			}
++
+ 			forma := &format.Opus{
+ 				PayloadTyp:   96,
+ 				ChannelCount: codec.ChannelCount,
+@@ -126,6 +144,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataOpus(track, func(pts time.Duration, packet []byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadOpus{packet},
+@@ -133,6 +154,10 @@ func ToStream(
+ 			})
+ 
+ 		case *codecs.MPEG4Audio:
++			if videoOnly {
++				continue
++			}
++
+ 			forma := &format.MPEG4Audio{
+ 				PayloadTyp:       96,
+ 				Config:           codec.Config,
+@@ -147,6 +172,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataMPEG4Audio(track, func(pts time.Duration, au []byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadMPEG4Audio{au},
+@@ -154,6 +182,10 @@ func ToStream(
+ 			})
+ 
+ 		case *codecs.MPEG1Audio:
++			if videoOnly {
++				continue
++			}
++
+ 			forma := &format.MPEG1Audio{}
+ 			medi := &description.Media{
+ 				Type:    description.MediaTypeAudio,
+@@ -162,6 +194,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataMPEG1Audio(track, func(pts time.Duration, frame []byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadMPEG1Audio{frame},
+@@ -169,6 +204,10 @@ func ToStream(
+ 			})
+ 
+ 		case *codecs.AC3:
++			if videoOnly {
++				continue
++			}
++
+ 			forma := &format.AC3{
+ 				PayloadTyp:   96,
+ 				SampleRate:   codec.SampleRate,
+@@ -181,6 +220,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataAC3(track, func(pts time.Duration, frame []byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadAC3{frame},
+@@ -188,6 +230,10 @@ func ToStream(
+ 			})
+ 
+ 		case *codecs.G711:
++			if videoOnly {
++				continue
++			}
++
+ 			forma := &format.G711{
+ 				PayloadTyp: func() uint8 {
+ 					switch {
+@@ -210,6 +256,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataG711(track, func(pts time.Duration, samples []byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadG711(samples),
+@@ -217,6 +266,10 @@ func ToStream(
+ 			})
+ 
+ 		case *codecs.LPCM:
++			if videoOnly {
++				continue
++			}
++
+ 			forma := &format.LPCM{
+ 				PayloadTyp:   96,
+ 				BitDepth:     codec.BitDepth,
+@@ -230,6 +283,9 @@ func ToStream(
+ 			medias = append(medias, medi)
+ 
+ 			r.OnDataLPCM(track, func(pts time.Duration, samples []byte) {
++				if onData != nil {
++					onData()
++				}
+ 				(*subStream).WriteUnit(medi, forma, &unit.Unit{
+ 					PTS:     durationToTimestamp(pts, forma.ClockRate()),
+ 					Payload: unit.PayloadLPCM(samples),
+diff --git a/internal/protocols/rtmp/to_stream_test.go b/internal/protocols/rtmp/to_stream_test.go
+index 817a1c66..9ac5276f 100644
+--- a/internal/protocols/rtmp/to_stream_test.go
++++ b/internal/protocols/rtmp/to_stream_test.go
+@@ -10,7 +10,7 @@ import (
+ func TestToStreamNoSupportedCodecs(t *testing.T) {
+ 	r := &gortmplib.Reader{}
+ 
+-	_, err := ToStream(r, nil)
++	_, err := ToStream(r, nil, nil, false)
+ 	require.Equal(t, errNoSupportedCodecsTo, err)
+ }
+ 
+diff --git a/internal/servers/rtmp/conn.go b/internal/servers/rtmp/conn.go
+index 18f94d65..2944eabd 100644
+--- a/internal/servers/rtmp/conn.go
++++ b/internal/servers/rtmp/conn.go
+@@ -5,11 +5,14 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"net"
++	"runtime"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/bluenviron/gortmplib"
++	gortmplibmessage "github.com/bluenviron/gortmplib/pkg/message"
+ 	"github.com/bluenviron/gortsplib/v5/pkg/description"
+ 	"github.com/google/uuid"
+ 
+@@ -23,6 +26,11 @@ import (
+ 	"github.com/bluenviron/mediamtx/internal/stream"
+ )
+ 
++const (
++	rtmpPublisherIdlePingAfter    = time.Second
++	rtmpPublisherIdlePingPollTime = 250 * time.Millisecond
++)
++
+ type conn struct {
+ 	parentCtx           context.Context
+ 	isTLS               bool
+@@ -127,16 +135,26 @@ func (c *conn) runReader() error {
+ 	conn := &gortmplib.ServerConn{
+ 		RW: c.nconn,
+ 	}
++
++	c.Log(logger.Debug, "RTMP handshake: initializing server connection")
+ 	err := conn.Initialize()
+ 	if err != nil {
++		c.Log(logger.Debug, "RTMP handshake failed during initialization: %v", err)
+ 		return err
+ 	}
+ 
++	c.Log(logger.Debug, "RTMP handshake: waiting for connect/publish")
+ 	err = conn.Accept()
+ 	if err != nil {
++		c.Log(logger.Debug, "RTMP accept failed: %v", err)
+ 		return err
+ 	}
+ 
++	c.Log(logger.Debug, "RTMP accept succeeded: publish=%v path=%s query=%s",
++		conn.Publish,
++		conn.URL.Path,
++		conn.URL.RawQuery)
++
+ 	c.mutex.Lock()
+ 	c.rconn = conn
+ 	c.mutex.Unlock()
+@@ -147,6 +165,51 @@ func (c *conn) runReader() error {
+ 	return c.runPublish()
+ }
+ 
++func startIdlePingRequests(
++	pingAfter time.Duration,
++	pollInterval time.Duration,
++	lastMediaUnixNano *int64,
++	sendPing func(uint32) error,
++	onError func(error),
++) chan struct{} {
++	done := make(chan struct{})
++
++	go func() {
++		ticker := time.NewTicker(pollInterval)
++		defer ticker.Stop()
++		var lastPingForIdleSince int64
++
++		for {
++			select {
++			case now := <-ticker.C:
++				lastMediaUnix := atomic.LoadInt64(lastMediaUnixNano)
++				idleSince := time.Unix(0, lastMediaUnix)
++				if now.Sub(idleSince) < pingAfter {
++					lastPingForIdleSince = 0
++					continue
++				}
++
++				if lastPingForIdleSince == lastMediaUnix {
++					continue
++				}
++
++				if err := sendPing(uint32(now.UnixMilli())); err != nil {
++					if onError != nil {
++						onError(err)
++					}
++					return
++				}
++				lastPingForIdleSince = lastMediaUnix
++
++			case <-done:
++				return
++			}
++		}
++	}()
++
++	return done
++}
++
+ func (c *conn) runRead() error {
+ 	pathName := strings.TrimLeft(c.rconn.URL.Path, "/")
+ 	query := c.rconn.URL.Query()
+@@ -221,21 +284,58 @@ func (c *conn) runPublish() error {
+ 	pathName := strings.TrimLeft(c.rconn.URL.Path, "/")
+ 	query := c.rconn.URL.Query()
+ 
++	pathConf, err := c.pathManager.FindPathConf(defs.PathFindPathConfReq{
++		AccessRequest: defs.PathAccessRequest{
++			Name:    pathName,
++			Query:   c.rconn.URL.RawQuery,
++			Publish: true,
++			Proto:   auth.ProtocolRTMP,
++			ID:      &c.uuid,
++			Credentials: &auth.Credentials{
++				User: query.Get("user"),
++				Pass: query.Get("pass"),
++			},
++			IP: c.ip(),
++		},
++	})
++	if err != nil {
++		c.Log(logger.Debug, "RTMP publish failed while resolving path '%s': %v", pathName, err)
++		return err
++	}
++
+ 	r := &gortmplib.Reader{
+-		Conn: c.rconn,
++		Conn:           c.rconn,
++		VideoTrackOnly: pathConf.RTMPPublishVideoOnly,
+ 	}
+-	err := r.Initialize()
++
++	c.Log(logger.Debug, "RTMP publish: initializing media reader for path '%s'", pathName)
++	readerInitStart := time.Now()
++	err = r.Initialize()
+ 	if err != nil {
++		c.Log(logger.Debug, "RTMP publish failed during reader initialization for path '%s': %v", pathName, err)
+ 		return err
+ 	}
+ 
++	c.Log(logger.Debug, "RTMP publish: reader initialized for path '%s' in %v with %d RTMP tracks (videoOnly=%v)",
++		pathName, time.Since(readerInitStart), len(r.Tracks()), pathConf.RTMPPublishVideoOnly)
++
+ 	var subStream *stream.SubStream
+ 
+-	medias, err := rtmp.ToStream(r, &subStream)
++	c.Log(logger.Debug, "RTMP publish: mapping tracks to stream for path '%s'", pathName)
++	var lastMediaUnixNano int64
++	atomic.StoreInt64(&lastMediaUnixNano, time.Now().UnixNano())
++
++	medias, err := rtmp.ToStream(r, &subStream, func() {
++		atomic.StoreInt64(&lastMediaUnixNano, time.Now().UnixNano())
++	}, pathConf.RTMPPublishVideoOnly)
+ 	if err != nil {
++		c.Log(logger.Debug, "RTMP publish failed during track mapping for path '%s': %v", pathName, err)
+ 		return err
+ 	}
+ 
++	c.Log(logger.Debug, "RTMP publish: mapped %d medias for path '%s' (%s)",
++		len(medias), pathName, defs.MediasInfo(medias))
++
+ 	var path defs.Path
+ 	path, subStream, err = c.pathManager.AddPublisher(defs.PathAddPublisherReq{
+ 		Author:        c,
+@@ -256,6 +356,7 @@ func (c *conn) runPublish() error {
+ 		},
+ 	})
+ 	if err != nil {
++		c.Log(logger.Debug, "RTMP publish failed while adding publisher to path '%s': %v", pathName, err)
+ 		var terr *auth.Error
+ 		if errors.As(err, &terr) {
+ 			// wait some seconds to delay brute force attacks
+@@ -273,14 +374,144 @@ func (c *conn) runPublish() error {
+ 	c.query = c.rconn.URL.RawQuery
+ 	c.mutex.Unlock()
+ 
++	c.rconn.SetOnMessage(func(msg gortmplibmessage.Message) {
++		switch tmsg := msg.(type) {
++		case *gortmplibmessage.UserControlPingResponse:
++			c.Log(logger.Debug,
++				"RTMP control: received PingResponse for path '%s' serverTime=%d",
++				pathName,
++				tmsg.ServerTime)
++		case *gortmplibmessage.CommandAMF0:
++			c.Log(logger.Debug,
++				"RTMP control: received command '%s' (id=%d) during publish on path '%s'",
++				tmsg.Name,
++				tmsg.CommandID,
++				pathName)
++		case *gortmplibmessage.UserControlSetBufferLength:
++			c.Log(logger.Debug,
++				"RTMP control: received SetBufferLength streamID=%d ms=%d on path '%s'",
++				tmsg.StreamID,
++				tmsg.BufferLength,
++				pathName)
++		}
++	})
++	c.rconn.SetOnAcknowledgeWritten(func(count uint32) {
++		c.Log(logger.Debug,
++			"RTMP control: sent Acknowledge for path '%s' bytesReceived=%d",
++			pathName,
++			count)
++	})
++
++	pingDone := startIdlePingRequests(
++		rtmpPublisherIdlePingAfter,
++		rtmpPublisherIdlePingPollTime,
++		&lastMediaUnixNano,
++		func(serverTime uint32) error {
++			idleFor := time.Since(time.Unix(0, atomic.LoadInt64(&lastMediaUnixNano)))
++			c.Log(logger.Debug,
++				"RTMP control: sending PingRequest for path '%s' serverTime=%d idleFor=%v",
++				pathName,
++				serverTime,
++				idleFor.Truncate(100*time.Millisecond))
++			return c.rconn.Write(&gortmplibmessage.UserControlPingRequest{
++				ServerTime: serverTime,
++			})
++		},
++		func(err error) {
++			c.Log(logger.Debug, "RTMP publish ping request failed for path '%s': %v", pathName, err)
++			_ = c.nconn.Close()
++		},
++	)
++	defer close(pingDone)
++
+ 	c.nconn.SetWriteDeadline(time.Time{})
++	readCount := 0
++	inactivityDone := make(chan struct{})
++	stallLogDone := make(chan struct{})
++
++	go func() {
++		ticker := time.NewTicker(time.Second)
++		defer ticker.Stop()
++
++		for {
++			select {
++			case <-ticker.C:
++				lastMedia := time.Unix(0, atomic.LoadInt64(&lastMediaUnixNano))
++				idleFor := time.Since(lastMedia)
++				if idleFor < time.Second {
++					continue
++				}
++
++				c.Log(
++					logger.Debug,
++					"RTMP publish idle for %v on path '%s' (connBytesReceived=%d pathBytesReceived=%d pathPacketsReceived=%d pathUnitsReceived=%d)",
++					idleFor.Truncate(100*time.Millisecond),
++					pathName,
++					c.rconn.BytesReceived(),
++					subStream.Stream.BytesReceived(),
++					subStream.Stream.PacketsReceived(),
++					subStream.Stream.UnitsReceived(),
++				)
++
++			case <-stallLogDone:
++				return
++			}
++		}
++	}()
++	defer close(stallLogDone)
++
++	if pathConf.PublisherInactivityCloseAfter > 0 {
++		go func() {
++			timeout := time.Duration(pathConf.PublisherInactivityCloseAfter)
++			interval := timeout / 2
++			if interval > time.Second {
++				interval = time.Second
++			}
++			if interval <= 0 {
++				interval = 250 * time.Millisecond
++			}
++
++			ticker := time.NewTicker(interval)
++			defer ticker.Stop()
++
++			for {
++				select {
++				case <-ticker.C:
++					last := time.Unix(0, atomic.LoadInt64(&lastMediaUnixNano))
++					if time.Since(last) < timeout {
++						continue
++					}
++
++					c.Log(logger.Info,
++						"RTMP publisher inactive for %v on path '%s', closing connection",
++						timeout,
++						pathName)
++					_ = c.nconn.Close()
++					return
++
++				case <-inactivityDone:
++					return
++				}
++			}
++		}()
++		defer close(inactivityDone)
++	}
+ 
+ 	for {
+ 		c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
+ 		err = r.Read()
+ 		if err != nil {
++			c.Log(logger.Debug, "RTMP publish read loop ended for path '%s': %v", pathName, err)
+ 			return err
+ 		}
++
++		if pathConf.RTMPPublishYieldEvery > 0 {
++			readCount++
++			if readCount >= pathConf.RTMPPublishYieldEvery {
++				readCount = 0
++				runtime.Gosched()
++			}
++		}
+ 	}
+ }
+ 
+diff --git a/internal/servers/rtmp/server.go b/internal/servers/rtmp/server.go
+index 8d45f65c..706091de 100644
+--- a/internal/servers/rtmp/server.go
++++ b/internal/servers/rtmp/server.go
+@@ -64,6 +64,7 @@ type serverMetrics interface {
+ }
+ 
+ type serverPathManager interface {
++	FindPathConf(req defs.PathFindPathConfReq) (*conf.Path, error)
+ 	AddPublisher(req defs.PathAddPublisherReq) (defs.Path, *stream.SubStream, error)
+ 	AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
+ }
+diff --git a/internal/servers/rtmp/server_test.go b/internal/servers/rtmp/server_test.go
+index b249ea63..32633b2c 100644
+--- a/internal/servers/rtmp/server_test.go
++++ b/internal/servers/rtmp/server_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/bluenviron/gortmplib"
+ 	"github.com/bluenviron/gortmplib/pkg/codecs"
+ 	"github.com/bluenviron/gortsplib/v5/pkg/description"
++	"github.com/bluenviron/gortsplib/v5/pkg/format"
+ 	"github.com/bluenviron/mediamtx/internal/conf"
+ 	"github.com/bluenviron/mediamtx/internal/defs"
+ 	"github.com/bluenviron/mediamtx/internal/externalcmd"
+@@ -63,12 +64,18 @@ func TestServerPublish(t *testing.T) {
+ 			var strm *stream.Stream
+ 			var reader *stream.Reader
+ 			defer func() {
+-				strm.RemoveReader(reader)
++				if strm != nil && reader != nil {
++					strm.RemoveReader(reader)
++				}
+ 			}()
+ 			dataReceived := make(chan struct{})
+ 			n := 0
+ 
+ 			pathManager := &test.PathManager{
++				FindPathConfImpl: func(req defs.PathFindPathConfReq) (*conf.Path, error) {
++					require.Equal(t, "teststream", req.AccessRequest.Name)
++					return &conf.Path{}, nil
++				},
+ 				AddPublisherImpl: func(req defs.PathAddPublisherReq) (defs.Path, *stream.SubStream, error) {
+ 					require.Equal(t, "teststream", req.AccessRequest.Name)
+ 					require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
+@@ -190,6 +197,129 @@ func TestServerPublish(t *testing.T) {
+ 	}
+ }
+ 
++func TestServerPublishVideoOnly(t *testing.T) {
++	var strm *stream.Stream
++	var reader *stream.Reader
++	defer func() {
++		if strm != nil && reader != nil {
++			strm.RemoveReader(reader)
++		}
++	}()
++
++	dataReceived := make(chan struct{})
++
++	pathManager := &test.PathManager{
++		FindPathConfImpl: func(req defs.PathFindPathConfReq) (*conf.Path, error) {
++			require.Equal(t, "teststream", req.AccessRequest.Name)
++			return &conf.Path{
++				RTMPPublishVideoOnly: true,
++			}, nil
++		},
++		AddPublisherImpl: func(req defs.PathAddPublisherReq) (defs.Path, *stream.SubStream, error) {
++			require.Len(t, req.Desc.Medias, 1)
++			require.Len(t, req.Desc.Medias[0].Formats, 1)
++			require.IsType(t, &format.H264{}, req.Desc.Medias[0].Formats[0])
++
++			strm = &stream.Stream{
++				Desc:              req.Desc,
++				WriteQueueSize:    512,
++				RTPMaxPayloadSize: 1450,
++				Parent:            test.NilLogger,
++			}
++			err := strm.Initialize()
++			require.NoError(t, err)
++
++			subStream := &stream.SubStream{
++				Stream:        strm,
++				UseRTPPackets: false,
++			}
++			err = subStream.Initialize()
++			require.NoError(t, err)
++
++			reader = &stream.Reader{Parent: test.NilLogger}
++			reader.OnData(
++				strm.Desc.Medias[0],
++				strm.Desc.Medias[0].Formats[0],
++				func(u *unit.Unit) error {
++					if u.NilPayload() {
++						return nil
++					}
++
++					require.Equal(t, unit.PayloadH264{
++						test.FormatH264.SPS,
++						test.FormatH264.PPS,
++						{5, 2, 3, 4},
++					}, u.Payload)
++
++					select {
++					case <-dataReceived:
++					default:
++						close(dataReceived)
++					}
++					return nil
++				})
++			strm.AddReader(reader)
++
++			return &dummyPath{}, subStream, nil
++		},
++	}
++
++	s := &Server{
++		Address:             "127.0.0.1:1939",
++		ReadTimeout:         conf.Duration(10 * time.Second),
++		WriteTimeout:        conf.Duration(10 * time.Second),
++		RTSPAddress:         "",
++		RunOnConnect:        "",
++		RunOnConnectRestart: false,
++		RunOnDisconnect:     "",
++		ExternalCmdPool:     nil,
++		PathManager:         pathManager,
++		Parent:              test.NilLogger,
++	}
++	err := s.Initialize()
++	require.NoError(t, err)
++	defer s.Close()
++
++	u, err := url.Parse("rtmp://127.0.0.1:1939/teststream")
++	require.NoError(t, err)
++
++	conn := &gortmplib.Client{
++		URL:     u,
++		Publish: true,
++	}
++	err = conn.Initialize(context.Background())
++	require.NoError(t, err)
++	defer conn.Close()
++
++	w := &gortmplib.Writer{
++		Conn: conn,
++		Tracks: []*gortmplib.Track{
++			{Codec: &codecs.H264{
++				SPS: test.FormatH264.SPS,
++				PPS: test.FormatH264.PPS,
++			}},
++			{Codec: &codecs.MPEG4Audio{
++				Config: test.FormatMPEG4Audio.Config,
++			}},
++		},
++	}
++	err = w.Initialize()
++	require.NoError(t, err)
++
++	err = w.WriteH264(
++		w.Tracks[0],
++		2*time.Second, 2*time.Second, [][]byte{
++			{5, 2, 3, 4},
++		})
++	require.NoError(t, err)
++
++	select {
++	case <-dataReceived:
++	case <-time.After(5 * time.Second):
++		t.Fatal("video was not published")
++	}
++}
++
+ func TestServerRead(t *testing.T) {
+ 	for _, encrypt := range []string{
+ 		"plain",
+@@ -228,6 +358,10 @@ func TestServerRead(t *testing.T) {
+ 			require.NoError(t, err)
+ 
+ 			pathManager := &test.PathManager{
++				FindPathConfImpl: func(req defs.PathFindPathConfReq) (*conf.Path, error) {
++					require.Equal(t, "teststream", req.AccessRequest.Name)
++					return &conf.Path{}, nil
++				},
+ 				AddReaderImpl: func(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error) {
+ 					require.Equal(t, "teststream", req.AccessRequest.Name)
+ 					require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
+diff --git a/internal/staticsources/rtmp/source.go b/internal/staticsources/rtmp/source.go
+index 082fc5e2..dfcdda6d 100644
+--- a/internal/staticsources/rtmp/source.go
++++ b/internal/staticsources/rtmp/source.go
+@@ -116,7 +116,7 @@ func (s *Source) runReader(conn *gortmplib.Client) error {
+ 
+ 	var subStream *stream.SubStream
+ 
+-	medias, err := rtmp.ToStream(r, &subStream)
++	medias, err := rtmp.ToStream(r, &subStream, nil, false)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/internal/stream/stream.go b/internal/stream/stream.go
+index 305aefcd..c61af482 100644
+--- a/internal/stream/stream.go
++++ b/internal/stream/stream.go
+@@ -367,6 +367,32 @@ func (s *Stream) BytesReceived() uint64 {
+ 	return atomic.LoadUint64(s.bytesReceived)
+ }
+ 
++// PacketsReceived returns received RTP packets.
++func (s *Stream) PacketsReceived() uint64 {
++	ret := uint64(0)
++
++	for _, sm := range s.medias {
++		for _, sf := range sm.formats {
++			ret += sf.PacketsReceived()
++		}
++	}
++
++	return ret
++}
++
++// UnitsReceived returns received media units.
++func (s *Stream) UnitsReceived() uint64 {
++	ret := uint64(0)
++
++	for _, sm := range s.medias {
++		for _, sf := range sm.formats {
++			ret += sf.UnitsReceived()
++		}
++	}
++
++	return ret
++}
++
+ // BytesSent returns sent bytes.
+ func (s *Stream) BytesSent() uint64 {
+ 	bytesSent := atomic.LoadUint64(s.bytesSent)
+diff --git a/internal/stream/stream_format.go b/internal/stream/stream_format.go
+index 8f76ed44..8a18924e 100644
+--- a/internal/stream/stream_format.go
++++ b/internal/stream/stream_format.go
+@@ -2,6 +2,7 @@ package stream
+ 
+ import (
+ 	"crypto/rand"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/bluenviron/gortsplib/v5/pkg/description"
+@@ -57,6 +58,9 @@ type streamFormat struct {
+ 	rtpTimeOffset uint32
+ 	ntpEstimator  *ntpestimator.Estimator
+ 	onDatas       map[*Reader]OnDataFunc
++
++	packetsReceived uint64
++	unitsReceived   uint64
+ }
+ 
+ func (sf *streamFormat) initialize() error {
+@@ -73,3 +77,19 @@ func (sf *streamFormat) initialize() error {
+ 
+ 	return nil
+ }
++
++func (sf *streamFormat) addPacketsReceived(v uint64) {
++	atomic.AddUint64(&sf.packetsReceived, v)
++}
++
++func (sf *streamFormat) addUnitsReceived(v uint64) {
++	atomic.AddUint64(&sf.unitsReceived, v)
++}
++
++func (sf *streamFormat) PacketsReceived() uint64 {
++	return atomic.LoadUint64(&sf.packetsReceived)
++}
++
++func (sf *streamFormat) UnitsReceived() uint64 {
++	return atomic.LoadUint64(&sf.unitsReceived)
++}
+diff --git a/internal/stream/sub_stream.go b/internal/stream/sub_stream.go
+index 079189d6..8df14ead 100644
+--- a/internal/stream/sub_stream.go
++++ b/internal/stream/sub_stream.go
+@@ -59,61 +59,139 @@ func formatLPCMConfig(f *format.LPCM) string {
+ 		f.BitDepth, f.SampleRate, f.ChannelCount)
+ }
+ 
+-func mediasAreCompatible(medias1 []*description.Media, medias2 []*description.Media) error {
+-	if len(medias1) != len(medias2) {
++func mediaLayoutMatches(media1 *description.Media, media2 *description.Media) bool {
++	if media1.Type != media2.Type || len(media1.Formats) != len(media2.Formats) {
++		return false
++	}
++
++	for j := range media1.Formats {
++		if reflect.TypeOf(media1.Formats[j]) != reflect.TypeOf(media2.Formats[j]) {
++			return false
++		}
++	}
++
++	return true
++}
++
++func mediaFormatsAreCompatible(media1 *description.Media, media2 *description.Media) error {
++	if !mediaLayoutMatches(media1, media2) {
+ 		return fmt.Errorf("wants to publish %v, but stream expects %v",
+-			mediasToCodecs(medias2), mediasToCodecs(medias1))
++			FormatsToCodecs(media2.Formats), FormatsToCodecs(media1.Formats))
+ 	}
+ 
+-	for i := range medias1 {
+-		if len(medias1[i].Formats) != len(medias2[i].Formats) {
+-			return fmt.Errorf("wants to publish %v, but stream expects %v",
+-				mediasToCodecs(medias2), mediasToCodecs(medias1))
++	for j := range media1.Formats {
++		switch format1 := media1.Formats[j].(type) {
++		case *format.MPEG4Audio:
++			format2 := media2.Formats[j].(*format.MPEG4Audio)
++
++			if !reflect.DeepEqual(format1.Config, format2.Config) {
++				return fmt.Errorf("MPEG-4 audio configuration does not match, is %s, but stream expects %s",
++					formatMPEG4AudioConfig(format2.Config), formatMPEG4AudioConfig(format1.Config))
++			}
++
++		case *format.G711:
++			format2 := media2.Formats[j].(*format.G711)
++
++			if format1.MULaw != format2.MULaw ||
++				format1.SampleRate != format2.SampleRate ||
++				format1.ChannelCount != format2.ChannelCount {
++				return fmt.Errorf("G711 configuration does not match, is %s, but stream expects %s",
++					formatG711Config(format2), formatG711Config(format1))
++			}
++
++		case *format.LPCM:
++			format2 := media2.Formats[j].(*format.LPCM)
++
++			if format1.BitDepth != format2.BitDepth ||
++				format1.SampleRate != format2.SampleRate ||
++				format1.ChannelCount != format2.ChannelCount {
++				return fmt.Errorf("LPCM configuration does not match, is %s, but stream expects %s",
++					formatLPCMConfig(format2), formatLPCMConfig(format1))
++			}
+ 		}
++	}
++
++	return nil
++}
++
++func matchStreamMedias(
++	streamMedias []*description.Media,
++	curMedias []*description.Media,
++	allowSubset bool,
++) ([]*description.Media, error) {
++	if !allowSubset && len(streamMedias) != len(curMedias) {
++		return nil, fmt.Errorf("wants to publish %v, but stream expects %v",
++			mediasToCodecs(curMedias), mediasToCodecs(streamMedias))
++	}
++
++	if len(curMedias) == 0 {
++		return nil, fmt.Errorf("wants to publish %v, but stream expects %v",
++			mediasToCodecs(curMedias), mediasToCodecs(streamMedias))
++	}
++
++	matched := make([]*description.Media, len(curMedias))
+ 
+-		for j := range medias1[i].Formats {
+-			if reflect.TypeOf(medias1[i].Formats[j]) != reflect.TypeOf(medias2[i].Formats[j]) {
+-				return fmt.Errorf("wants to publish %v, but stream expects %v",
+-					mediasToCodecs(medias2), mediasToCodecs(medias1))
++	if !allowSubset {
++		for i := range streamMedias {
++			err := mediaFormatsAreCompatible(streamMedias[i], curMedias[i])
++			if err != nil {
++				return nil, err
+ 			}
++			matched[i] = streamMedias[i]
+ 		}
++
++		return matched, nil
+ 	}
+ 
+-	for i := range medias1 {
+-		for j := range medias1[i].Formats {
+-			switch format1 := medias1[i].Formats[j].(type) {
+-			case *format.MPEG4Audio:
+-				format2 := medias2[i].Formats[j].(*format.MPEG4Audio)
++	nextStreamMedia := 0
+ 
+-				if !reflect.DeepEqual(format1.Config, format2.Config) {
+-					return fmt.Errorf("MPEG-4 audio configuration does not match, is %s, but stream expects %s",
+-						formatMPEG4AudioConfig(format2.Config), formatMPEG4AudioConfig(format1.Config))
+-				}
++	for i, curMedia := range curMedias {
++		found := false
++		var firstErr error
++
++		for ; nextStreamMedia < len(streamMedias); nextStreamMedia++ {
++			streamMedia := streamMedias[nextStreamMedia]
+ 
+-			case *format.G711:
+-				format2 := medias2[i].Formats[j].(*format.G711)
++			if !mediaLayoutMatches(streamMedia, curMedia) {
++				continue
++			}
+ 
+-				if format1.MULaw != format2.MULaw ||
+-					format1.SampleRate != format2.SampleRate ||
+-					format1.ChannelCount != format2.ChannelCount {
+-					return fmt.Errorf("G711 configuration does not match, is %s, but stream expects %s",
+-						formatG711Config(format2), formatG711Config(format1))
++			err := mediaFormatsAreCompatible(streamMedia, curMedia)
++			if err != nil {
++				if firstErr == nil {
++					firstErr = err
+ 				}
++				continue
++			}
+ 
+-			case *format.LPCM:
+-				format2 := medias2[i].Formats[j].(*format.LPCM)
++			matched[i] = streamMedia
++			nextStreamMedia++
++			found = true
++			break
++		}
+ 
+-				if format1.BitDepth != format2.BitDepth ||
+-					format1.SampleRate != format2.SampleRate ||
+-					format1.ChannelCount != format2.ChannelCount {
+-					return fmt.Errorf("LPCM configuration does not match, is %s, but stream expects %s",
+-						formatLPCMConfig(format2), formatLPCMConfig(format1))
+-				}
++		if !found {
++			if firstErr != nil {
++				return nil, firstErr
+ 			}
++
++			return nil, fmt.Errorf("wants to publish %v, but stream expects %v",
++				mediasToCodecs(curMedias), mediasToCodecs(streamMedias))
+ 		}
+ 	}
+ 
+-	return nil
++	return matched, nil
++}
++
++func mediasAreCompatible(medias1 []*description.Media, medias2 []*description.Media) error {
++	_, err := matchStreamMedias(medias1, medias2, false)
++	return err
++}
++
++// MediasAreReplaceCompatible checks whether a replacement publisher can reuse an existing stream.
++func MediasAreReplaceCompatible(streamMedias []*description.Media, curMedias []*description.Media) error {
++	_, err := matchStreamMedias(streamMedias, curMedias, true)
++	return err
+ }
+ 
+ // SubStream is a Stream without interruptions.
+@@ -127,33 +205,20 @@ type SubStream struct {
+ 
+ // Initialize initializes the SubStream.
+ func (ss *SubStream) Initialize() error {
+-	if !ss.Stream.AlwaysAvailable {
+-		if ss.Stream.subStream != nil {
+-			panic("should not happen")
+-		}
+-
+-		if ss.CurDesc != nil {
+-			panic("should not happen")
+-		}
+-	} else {
+-		if ss.CurDesc == nil {
+-			panic("should not happen")
+-		}
+-
+-		err := mediasAreCompatible(ss.Stream.Desc.Medias, ss.CurDesc.Medias)
+-		if err != nil {
+-			return err
+-		}
++	if ss.CurDesc == nil {
++		ss.CurDesc = ss.Stream.Desc
+ 	}
+ 
+-	if !ss.Stream.AlwaysAvailable {
+-		ss.CurDesc = ss.Stream.Desc
++	allowSubset := !ss.Stream.AlwaysAvailable && ss.Stream.subStream != nil
++	streamMedias, err := matchStreamMedias(ss.Stream.Desc.Medias, ss.CurDesc.Medias, allowSubset)
++	if err != nil {
++		return err
+ 	}
+ 
+ 	ss.medias = make(map[*description.Media]*subStreamMedia)
+ 
+ 	for i, curMedia := range ss.CurDesc.Medias {
+-		media := ss.Stream.Desc.Medias[i]
++		media := streamMedias[i]
+ 
+ 		ssm := &subStreamMedia{
+ 			curMedia:      curMedia,
+diff --git a/internal/stream/sub_stream_format.go b/internal/stream/sub_stream_format.go
+index 848f6a8d..60693305 100644
+--- a/internal/stream/sub_stream_format.go
++++ b/internal/stream/sub_stream_format.go
+@@ -170,6 +170,8 @@ func (ssf *subStreamFormat) writeUnitInner(u *unit.Unit) error {
+ 	}
+ 
+ 	size := unitSize(u)
++	ssf.streamFormat.addPacketsReceived(uint64(len(u.RTPPackets)))
++	ssf.streamFormat.addUnitsReceived(1)
+ 	ssf.streamFormat.addBytesReceived(size)
+ 
+ 	ssf.streamFormat.writeRTSP(ssf.streamFormat.media, u.RTPPackets, u.NTP)
+diff --git a/mediamtx.yml b/mediamtx.yml
+index 36c3e3f1..f8d9a497 100644
+--- a/mediamtx.yml
++++ b/mediamtx.yml
+@@ -7,7 +7,7 @@
+ # Global settings -> General
+ 
+ # Verbosity of the program; available values are "error", "warn", "info", "debug".
+-logLevel: info
++logLevel: debug
+ # Destinations of log messages; available values are "stdout", "file" and "syslog".
+ logDestinations: [stdout]
+ # When destination is "stdout" or "file", emit logs in structured format (JSONL).
+@@ -541,6 +541,22 @@ pathDefaults:
+ 
+   # Allow another client to disconnect the current publisher and publish in its place.
+   overridePublisher: true
++  # Keep the path and existing readers alive for this amount of time after a publisher disconnects.
++  # This allows transient reconnects without tearing the path down.
++  # Set to 0s to disable the grace period.
++  publisherCloseAfter: 0s
++  # Close a RTMP publisher that stops delivering media units for this amount of time,
++  # even if the TCP connection is still open.
++  # Set to 0s to disable.
++  publisherInactivityCloseAfter: 0s
++  # When the publisher uses RTMP, ignore audio tracks and publish video only.
++  # This is useful when downstream consumers only need video or when audio
++  # should not affect RTMP track analysis and path exposure.
++  rtmpPublishVideoOnly: false
++  # Call runtime.Gosched() after this many RTMP read iterations while publishing.
++  # This can improve fairness with bursty publishers without adding timestamp-based delay.
++  # Set to 0 to disable.
++  rtmpPublishYieldEvery: 0
+   # SRT encryption passphrase required to publish to this path.
+   srtPublishPassphrase:
+ 

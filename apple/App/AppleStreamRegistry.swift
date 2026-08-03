@@ -54,6 +54,10 @@ final class AppleStreamRegistry: ObservableObject {
     @Published private(set) var sessions: [AppleLiveStreamSession] = []
     @Published var focusedID = "demo"
     @Published private(set) var rejectedPaths: Set<String> = []
+    @Published private(set) var managedPresenceRevision = 0
+
+    private var presenceSubscriptions: [ObjectIdentifier: AnyCancellable] = [:]
+    private var presenceEligibility: [ObjectIdentifier: Bool] = [:]
 
     let primaryModel: AppleVideoFrameSource
 
@@ -120,6 +124,7 @@ final class AppleStreamRegistry: ObservableObject {
         if id == Self.placeholderID {
             session.state = .stopped
         } else {
+            stopObservingManagedPresence(for: session)
             sessions.removeAll { $0.id == id }
             if focusedID == id { focusedID = sessions.first?.id ?? Self.placeholderID }
         }
@@ -149,6 +154,7 @@ final class AppleStreamRegistry: ObservableObject {
             model: active.isEmpty ? primaryModel : nil,
             state: state
         )
+        observeManagedPresence(for: session)
         session.publisherConnectionID = publisherID
         sessions.append(session)
         if state == .live && session.id != Self.placeholderID {
@@ -176,6 +182,7 @@ final class AppleStreamRegistry: ObservableObject {
         session.publisherConnectionID = nil
         session.changedAt = Date()
         if session.id != "demo" {
+            stopObservingManagedPresence(for: session)
             sessions.removeAll { $0.id == session.id }
             if focusedID == session.id { focusedID = sessions.first?.id ?? "demo" }
         }
@@ -195,8 +202,48 @@ final class AppleStreamRegistry: ObservableObject {
         guard !stale.isEmpty else { return }
         let ids = Set(stale.map(\.id))
         stale.forEach { $0.model.stop() }
+        stale.forEach(stopObservingManagedPresence)
         sessions.removeAll { ids.contains($0.id) }
         if ids.contains(focusedID) { focusedID = sessions.first?.id ?? "demo" }
+    }
+
+    private func observeManagedPresence(for session: AppleLiveStreamSession) {
+        let key = ObjectIdentifier(session)
+        presenceEligibility[key] = Self.isManagedPresenceEligible(session)
+        presenceSubscriptions[key] = Publishers.CombineLatest3(
+            session.$state,
+            session.model.$frameCount,
+            session.model.$decodedFrameAgeSeconds
+        )
+        .map { state, frameCount, decodedFrameAge in
+            state == .live && ManagedVideoPresencePolicy.hasRecentDecodedFrame(
+                frameCount: frameCount,
+                decodedFrameAge: decodedFrameAge
+            )
+        }
+        .removeDuplicates()
+        .sink { [weak self, weak session] eligible in
+            Task { @MainActor [weak self, weak session] in
+                guard let self, let session else { return }
+                let currentKey = ObjectIdentifier(session)
+                guard self.presenceEligibility[currentKey] != eligible else { return }
+                self.presenceEligibility[currentKey] = eligible
+                self.managedPresenceRevision &+= 1
+            }
+        }
+    }
+
+    private func stopObservingManagedPresence(for session: AppleLiveStreamSession) {
+        let key = ObjectIdentifier(session)
+        presenceSubscriptions.removeValue(forKey: key)?.cancel()
+        presenceEligibility.removeValue(forKey: key)
+    }
+
+    private static func isManagedPresenceEligible(_ session: AppleLiveStreamSession) -> Bool {
+        session.state == .live && ManagedVideoPresencePolicy.hasRecentDecodedFrame(
+            frameCount: session.model.frameCount,
+            decodedFrameAge: session.model.decodedFrameAgeSeconds
+        )
     }
 }
 
@@ -777,7 +824,46 @@ struct AppleExternalDisplayView: View {
     }
 }
 
+@MainActor
 final class RID2CaltopoAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(primarySceneDidDisconnect(_:)),
+            name: UIScene.didDisconnectNotification,
+            object: nil
+        )
+        return true
+    }
+
+    @objc
+    private func primarySceneDidDisconnect(_ notification: Notification) {
+        guard
+            let scene = notification.object as? UIScene,
+            scene.session.role == .windowApplication
+        else { return }
+        AppleApplicationCleanupCenter.shared.closePrimaryWindow(
+            reason: "window disconnected"
+        )
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        Task { @MainActor in
+            AppleApplicationCleanupCenter.shared.removeMarkerForBackgrounding()
+        }
+    }
+
+    func applicationWillTerminate(_ application: UIApplication) {
+        Task { @MainActor in
+            AppleApplicationCleanupCenter.shared.closePrimaryWindow(
+                reason: "application terminating"
+            )
+        }
+    }
+
     func application(
         _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,

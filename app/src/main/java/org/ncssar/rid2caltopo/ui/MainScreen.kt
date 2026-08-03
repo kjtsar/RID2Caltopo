@@ -15,6 +15,7 @@ import android.net.Uri
 import android.location.Location
 import android.os.Build
 import android.provider.DocumentsContract
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,6 +35,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -67,6 +69,7 @@ import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.data.AppUpdateAdvisory
 import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoMap
@@ -89,6 +92,14 @@ import org.ncssar.rid2caltopo.video.ComplianceAlertDialog
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+
+private fun showConfigImportToast(context: Context, message: String) {
+    Toast.makeText(
+        context.applicationContext,
+        message,
+        Toast.LENGTH_LONG
+    ).show()
+}
 
 private fun parseCsvTags(csv: String): List<String> {
     val tags = linkedSetOf<String>()
@@ -275,6 +286,9 @@ fun MainScreen(
     onSetExternalDisplayContent: ((ExternalDisplayContentMode) -> Unit)? = null
 ) {
     val tag = "MainScreen"
+    val mainHorizontalScrollState = rememberSaveable(saver = ScrollState.Saver) {
+        ScrollState(0)
+    }
     var menuExpanded by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showConfirmExitDialog by remember { mutableStateOf(false) }
@@ -597,20 +611,40 @@ fun MainScreen(
             onJoin = { token ->
                 showImportConfigDialog = false
                 OrgConfigManager.joinFromToken(context, token) { _, message ->
-                    CaltopoClient.ShowToast(message)
+                    showConfigImportToast(context, message)
                 }
             },
             onFaaJoin = { token ->
                 showImportConfigDialog = false
                 FaaConfigManager.importToken(context, token) { _, message ->
-                    CaltopoClient.ShowToast(message)
+                    showConfigImportToast(context, message)
                     NotamCenter.requestImmediateRefresh()
                 }
             },
             onMutualAidJoin = { token ->
                 showImportConfigDialog = false
                 MutualAidProfileManager.joinFromToken(context, token) { _, message ->
-                    CaltopoClient.ShowToast(message)
+                    showConfigImportToast(context, message)
+                }
+            },
+            onTrackerJoin = { enrollmentUrl ->
+                showImportConfigDialog = false
+                coroutineScope.launch {
+                    runCatching {
+                        TrackerEnrollmentClient.redeem(context, enrollmentUrl).also(
+                            TrackerEnrollmentClient::apply
+                        )
+                    }.onSuccess { result ->
+                        showConfigImportToast(
+                            context,
+                            "Organization '${result.organization}' imported; tracker enrollment installed."
+                        )
+                    }.onFailure { error ->
+                        showConfigImportToast(
+                            context,
+                            error.message ?: "Tracker enrollment failed."
+                        )
+                    }
                 }
             },
             onPickFile = {
@@ -1200,7 +1234,7 @@ fun MainScreen(
     ) { paddingValues ->
         // 3. Use a single LazyColumn with the robust `items` DSL and a stable key.
         Box(
-            modifier = Modifier.horizontalScroll(rememberScrollState())
+            modifier = Modifier.horizontalScroll(mainHorizontalScrollState)
         ) {
             LazyColumn(modifier = Modifier.padding(paddingValues)) {
                 item(key = "notam_chip") {
@@ -1669,7 +1703,7 @@ fun MainScreen(
                         onClick = {
                             showTestingToolsDialog = false
                             if (CaltopoClient.GetHomeOrgName().isBlank()) {
-                                CaltopoClient.ShowToast("Load ct_credentials with org_name before exporting org config.")
+                                CaltopoClient.ShowToast("Set the organization designator in Settings before exporting organization config.")
                             } else if (GoogleDriveConfigSync.getAuthorizedAccount(context) != null) {
                                 showOrgExportDialog = true
                             } else {

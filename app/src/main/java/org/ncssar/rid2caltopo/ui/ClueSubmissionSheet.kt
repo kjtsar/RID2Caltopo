@@ -114,6 +114,20 @@ fun ClueSheetContent (
             )
         )
     }
+    var submissionFeedback by remember(clue.designator) { mutableStateOf<String?>(null) }
+
+    fun submitWhenValid(action: () -> Unit) {
+        if (clue.title.isBlank()) {
+            submissionFeedback = "Title required."
+            titleFocusRequester.requestFocus()
+            keyboardController?.show()
+            return
+        }
+        submissionFeedback = null
+        focusManager.clearFocus()
+        keyboardController?.hide()
+        action()
+    }
 
     LaunchedEffect(Unit) {
         titleFocusRequester.requestFocus()
@@ -245,8 +259,15 @@ fun ClueSheetContent (
             // Title
             OutlinedTextField(
                 value = clue.title,
-                onValueChange = onTitleChange,
+                onValueChange = {
+                    if (it.isNotBlank()) submissionFeedback = null
+                    onTitleChange(it)
+                },
                 label = { Text("Title") },
+                isError = submissionFeedback != null,
+                supportingText = submissionFeedback?.let { feedback ->
+                    { Text(feedback) }
+                },
                 singleLine = true,
                 modifier = Modifier
                     .focusRequester(titleFocusRequester)
@@ -320,7 +341,7 @@ fun ClueSheetContent (
             ) {
                 OutlinedButton(
                     modifier = Modifier.fillMaxWidth(),
-                    onClick = onSubmitLocalMarkerOnly
+                    onClick = { submitWhenValid(onSubmitLocalMarkerOnly) }
                 ) {
                     Text("Local Marker Only")
                 }
@@ -338,8 +359,7 @@ fun ClueSheetContent (
 
                     Button(
                         modifier = Modifier.weight(1f),
-                        enabled = clue.title.isNotBlank(),
-                        onClick = onSubmit
+                        onClick = { submitWhenValid(onSubmit) }
                     ) {
                         Text("Submit")
                     }

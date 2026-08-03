@@ -2,6 +2,92 @@ import Foundation
 import Testing
 @testable import R2CCore
 
+@Test func managedVideoPresenceRequiresRecentDecodedFrames() {
+    #expect(!ManagedVideoPresencePolicy.hasRecentDecodedFrame(
+        frameCount: 0,
+        decodedFrameAge: nil
+    ))
+    #expect(ManagedVideoPresencePolicy.hasRecentDecodedFrame(
+        frameCount: 1,
+        decodedFrameAge: 5.9
+    ))
+    #expect(!ManagedVideoPresencePolicy.hasRecentDecodedFrame(
+        frameCount: 20,
+        decodedFrameAge: 6.1
+    ))
+}
+
+@Test
+func managedVideoQualityPolicyBuildsCompleteNamedPresets() {
+    let options = ManagedVideoQualityPolicy.options(
+        sourceWidth: 3840,
+        sourceHeight: 2160,
+        sourceFps: 30,
+        sourceBitrateBps: 12_000_000,
+        usableUplinkBps: 5_000_000
+    )
+
+    #expect(options.map(\.preset) == ["High", "Balanced", "Low", "Emergency"])
+    #expect(options.first?.width == 1280)
+    #expect(options.first?.height == 720)
+    #expect(options.first?.fps == 30)
+    #expect(options.first?.estimatedBitrateBps == 3_000_000)
+    #expect(options.map { "\($0.width)x\($0.height)" }.contains("960x540"))
+    #expect(options.map { "\($0.width)x\($0.height)" }.contains("640x360"))
+    #expect(options.allSatisfy { $0.width <= 3840 && $0.height <= 2160 })
+    #expect(options.allSatisfy { $0.width.isMultiple(of: 2) && $0.height.isMultiple(of: 2) })
+}
+
+@Test
+func managedVideoQualityPolicyOffersNominalThirtyForBurstyControllerCadence() {
+    let options = ManagedVideoQualityPolicy.options(
+        sourceWidth: 1280,
+        sourceHeight: 720,
+        sourceFps: 21,
+        sourceBitrateBps: 0,
+        usableUplinkBps: 10_000_000
+    )
+
+    #expect(options.first?.width == 1280)
+    #expect(options.first?.height == 720)
+    #expect(options.first?.fps == 30)
+    #expect(options.first?.capacity == .enough)
+}
+
+@Test
+func managedVideoQualityPolicyDoesNotUpscaleSmallSources() {
+    let options = ManagedVideoQualityPolicy.options(
+        sourceWidth: 640,
+        sourceHeight: 480,
+        sourceFps: 8,
+        sourceBitrateBps: 0,
+        usableUplinkBps: 2_000_000
+    )
+
+    #expect(Set(options.map { "\($0.width)x\($0.height)" }) == ["640x480"])
+    #expect(Set(options.map(\.fps)) == Set([8, 5]))
+    #expect(options.allSatisfy { $0.estimatedBitrateBps >= 100_000 })
+}
+
+@Test
+func managedVideoQualityPolicyEnablesOnlySmallestFailedLowFallback() {
+    let options = ManagedVideoQualityPolicy.options(
+        sourceWidth: 1280,
+        sourceHeight: 720,
+        sourceFps: 30,
+        sourceBitrateBps: 1_900_000,
+        usableUplinkBps: 100_000
+    )
+    let startable = options.filter { $0.capacity != .insufficient }
+
+    #expect(startable.count == 1)
+    #expect(startable.first?.capacity == .fallback)
+    #expect(startable.first?.width == 640)
+    #expect(startable.first?.height == 360)
+    #expect(startable.first?.fps == 5)
+    #expect(startable.first?.estimatedBitrateBps ?? .max <= 200_000)
+}
+
 private actor CaltopoFolderResolverProbe {
     private(set) var fetchCount = 0
     private(set) var createdFolders: [String] = []
@@ -449,7 +535,12 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(records[0].laancAvailable)
     #expect(records[0].rings.count == 1)
     #expect(records[0].rings[0][0] == .init(latitude: 39.7, longitude: -105.0))
-    let state = OperationalFacilityMap.state(records: records, loading: false, errorMessage: nil)
+    let state = OperationalFacilityMap.state(
+        records: records,
+        loading: false,
+        errorMessage: nil,
+        pilotCoordinate: .init(latitude: 39.75, longitude: -104.97)
+    )
     #expect(state.severity == .danger)
     #expect(state.chipLabel.contains("Authorization required"))
     #expect(state.chipLabel.contains("FAA grid limit 200 ft AGL"))
@@ -457,6 +548,13 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
 }
 
 @Test func operationalFacilityMapUsesLowestGridLimitRegardlessOfResponseOrder() {
+    let containingRing: [[OperationalAirspaceCoordinate]] = [[
+        .init(latitude: 39.9, longitude: -120.1),
+        .init(latitude: 40.1, longitude: -120.1),
+        .init(latitude: 40.1, longitude: -119.9),
+        .init(latitude: 39.9, longitude: -119.9),
+        .init(latitude: 39.9, longitude: -120.1),
+    ]]
     func record(objectID: Int64, ceilingFeet: Int) -> OperationalFacilityMapRecord {
         .init(
             objectID: objectID,
@@ -466,7 +564,8 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
             primaryAirportICAO: "KTRK",
             primaryAirportName: "Truckee Tahoe Airport",
             laancAvailable: true,
-            airspaceClasses: ["D"]
+            airspaceClasses: ["D"],
+            rings: containingRing
         )
     }
 
@@ -475,12 +574,14 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     let forward = OperationalFacilityMap.state(
         records: [twoHundred, oneHundred],
         loading: false,
-        errorMessage: nil
+        errorMessage: nil,
+        pilotCoordinate: .init(latitude: 40, longitude: -120)
     )
     let reverse = OperationalFacilityMap.state(
         records: [oneHundred, twoHundred],
         loading: false,
-        errorMessage: nil
+        errorMessage: nil,
+        pilotCoordinate: .init(latitude: 40, longitude: -120)
     )
 
     #expect(forward.chipLabel == reverse.chipLabel)
@@ -491,6 +592,59 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(forward.detail.contains("lowest FAA UAS Facility Map limit"))
 }
 
+@Test func operationalFacilityMapTreatsBufferOnlyIntersectionAsNearby() {
+    let record = OperationalFacilityMapRecord(
+        objectID: 145193,
+        ceilingFeet: 400,
+        unit: "FEET",
+        primaryAirportFAAID: "RDD",
+        primaryAirportICAO: "KRDD",
+        primaryAirportName: "Redding Rgnl",
+        laancAvailable: true,
+        airspaceClasses: ["D"],
+        rings: [[
+            .init(latitude: 40.58, longitude: -122.3242),
+            .init(latitude: 40.61, longitude: -122.3242),
+            .init(latitude: 40.61, longitude: -122.30),
+            .init(latitude: 40.58, longitude: -122.30),
+            .init(latitude: 40.58, longitude: -122.3242),
+        ]]
+    )
+    let state = OperationalFacilityMap.state(
+        records: [record],
+        loading: false,
+        errorMessage: nil,
+        pilotCoordinate: .init(latitude: 40.59122, longitude: -122.33465)
+    )
+
+    #expect(state.severity == .caution)
+    #expect(state.chipLabel == "Airspace nearby - Redding Rgnl Class D 0.5 mi")
+    #expect(state.detail.contains("No FAA UAS Facility Map grid covers the current location."))
+    #expect(state.detail.contains("authorization is required only if"))
+}
+
+@Test func operationalStatusStripUsesConciseHeadingsWithoutDiscardingDetails() {
+    let detailedAirspace =
+        "Airspace: Authorization required - Gowen Field Class C; FAA grid limit 100 ft AGL"
+    #expect(OperationalStatusChipText.airspace(
+        severity: .danger,
+        detailedLabel: detailedAirspace
+    ) == "Authorization required")
+    #expect(OperationalStatusChipText.airspace(
+        severity: .caution,
+        detailedLabel: "Airspace nearby - Gowen Field Class C 0.4 mi"
+    ) == "Airspace nearby")
+    #expect(OperationalStatusChipText.notam(
+        severity: .danger,
+        detailedLabel: "NOTAMs: RESTRICTED 0.0 mi"
+    ) == "NOTAM warning")
+    #expect(OperationalStatusChipText.land(
+        severity: .caution,
+        detailedLabel: "Land rules: 17 nearby"
+    ) == "Land rules nearby")
+    #expect(detailedAirspace.contains("Gowen Field"))
+}
+
 @Test func operationalFacilityMapPreservesAndroidClearAndFailureStates() throws {
     let clear = OperationalFacilityMap.state(records: [], loading: false, errorMessage: nil)
     #expect(clear.severity == .normal)
@@ -499,6 +653,35 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(unavailable.severity == .neutral)
     #expect(unavailable.chipLabel == "Airspace unavailable")
     #expect(unavailable.detail == "offline")
+}
+
+@Test func operationalNotamUsesOneStatuteMileOperatorRadius() {
+    let inside = OperationalNotam(
+        id: "inside",
+        title: "Inside",
+        summary: "",
+        distanceNM: 0.86,
+        intersectsPilotArea: false,
+        severity: .normal
+    )
+    let outside = OperationalNotam(
+        id: "outside",
+        title: "Outside",
+        summary: "",
+        distanceNM: 1.0,
+        intersectsPilotArea: false,
+        severity: .normal
+    )
+
+    let result = OperationalNotamPolicy.filtered(
+        [inside, outside],
+        radiusStatuteMiles: 1
+    )
+
+    #expect(result.visible.map(\.id) == ["inside"])
+    #expect(result.suppressed == 1)
+    #expect(OperationalNotamPolicy.faaQueryRadiusNM(radiusStatuteMiles: 1) == 1)
+    #expect(OperationalNotamPolicy.faaQueryRadiusNM(radiusStatuteMiles: 2) == 2)
 }
 
 @Test func operationalNotamParsesGeoJsonAndPrioritizesIntersectingTfr() throws {
@@ -1063,6 +1246,21 @@ private func proximityDrone(
     #expect(OperationalMapVideoLayout.split.withPictureInPicture(false) == .split)
 }
 
+@Test func operationalMapFullScreenPreservesPictureInPicture() {
+    #expect(OperationalMapVideoLayout.mapPrimary.fullScreenPresentation(
+        pictureInPictureEnabled: true
+    ) == .mapPrimary)
+    #expect(OperationalMapVideoLayout.videoPrimary.fullScreenPresentation(
+        pictureInPictureEnabled: true
+    ) == .videoPrimary)
+    #expect(OperationalMapVideoLayout.split.fullScreenPresentation(
+        pictureInPictureEnabled: true
+    ) == .videoPrimary)
+    #expect(OperationalMapVideoLayout.mapPrimary.fullScreenPresentation(
+        pictureInPictureEnabled: false
+    ) == .video)
+}
+
 @Test func caltopoTrackLabelMatchesAndroidFirstWaypointTimestamp() throws {
     let timeZone = TimeZone(secondsFromGMT: -7 * 60 * 60)!
     var calendar = Calendar(identifier: .gregorian)
@@ -1239,6 +1437,25 @@ private func proximityDrone(
     #expect(abs((relative?.distanceMeters ?? 0) - 100) < 0.1)
     #expect(abs((relative?.bearingDegrees ?? 0) - 90) < 0.1)
     #expect(forward.altitudeMeters == 400)
+}
+
+@Test func operationalClueProjectionUsesConfirmedCameraBearing() {
+    let projected = OperationalClueGeometry.project(
+        droneLatitude: 39.15419,
+        droneLongitude: -121.1323089,
+        droneAltitudeMeters: 543,
+        headingDegrees: 275,
+        aglMeters: 35.58111686159563,
+        gimbalAngleDegrees: -23
+    )
+    let relative = RidGeometry.relativePosition(
+        fromLatitude: 39.15419,
+        longitude: -121.1323089,
+        toLatitude: projected.latitude,
+        longitude: projected.longitude
+    )
+    #expect(abs((relative?.bearingDegrees ?? 0) - 275) < 0.1)
+    #expect((relative?.distanceMeters ?? 0) > 80)
 }
 
 @Test func operationalClueProjectionIntersectsRisingDEMTerrain() async {
@@ -1539,6 +1756,27 @@ private func proximityDrone(
     #expect(policy.playerFailed(detail: "reset") == .reconnect(after: 1, trigger: .playerFailed("reset")))
 }
 
+@Test func liveVideoDecoderSelectionRemembersNativeIncompatibilityAcrossHLSFrames() {
+    var policy = LiveVideoDecoderSelectionPolicy()
+
+    policy.nativeDecoderFailed(decodedFramesThisAttempt: 0)
+    #expect(policy.requiresHLSFallback)
+
+    // Frames decoded by the HLS backend must not make the next recovery retry
+    // the already-incompatible native backend.
+    #expect(policy.requiresHLSFallback)
+
+    policy.reset()
+    #expect(!policy.requiresHLSFallback)
+}
+
+@Test func liveVideoDecoderSelectionRetriesNativeAfterAnEstablishedNativeSession() {
+    var policy = LiveVideoDecoderSelectionPolicy()
+
+    policy.nativeDecoderFailed(decodedFramesThisAttempt: 42)
+    #expect(!policy.requiresHLSFallback)
+}
+
 @Test func bluetoothServiceDataDecodesBasicID() throws {
     let advertisement = try OpenDroneIDParser.parseBluetoothServiceData(
         bluetoothServiceData(message: basicIDMessage("RID2CALTOPO12345"), counter: 7)
@@ -1569,6 +1807,7 @@ private func proximityDrone(
     #expect(location.pressureAltitudeMeters == 100)
     #expect(location.geodeticAltitudeMeters == 200)
     #expect(location.heightMeters == 50)
+    #expect(location.horizontalAccuracyCode == 10)
     #expect(location.directionDegrees == 90)
     #expect(location.horizontalSpeedMetersPerSecond == 10)
     #expect(location.verticalSpeedMetersPerSecond == -2)
@@ -1610,7 +1849,76 @@ private func proximityDrone(
     #expect(observation?.altitudeMeters == 100)
     #expect(observation?.heightMeters == 50)
     #expect(observation?.heightReference == .takeoff)
+    #expect(observation?.horizontalAccuracyCode == 10)
     #expect(observation?.signalStrengthDbm == -48)
+}
+
+@Test func trackStoreRejectsPoorHorizontalAccuracyBeforeTakeoffAndAltitudeSeed() async throws {
+    let store = RidTrackStore()
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let stale = RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "AUTEL",
+        receivedAt: start,
+        latitude: 39.146693,
+        longitude: -121.112983,
+        altitudeMeters: 517,
+        heightMeters: 0,
+        heightReference: .takeoff,
+        horizontalAccuracyCode: 9
+    )
+    let rejected = await store.ingest(stale)
+    guard case let .rejectedHorizontalAccuracy(code, track) = rejected else {
+        Issue.record("Expected the <30 m startup fix to be rejected")
+        return
+    }
+    #expect(code == 9)
+    #expect(track == nil)
+    #expect(await store.snapshot().isEmpty)
+
+    let actual = RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "AUTEL",
+        receivedAt: start.addingTimeInterval(3),
+        latitude: 39.153078,
+        longitude: -121.132800,
+        altitudeMeters: 549,
+        heightMeters: 5,
+        heightReference: .takeoff,
+        horizontalAccuracyCode: 10
+    )
+    let accepted = await store.ingest(actual)
+    guard case let .accepted(track) = accepted else {
+        Issue.record("Expected the <10 m fix to establish the flight")
+        return
+    }
+    #expect(track.points.count == 1)
+    #expect(track.points[0].latitude == actual.latitude)
+    #expect(track.points[0].longitude == actual.longitude)
+
+    var coordinator = OperationalAltitudeCoordinator()
+    coordinator.ingest(track.lastObservation)
+    #expect(coordinator.takeoffCoordinate == .init(
+        latitude: actual.latitude,
+        longitude: actual.longitude
+    ))
+
+    let poorWhileActive = RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "AUTEL",
+        receivedAt: start.addingTimeInterval(4),
+        latitude: 39.20,
+        longitude: -121.20,
+        horizontalAccuracyCode: 0
+    )
+    let activeRejected = await store.ingest(poorWhileActive)
+    guard case let .rejectedHorizontalAccuracy(activeCode, activeTrack) = activeRejected else {
+        Issue.record("Expected unknown accuracy to remain signal-only")
+        return
+    }
+    #expect(activeCode == 0)
+    #expect(activeTrack?.points.count == 1)
+    #expect(activeTrack?.lastSignalAt == poorWhileActive.receivedAt)
 }
 
 @Test func malformedServiceDataIsRejected() {
@@ -1793,7 +2101,9 @@ private func proximityDrone(
             organization: "NCSSAR",
             incident: "Test Incident",
             operationalPeriod: "1",
-            mapID: "map-123"
+            mapID: "map-123",
+            buildVersion: "1.7.0",
+            buildTime: "02Aug2026:092559"
         )
     )
     let root = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -1813,6 +2123,14 @@ private func proximityDrone(
     #expect(r2c["rid"] as? String == "ARCHIVE01")
     #expect(r2c["org"] as? String == "NCSSAR")
     #expect(r2c["map_id"] as? String == "map-123")
+    #expect(r2c["BUILD_VERSION"] as? String == "1.7.0")
+    #expect(r2c["BUILD_TIME"] as? String == "02Aug2026:092559")
+}
+
+@Test func buildTimeMatchesAndroidArchiveFormat() throws {
+    let date = try #require(ISO8601DateFormatter().date(from: "2026-08-02T16:25:59Z"))
+    let timeZone = try #require(TimeZone(secondsFromGMT: -7 * 60 * 60))
+    #expect(RidBuildMetadata.formattedBuildTime(date, timeZone: timeZone) == "02Aug2026:092559")
 }
 
 @Test func trackerArchiveUploadMatchesAndroidEligibilityAndRequestContract() throws {
@@ -1839,6 +2157,20 @@ private func proximityDrone(
     #expect(request.value(forHTTPHeaderField: "X-SAR-Token") == "secret-token")
     #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json; charset=utf-8")
     #expect(request.httpBody == eligible)
+}
+
+@Test func trackerArchiveUploadScopesRootPrefixToOrganization() throws {
+    let configuration = TrackerArchiveUploadConfiguration(
+        urlPrefix: "https://r2c-tracker.com",
+        apiKey: "device-token",
+        organization: " NCSSAR "
+    )
+    let request = try TrackerArchiveUploadContract.makeRequest(
+        geoJSON: Data("{}".utf8),
+        configuration: configuration
+    )
+    #expect(configuration.urlPrefix == "https://r2c-tracker.com/ncssar")
+    #expect(request.url?.absoluteString == "https://r2c-tracker.com/ncssar/upload")
 }
 
 @Test func trackerArchiveUploadRejectsLocalForeignAndUnknownTracks() throws {
@@ -2446,6 +2778,16 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
 }
 
 @Test func trackerCoordinationWireMatchesAndroidContract() throws {
+    let scopedPrefix = TrackerCoordinationEndpoint.organizationScopedPrefix(
+        from: "https://r2c-tracker.com",
+        organization: " NCSSAR "
+    )
+    #expect(scopedPrefix == "https://r2c-tracker.com/ncssar")
+    #expect(TrackerCoordinationEndpoint.organizationScopedPrefix(
+        from: "https://r2c-tracker.com/other-team",
+        organization: "NCSSAR"
+    ) == "https://r2c-tracker.com/other-team")
+
     let endpoint = try TrackerCoordinationEndpoint.webSocketURL(from: "https://tracker.example/r2c/")
     #expect(endpoint.absoluteString == "wss://tracker.example/r2c/ws/r2c")
 
@@ -2453,6 +2795,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
         mapID: "MAP1",
         zoneID: "zone-alpha",
         name: "Alpha",
+        platform: "ios",
         appVersion: "0.1(1)",
         appVersionCode: 1
     )
@@ -2465,6 +2808,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(hello["incidentId"] as? String == "MAP1")
     #expect(hello["zoneId"] as? String == "zone-alpha")
     #expect(hello["guid"] as? String == "zone-alpha")
+    #expect(hello["appPlatform"] as? String == "ios")
     #expect((hello["appVersionCode"] as? NSNumber)?.intValue == 1)
 
     let identity = TrackerCoordinationIdentity(
@@ -2683,7 +3027,11 @@ private func basicIDMessage(_ uasID: String) -> [UInt8] {
     return message
 }
 
-private func locationMessage(direction: UInt8 = 90, eastWest: Bool = false) -> [UInt8] {
+private func locationMessage(
+    direction: UInt8 = 90,
+    eastWest: Bool = false,
+    horizontalAccuracyCode: UInt8 = 10
+) -> [UInt8] {
     var message = [UInt8](repeating: 0, count: OpenDroneIDParser.messageSize)
     message[0] = 0x12
     message[1] = eastWest ? 0x02 : 0x00
@@ -2695,6 +3043,7 @@ private func locationMessage(direction: UInt8 = 90, eastWest: Bool = false) -> [
     writeUInt16(2_200, into: &message, at: 13)
     writeUInt16(2_400, into: &message, at: 15)
     writeUInt16(2_100, into: &message, at: 17)
+    message[19] = horizontalAccuracyCode & 0x0F
     writeUInt16(123, into: &message, at: 21)
     return message
 }

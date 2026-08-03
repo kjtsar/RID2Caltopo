@@ -186,6 +186,20 @@ final class MediaMTXViewModel: ObservableObject {
         }
     }
 
+    func shutdown() async {
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
+        eventTask?.cancel()
+        eventTask = nil
+        await controller.stop()
+        for path in activePublisherPaths {
+            eventHandler?(.streamStopped(path: path, publisherConnectionID: nil))
+        }
+        activePublisherPaths.removeAll()
+        isRunning = false
+        status = "Stopped"
+    }
+
     func restart(captureStreams: Bool) {
         guard isRunning else {
             start(captureStreams: captureStreams)

@@ -26,6 +26,7 @@ public class LocationData extends MessageData {
     private double altitudeGeodetic;
     private double height;
     private HorizontalAccuracyEnum horizontalAccuracy;
+    private int horizontalAccuracyCode;
     private VerticalAccuracyEnum verticalAccuracy;
     private VerticalAccuracyEnum baroAccuracy;
     private SpeedAccuracyEnum speedAccuracy;
@@ -46,6 +47,7 @@ public class LocationData extends MessageData {
         altitudeGeodetic = -1000; // -1000 is the Invalid value in the specification
         height = -1000; // -1000 is the Invalid value in the specification
         horizontalAccuracy = HorizontalAccuracyEnum.Unknown;
+        horizontalAccuracyCode = 0;
         verticalAccuracy = VerticalAccuracyEnum.Unknown;
         baroAccuracy = VerticalAccuracyEnum.Unknown;
         speedAccuracy = SpeedAccuracyEnum.Unknown;
@@ -204,6 +206,7 @@ public class LocationData extends MessageData {
         meters_1,
     }
     public HorizontalAccuracyEnum getHorizontalAccuracy() { return horizontalAccuracy; }
+    public int getHorizontalAccuracyCode() { return horizontalAccuracyCode; }
     public String getHorizontalAccuracyAsString(Resources res) {
         switch(horizontalAccuracy) {
             case kilometers_18_52: return "< 18.52 km";
@@ -222,6 +225,7 @@ public class LocationData extends MessageData {
         }
     }
     public void setHorizontalAccuracy(int horizontalAccuracy) {
+        horizontalAccuracyCode = horizontalAccuracy;
         switch(horizontalAccuracy) {
             case 1: this.horizontalAccuracy = HorizontalAccuracyEnum.kilometers_18_52; break;
             case 2: this.horizontalAccuracy = HorizontalAccuracyEnum.kilometers_7_408; break;

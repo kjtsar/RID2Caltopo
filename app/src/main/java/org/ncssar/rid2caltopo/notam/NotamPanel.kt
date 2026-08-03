@@ -30,6 +30,18 @@ fun NotamPanel(
     airspaceState: AirspaceUiState? = null,
     onDismiss: () -> Unit
 ) {
+    val displayedAirspace = airspaceState?.takeIf {
+        shouldUseAirspaceStatus(state.visible, it)
+    }
+    if (displayedAirspace != null) {
+        AirspaceRestrictionsPanel(
+            state = displayedAirspace,
+            notamState = state,
+            onDismiss = onDismiss
+        )
+        return
+    }
+
     val expandedIds = remember { mutableStateListOf<String>() }
     val coordinateDisplayFormat = CoordinateDisplayFormat.fromStorage(CaltopoClient.GetCoordinateDisplayFormat())
     val currentLocationText = CaltopoMap.GetMyLocation()?.let { location ->
@@ -60,7 +72,10 @@ fun NotamPanel(
                 queryLocationText?.let {
                     Text("NOTAM query used: $it")
                 }
-                Text("Radius: ${state.radiusNm} NM")
+                Text(
+                    "Radius: ${state.radiusStatuteMiles} " +
+                        if (state.radiusStatuteMiles == 1) "statute mile" else "statute miles"
+                )
                 state.lastUpdatedText?.let {
                     Text(it, color = if (state.stale) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -83,7 +98,7 @@ fun NotamPanel(
                 Spacer(Modifier.height(10.dp))
                 if (state.suppressedNoticeCount > 0) {
                     Text(
-                        "Showing only notices within ${state.radiusNm} NM. ${state.suppressedNoticeCount} farther notices hidden.",
+                        "Showing only notices within ${state.radiusStatuteMiles} statute miles. ${state.suppressedNoticeCount} farther notices hidden.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(10.dp))
@@ -91,9 +106,12 @@ fun NotamPanel(
                 if (state.notices.isEmpty()) {
                     val nearestHidden = state.nearestHiddenNotice
                     when {
+                        !state.enabled -> {
+                            Text("Nearby NOTAM monitoring is disabled.")
+                        }
                         nearestHidden != null -> {
                             Text(
-                                "Nearest NOTAM is ${nearestHidden.proximityText.ifBlank { nearestHidden.distanceNm?.let { "${"%.1f".format(it)} NM" } ?: "unavailable" }} away.",
+                                "Nearest NOTAM is ${nearestHidden.proximityText.ifBlank { nearestHidden.distanceNm?.let { "${"%.1f".format(it / OperatingArea.radiusNm)} mi" } ?: "unavailable" }} away.",
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Spacer(Modifier.height(8.dp))
@@ -232,6 +250,106 @@ fun NotamPanel(
                         Spacer(Modifier.height(12.dp))
                     }
                 }
+            }
+        }
+    )
+}
+
+@Composable
+private fun AirspaceRestrictionsPanel(
+    state: AirspaceUiState,
+    notamState: NotamUiState,
+    onDismiss: () -> Unit
+) {
+    val coordinateDisplayFormat =
+        CoordinateDisplayFormat.fromStorage(CaltopoClient.GetCoordinateDisplayFormat())
+    val currentLocationText = CaltopoMap.GetMyLocation()?.let { location ->
+        CoordinateFormatter.format(location.latitude, location.longitude, coordinateDisplayFormat)
+    } ?: "Unavailable"
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        },
+        title = {
+            Text("Nearby Airspace Restrictions")
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text("Location: $currentLocationText")
+                Text("Operating area: 1 statute mile")
+                Spacer(Modifier.height(10.dp))
+                if (state.summary.isNotBlank()) {
+                    Text(state.summary, fontWeight = FontWeight.SemiBold)
+                }
+                if (state.detail.isNotBlank()) {
+                    Text(
+                        state.detail,
+                        modifier = Modifier.padding(top = 2.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                state.errorMessage?.takeIf { it.isNotBlank() }?.let {
+                    Text(
+                        it,
+                        modifier = Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Source: FAA UAS Facility Map (not the NOTAM database).",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(14.dp))
+                Text("Nearby NOTAMs", fontWeight = FontWeight.SemiBold)
+                Text(
+                    notamState.chipLabel,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (notamState.statusLine.isNotBlank()) {
+                    Text(
+                        notamState.statusLine,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                notamState.errorMessage?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+                if (notamState.notices.isEmpty()) {
+                    Text(
+                        when {
+                            !notamState.enabled -> "Nearby NOTAM monitoring is disabled."
+                            !notamState.configured ->
+                                "Import the r2c-tracker organization QR code to enable NOTAM queries."
+                            else -> "No nearby NOTAM notices were returned."
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    notamState.notices.forEach { notice ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(notice.title, fontWeight = FontWeight.SemiBold)
+                        if (notice.summary.isNotBlank()) {
+                            Text(
+                                notice.summary,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "NOTAM source: FAA NOTAM data via the configured r2c-tracker organization proxy.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     )

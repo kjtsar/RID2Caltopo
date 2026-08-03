@@ -4,6 +4,7 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec;
 import org.opendroneid.android.Constants;
 import org.opendroneid.android.data.AircraftObject;
 import org.opendroneid.android.data.Identification;
+import org.opendroneid.android.data.LocationData;
 import org.junit.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -14,6 +15,34 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertNotNull;
 
 public class OpenDroneIdDataManagerParserSeamsTest {
+
+    @Test
+    public void horizontalAccuracy_requiresF3411TenMeterContainment() {
+        assertEquals(false, OpenDroneIdDataManager.isHorizontalAccuracySufficient(0));
+        assertEquals(false, OpenDroneIdDataManager.isHorizontalAccuracySufficient(9));
+        assertEquals(true, OpenDroneIdDataManager.isHorizontalAccuracySufficient(10));
+        assertEquals(true, OpenDroneIdDataManager.isHorizontalAccuracySufficient(11));
+        assertEquals(true, OpenDroneIdDataManager.isHorizontalAccuracySufficient(12));
+        assertEquals(false, OpenDroneIdDataManager.isHorizontalAccuracySufficient(13));
+    }
+
+    @Test
+    public void locationParser_preservesHorizontalAccuracyCode() throws Exception {
+        byte[] payload = new byte[Constants.MAX_MESSAGE_SIZE];
+        payload[0] = 0x12; // LOCATION, protocol version 2
+        payload[19] = 10;
+
+        OpenDroneIdParser.Message<?> message =
+                OpenDroneIdParser.parseMessage(payload, 0, 1234L, null, 7);
+        OpenDroneIdParser.Location location = (OpenDroneIdParser.Location) message.payload;
+        assertEquals(10, location.horizontalAccuracy);
+
+        LocationData normalized = new LocationData();
+        normalized.setHorizontalAccuracy(location.horizontalAccuracy);
+        assertEquals(10, normalized.getHorizontalAccuracyCode());
+        assertEquals(LocationData.HorizontalAccuracyEnum.meters_10,
+                normalized.getHorizontalAccuracy());
+    }
 
     @Test
     public void ridTimestamp_invalidUnknown_returnsZero() {

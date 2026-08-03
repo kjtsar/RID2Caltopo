@@ -4,10 +4,10 @@ import android.location.Location
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -19,7 +19,6 @@ import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
-import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import java.time.Instant
@@ -80,7 +79,7 @@ internal class NotamRepository {
         if (force && CTDebugEnabled(TAG)) {
             CTDebug(
                 TAG,
-                "refresh(force=$force) enabled=$enabled configured=$configured radiusNm=${CaltopoClient.GetNotamRadiusNm()} hasLocation=${location != null} accuracyM=${location?.accuracy ?: Float.NaN}"
+                "refresh(force=$force) enabled=$enabled configured=$configured radiusStatuteMiles=${CaltopoClient.GetNotamRadiusNm()} hasLocation=${location != null} accuracyM=${location?.accuracy ?: Float.NaN}"
             )
         }
         if (!enabled) {
@@ -131,11 +130,11 @@ internal class NotamRepository {
             listOf(
                 NearbyNotam(
                     id = "pending_credentials",
-                    title = "FAA NOTAM credentials pending",
-                    summary = "NOTAM monitoring is enabled, but FAA onboarding credentials have not been loaded yet.",
+                    title = "FAA NOTAM proxy pending",
+                    summary = "NOTAM monitoring is enabled, but FAA proxy access is unavailable in this build.",
                     distanceNm = null,
-                    effectiveText = "Waiting for credentials",
-                    details = "Load or scan the shared FAA config token to activate live nearby NOTAM queries.",
+                    effectiveText = "Waiting for FAA proxy configuration",
+                    details = "Install a build configured for FAA proxy access to activate live nearby NOTAM queries.",
                     rawText = "",
                     severity = NotamChipSeverity.Neutral
                 )
@@ -198,21 +197,22 @@ internal class NotamRepository {
     }
 
     private suspend fun fetchNearbyNotamsFull(current: Location): List<NearbyNotam> {
-        val url = NotamAuthManager.resolvedApiBaseUrl()
+        val url = NotamAuthManager.resolvedNotamUrl()
             .toHttpUrl()
             .newBuilder()
-            .addPathSegments("v1/notams")
             .addQueryParameter("latitude", "%.6f".format(Locale.US, current.latitude))
             .addQueryParameter("longitude", "%.6f".format(Locale.US, current.longitude))
-            .addQueryParameter("radius", CaltopoClient.GetNotamRadiusNm().toString())
+            .addQueryParameter(
+                "radius",
+                OperatingArea.faaNotamQueryRadiusNm(CaltopoClient.GetNotamRadiusNm()).toString()
+            )
             .build()
         if (CTDebugEnabled(TAG)) {
             CTDebug(TAG, "GET $url responseFormat=GEOJSON")
         }
         val request = Request.Builder()
             .url(url)
-            .header("Authorization", "Bearer ${withContext(Dispatchers.IO) { NotamAuthManager.getBearerToken() }}")
-            .header("nmsResponseFormat", "GEOJSON")
+            .header("X-SAR-Token", NotamAuthManager.proxyToken())
             .get()
             .build()
         return executeNotamRequest(request, "NOTAM query") { body ->
@@ -232,13 +232,15 @@ internal class NotamRepository {
     }
 
     private suspend fun fetchNearbyNotamsDelta(current: Location, sinceEpochMs: Long): List<NearbyNotam> {
-        val url = NotamAuthManager.resolvedApiBaseUrl()
+        val url = NotamAuthManager.resolvedNotamUrl()
             .toHttpUrl()
             .newBuilder()
-            .addPathSegments("v1/notams")
             .addQueryParameter("latitude", "%.6f".format(Locale.US, current.latitude))
             .addQueryParameter("longitude", "%.6f".format(Locale.US, current.longitude))
-            .addQueryParameter("radius", CaltopoClient.GetNotamRadiusNm().toString())
+            .addQueryParameter(
+                "radius",
+                OperatingArea.faaNotamQueryRadiusNm(CaltopoClient.GetNotamRadiusNm()).toString()
+            )
             .addQueryParameter("lastUpdatedDate", Instant.ofEpochMilli(sinceEpochMs).toString())
             .build()
         if (CTDebugEnabled(TAG)) {
@@ -246,8 +248,7 @@ internal class NotamRepository {
         }
         val request = Request.Builder()
             .url(url)
-            .header("Authorization", "Bearer ${withContext(Dispatchers.IO) { NotamAuthManager.getBearerToken() }}")
-            .header("nmsResponseFormat", "GEOJSON")
+            .header("X-SAR-Token", NotamAuthManager.proxyToken())
             .get()
             .build()
         return executeNotamRequest(request, "NOTAM delta query") { body ->
@@ -279,8 +280,7 @@ internal class NotamRepository {
                 if (!response.isSuccessful) {
                     val message = when (response.code) {
                         401, 403 -> {
-                            FaaConfigManager.markAuthorizationFailure("NOTAM authentication failed (HTTP ${response.code}).")
-                            "NOTAM authentication failed (HTTP ${response.code})."
+                            "FAA proxy authorization failed (HTTP ${response.code})."
                         }
                         else -> "$requestLabel failed with HTTP ${response.code}."
                     }
@@ -760,7 +760,15 @@ internal class NotamRepository {
         notices: List<NearbyNotam>
     ): NotamUiState {
         val enabled = CaltopoClient.GetNotamEnabled()
-        if (!enabled) return NotamUiState(visible = false, enabled = false, configured = configured)
+        if (!enabled) {
+            return NotamUiState(
+                visible = true,
+                enabled = false,
+                configured = configured,
+                chipLabel = "NOTAMs disabled",
+                statusLine = "Nearby NOTAM monitoring is disabled."
+            )
+        }
 
         val sorted = NotamPolicy.sort(notices)
         val (visibleNotices, suppressedNoticeCount) = NotamPolicy.filterWithinRadius(sorted, CaltopoClient.GetNotamRadiusNm())
@@ -803,7 +811,7 @@ internal class NotamRepository {
             lastUpdatedText = formatLastUpdated(lastUpdatedMs, stale),
             queryLatitude = lastRefreshLocation?.latitude,
             queryLongitude = lastRefreshLocation?.longitude,
-            radiusNm = CaltopoClient.GetNotamRadiusNm(),
+            radiusStatuteMiles = CaltopoClient.GetNotamRadiusNm(),
             notices = visibleNotices,
             suppressedNoticeCount = suppressedNoticeCount,
             nearestHiddenNotice = nearestHiddenNotice,
@@ -814,7 +822,7 @@ internal class NotamRepository {
     private fun proximityText(distanceNm: Double?, bearingDeg: Double?): String {
         if (distanceNm == null) return "Distance unavailable"
         if (distanceNm < 0.05) return "HERE"
-        val distanceText = String.format(Locale.US, "%.1f NM", distanceNm)
+        val distanceText = String.format(Locale.US, "%.1f mi", distanceNm / OperatingArea.radiusNm)
         val bearingText = bearingDeg?.let(::compassDirection)
         return if (bearingText.isNullOrBlank()) distanceText else "$bearingText $distanceText"
     }

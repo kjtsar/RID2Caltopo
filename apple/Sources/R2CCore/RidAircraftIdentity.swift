@@ -3,6 +3,7 @@ import Foundation
 public struct RidAircraftIdentity: Sendable, Equatable {
     public let remoteID: String
     public let organization: String
+    public let ownerName: String
     public let pilotCallsign: String
     public let droneDescription: String
     public let mappedIDOverride: String?
@@ -10,12 +11,14 @@ public struct RidAircraftIdentity: Sendable, Equatable {
     public init(
         remoteID: String,
         organization: String,
+        ownerName: String = "",
         pilotCallsign: String,
         droneDescription: String,
         mappedIDOverride: String? = nil
     ) {
         self.remoteID = remoteID.trimmingCharacters(in: .whitespacesAndNewlines)
         self.organization = organization.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ownerName = ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
         self.pilotCallsign = pilotCallsign.trimmingCharacters(in: .whitespacesAndNewlines)
         self.droneDescription = droneDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         self.mappedIDOverride = mappedIDOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -58,7 +61,7 @@ public struct RidAircraftIdentity: Sendable, Equatable {
         }
 
         if modelAbbreviation.isEmpty,
-           let match = mappedID.range(of: #"^[0-9]?[A-Za-z]+[0-9]+"#, options: .regularExpression) {
+           let match = mappedID.range(of: #"^[0-9]+[A-Za-z]+[0-9]+"#, options: .regularExpression) {
             return String(mappedID[match])
         }
         return mappedID

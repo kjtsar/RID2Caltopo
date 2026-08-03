@@ -25,6 +25,13 @@ struct AppleVideoSnapshot: Sendable, Equatable {
     let height: Int
 }
 
+protocol AppleDecodedVideoFrameConsumer: AnyObject {
+    func consumeDecodedVideoFrame(
+        _ pixelBuffer: CVPixelBuffer,
+        timestampNanoseconds: Int64
+    )
+}
+
 enum AppleVideoSnapshotError: LocalizedError {
     case noDecodedFrame
     case conversionFailed
@@ -287,6 +294,9 @@ final class AppleVideoFrameSource: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var frameCount = 0
     @Published private(set) var dimensions = "--"
+    @Published private(set) var sourceWidth = 0
+    @Published private(set) var sourceHeight = 0
+    @Published private(set) var sourceFrameRate = 0.0
     @Published private(set) var videoAspectRatio = 16.0 / 9.0
     @Published private(set) var analyzedFrameCount = 0
     @Published private(set) var droppedAnalysisFrameCount = 0
@@ -326,8 +336,12 @@ final class AppleVideoFrameSource: ObservableObject {
     private var currentPath: String?
     private var playerGeneration = 0
     private var recoveryPolicy = LiveVideoRecoveryPolicy()
+    private var decoderSelectionPolicy = LiveVideoDecoderSelectionPolicy()
     private var latestPixelBuffer: CVPixelBuffer?
     private var latestFrameCapturedAt: Date?
+    private weak var managedVideoFrameConsumer: AppleDecodedVideoFrameConsumer?
+    private var frameRateWindowStartedAt: CFTimeInterval?
+    private var frameRateWindowFrameCount = 0
     private var displayLayers: [ObjectIdentifier: WeakVideoDisplayLayer] = [:]
     private var lagEstimator = LiveVideoLagEstimator()
     private var sessionLagEstimator = LiveVideoSessionLagEstimator()
@@ -342,6 +356,10 @@ final class AppleVideoFrameSource: ObservableObject {
         anomalyMode = mode
         anomalyConfiguration = configuration
         anomalyProcessor = AppleAnomalyProcessor(mode: mode, configuration: configuration)
+    }
+
+    func setManagedVideoFrameConsumer(_ consumer: AppleDecodedVideoFrameConsumer?) {
+        managedVideoFrameConsumer = consumer
     }
 
     func setAnomalyMode(_ mode: AppleAnomalyMode) {
@@ -385,6 +403,7 @@ final class AppleVideoFrameSource: ObservableObject {
         decoderDelayMilliseconds = nil
         lagEstimator.reset()
         recoveryPolicy.reset(at: Self.now)
+        decoderSelectionPolicy.reset()
         startWatchdog()
         installPreferredDecoder(hlsURL: url)
         AppleLog.info("Video", "Decoder session requested url=\(url.absoluteString) path=\(currentPath ?? "unknown")")
@@ -401,6 +420,12 @@ final class AppleVideoFrameSource: ObservableObject {
         ffmpegFrameSequence = 0
         loggedNativeFrameFormat = false
         loggedNativeDisplayFailure = false
+
+        if decoderSelectionPolicy.requiresHLSFallback {
+            AppleLog.info("Video", "Using HLS fallback after native decoder incompatibility path=\(currentPath ?? "unknown")")
+            installPlayer(url: hlsURL, beginsRecoveryAttempt: false)
+            return
+        }
 
         guard let rtspURL = Self.rtspURL(fromHLSURL: hlsURL),
               let session = rtspURL.absoluteString.withCString({ R2CFFmpegSessionCreate($0) })
@@ -507,6 +532,11 @@ final class AppleVideoFrameSource: ObservableObject {
         sessionLagEstimator.reset()
         frameCount = 0
         dimensions = "--"
+        sourceWidth = 0
+        sourceHeight = 0
+        sourceFrameRate = 0
+        frameRateWindowStartedAt = nil
+        frameRateWindowFrameCount = 0
         videoAspectRatio = 16.0 / 9.0
         analyzedFrameCount = 0
         droppedAnalysisFrameCount = 0
@@ -515,6 +545,7 @@ final class AppleVideoFrameSource: ObservableObject {
         anomalyHotOverlay = nil
         decodedFrameAgeSeconds = nil
         recoveryCount = 0
+        decoderSelectionPolicy.reset()
         lastRecoveryReason = "None"
         nextRetryDelaySeconds = nil
         mediaPublisherStatus = "Unknown"
@@ -560,6 +591,12 @@ final class AppleVideoFrameSource: ObservableObject {
             retryTask?.cancel()
             retryTask = nil
             nextRetryDelaySeconds = nil
+            // Keep the decoder and managed WebRTC session alive for the
+            // recovery grace period, but never present an offline publisher's
+            // last decoded image as though it were still live.
+            latestPixelBuffer = nil
+            latestFrameCapturedAt = nil
+            flushDisplayLayers(removeImage: true)
         }
         handleRecoveryDecision(recoveryPolicy.setPublisherAvailable(publisherAvailable))
     }
@@ -737,11 +774,18 @@ final class AppleVideoFrameSource: ObservableObject {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         dimensions = "\(width) x \(height)"
+        sourceWidth = width
+        sourceHeight = height
+        recordSourceFrameForRateMeasurement()
         if height > 0 {
             videoAspectRatio = Double(width) / Double(height)
         }
         latestPixelBuffer = pixelBuffer
         latestFrameCapturedAt = Date()
+        managedVideoFrameConsumer?.consumeDecodedVideoFrame(
+            pixelBuffer,
+            timestampNanoseconds: Int64(CACurrentMediaTime() * 1_000_000_000)
+        )
         let decoderDelay = lagEstimator.observe(
             sourceTimestampMicroseconds: sourceTimestampMicroseconds,
             observedAtMilliseconds: Self.nowMilliseconds
@@ -761,6 +805,21 @@ final class AppleVideoFrameSource: ObservableObject {
         }
         submitForAnomalyAnalysis(pixelBuffer: pixelBuffer, itemTime: itemTime)
         state = .streaming
+    }
+
+    private func recordSourceFrameForRateMeasurement() {
+        let now = CACurrentMediaTime()
+        guard let startedAt = frameRateWindowStartedAt else {
+            frameRateWindowStartedAt = now
+            frameRateWindowFrameCount = 1
+            return
+        }
+        frameRateWindowFrameCount += 1
+        let elapsed = now - startedAt
+        guard elapsed >= 2 else { return }
+        sourceFrameRate = Double(frameRateWindowFrameCount - 1) / elapsed
+        frameRateWindowStartedAt = now
+        frameRateWindowFrameCount = 1
     }
 
     private func enqueueForImmediateDisplay(_ pixelBuffer: CVPixelBuffer) {
@@ -873,8 +932,10 @@ final class AppleVideoFrameSource: ObservableObject {
         guard status == R2C_FFMPEG_STATUS_FAILED, !nativeFailureHandled else { return }
         nativeFailureHandled = true
         let message = String(decoding: detail.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
+        let nativeDecodedFrames = R2CFFmpegSessionDecodedFrameCount(ffmpegSession)
+        decoderSelectionPolicy.nativeDecoderFailed(decodedFramesThisAttempt: nativeDecodedFrames)
         AppleLog.warning("Video", "Native decoder failed path=\(currentPath ?? "unknown") detail=\(message)")
-        if frameCount == 0, let currentURL {
+        if decoderSelectionPolicy.requiresHLSFallback, let currentURL {
             tearDownNativeDecoder()
             installPlayer(url: currentURL, beginsRecoveryAttempt: false)
         } else {

@@ -74,6 +74,7 @@ public enum RidTrackSignalOnlyReason: Sendable, Equatable {
 public enum RidTrackIngestOutcome: Sendable, Equatable {
     case accepted(RidAircraftTrack)
     case signalOnly(RidAircraftTrack, reason: RidTrackSignalOnlyReason)
+    case rejectedHorizontalAccuracy(code: UInt8, track: RidAircraftTrack?)
     case rejectedInvalidObservation
 }
 
@@ -103,6 +104,16 @@ public actor RidTrackStore {
         }
 
         let observation = rawObservation.withAircraftID(aircraftID)
+        if let code = observation.horizontalAccuracyCode,
+           !(10 ... 12).contains(code) {
+            guard var track = tracksByAircraftID[aircraftID] else {
+                return .rejectedHorizontalAccuracy(code: code, track: nil)
+            }
+            track.lastSignalAt = max(track.lastSignalAt, observation.receivedAt)
+            track.lastSignalStrengthDbm = observation.signalStrengthDbm
+            tracksByAircraftID[aircraftID] = track
+            return .rejectedHorizontalAccuracy(code: code, track: track)
+        }
         guard var track = tracksByAircraftID[aircraftID] else {
             let point = RidTrackPoint(observation: observation)
             let track = RidAircraftTrack(
@@ -233,6 +244,7 @@ private extension RidObservation {
             altitudeMeters: altitudeMeters,
             heightMeters: heightMeters,
             heightReference: heightReference,
+            horizontalAccuracyCode: horizontalAccuracyCode,
             headingDegrees: headingDegrees,
             speedMetersPerSecond: speedMetersPerSecond,
             operatorLatitude: operatorLatitude,

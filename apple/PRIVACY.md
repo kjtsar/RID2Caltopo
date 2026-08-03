@@ -32,6 +32,12 @@ for the same aircraft. RID2Caltopo does not use this information for advertising
 or tracking across apps or websites and does not include advertising or
 analytics SDKs.
 
+When nearby NOTAM monitoring is enabled, the app sends the operator's current
+latitude, longitude, and selected search radius to the configured tracker. The
+tracker authenticates to the FAA NOTAM service and returns the FAA response.
+The app does not request or transmit an FAA bearer token. The tracker may cache
+the response briefly for a small geographic area.
+
 ## Files and diagnostic sharing
 
 Track archives and diagnostic logs remain in the app's container and are also

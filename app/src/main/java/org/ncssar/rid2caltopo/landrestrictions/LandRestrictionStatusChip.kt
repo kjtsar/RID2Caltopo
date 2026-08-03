@@ -9,6 +9,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -36,8 +37,24 @@ fun LandRestrictionStatusChip(
     }
     AssistChip(
         onClick = onClick,
-        label = { Text(state.chipLabel) },
+        label = {
+            Text(
+                text = conciseLandStatusLabel(state),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip
+            )
+        },
         colors = colors,
         modifier = modifier.padding(outerPadding)
     )
 }
+
+internal fun conciseLandStatusLabel(state: LandRestrictionUiState): String =
+    when (state.severity) {
+        LandRestrictionSeverity.Danger -> "Land restricted"
+        LandRestrictionSeverity.Caution -> "Land rules nearby"
+        LandRestrictionSeverity.Normal -> "Land rules clear"
+        LandRestrictionSeverity.Neutral ->
+            state.chipLabel.trim().takeIf { it.length <= 24 } ?: "Land status"
+    }

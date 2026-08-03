@@ -230,6 +230,7 @@ final class AppleOrgConfigSettings: ObservableObject {
     @Published private(set) var trackFolder: String
     @Published private(set) var teamID: String
     @Published private(set) var trackerURLPrefix: String
+    @Published private(set) var faaProxyURL: String
     @Published private(set) var usePeers: Bool
     @Published private(set) var standaloneR2CCoordinationEnabled: Bool
     @Published private(set) var predictiveHeadEnabled: Bool
@@ -243,6 +244,8 @@ final class AppleOrgConfigSettings: ObservableObject {
     private let defaults: UserDefaults
     private static let keychainService = "org.ncssar.RID2CaltopoApple.org-config"
     private static let trackerAccount = "tracker-api-key"
+    private static let managedStandaloneMigrationKey =
+        "org.managedTrackerStandaloneMigration.v1"
     private static let faaClientIDAccount = "faa-client-id"
     private static let faaClientSecretAccount = "faa-client-secret"
     private static let mutualAidCredentialIDAccount = "mutual-aid-credential-id"
@@ -259,6 +262,7 @@ final class AppleOrgConfigSettings: ObservableObject {
         trackFolder = Self.normalizedTrackFolder(defaults.string(forKey: "org.trackFolder"))
         teamID = defaults.string(forKey: "org.teamID") ?? ""
         trackerURLPrefix = defaults.string(forKey: "org.trackerURLPrefix") ?? ""
+        faaProxyURL = defaults.string(forKey: "org.faaProxyURL") ?? ""
         usePeers = defaults.object(forKey: "org.usePeers") as? Bool ?? true
         standaloneR2CCoordinationEnabled =
             defaults.object(forKey: "org.standaloneR2CCoordination") as? Bool ?? false
@@ -269,11 +273,93 @@ final class AppleOrgConfigSettings: ObservableObject {
         bridgeCheckDistanceFeet = max(1, defaults.object(forKey: "track.bridgeCheckDistanceFeet") as? Int ?? 20)
         maximumIdleMinutes = max(0, defaults.object(forKey: "app.maximumIdleMinutes") as? Int ?? 120)
         sourceDescription = defaults.string(forKey: "org.sourceDescription") ?? "Not loaded"
+        if sourceDescription == "Managed r2c-tracker enrollment" {
+            let scopedPrefix = TrackerCoordinationEndpoint.organizationScopedPrefix(
+                from: trackerURLPrefix,
+                organization: organizationName
+            )
+            if scopedPrefix != trackerURLPrefix {
+                trackerURLPrefix = scopedPrefix
+                defaults.set(scopedPrefix, forKey: "org.trackerURLPrefix")
+                AppleLog.info("TrackerPeer", "Migrated managed tracker prefix to organization scope")
+            }
+        }
+        if sourceDescription == "Managed r2c-tracker enrollment",
+           !defaults.bool(forKey: Self.managedStandaloneMigrationKey) {
+            usePeers = true
+            standaloneR2CCoordinationEnabled = true
+            defaults.set(true, forKey: "org.usePeers")
+            defaults.set(true, forKey: "org.standaloneR2CCoordination")
+            defaults.set(true, forKey: Self.managedStandaloneMigrationKey)
+        }
         defaults.set("Training", forKey: "org.incident")
         defaults.set("1", forKey: "org.operationalPeriod")
     }
 
     var trackerAPIKey: String { Self.loadTrackerAPIKey() ?? "" }
+
+    var hasManagedTrackerEnrollment: Bool {
+        sourceDescription == "Managed r2c-tracker enrollment" &&
+            !trackerURLPrefix.isEmpty &&
+            !trackerAPIKey.isEmpty &&
+            !faaProxyURL.isEmpty
+    }
+
+    var hasNotamAdminConfiguration: Bool {
+        hasManagedTrackerEnrollment
+    }
+
+    func setOrganizationNameForRidMappings(_ organization: String) {
+        organizationName = organization.trimmingCharacters(in: .whitespacesAndNewlines)
+        defaults.set(organizationName, forKey: "org.name")
+    }
+
+    func setTrackFolder(_ value: String) {
+        trackFolder = Self.normalizedTrackFolder(value)
+        defaults.set(trackFolder, forKey: "org.trackFolder")
+    }
+
+    func applyManualTrackerConfiguration(
+        trackerURLPrefix: String,
+        trackerAPIKey: String
+    ) throws {
+        self.trackerURLPrefix = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        faaProxyURL = ""
+        sourceDescription = "Manual Settings"
+        defaults.set(self.trackerURLPrefix, forKey: "org.trackerURLPrefix")
+        defaults.removeObject(forKey: "org.faaProxyURL")
+        defaults.set(sourceDescription, forKey: "org.sourceDescription")
+        try Self.storeTrackerAPIKey(trackerAPIKey.trimmingCharacters(in: .whitespacesAndNewlines))
+        objectWillChange.send()
+    }
+
+    func applyTrackerEnrollment(
+        organization: String,
+        trackerURLPrefix: String,
+        trackerAPIKey: String,
+        faaProxyURL: String
+    ) throws {
+        organizationName = organization.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.trackerURLPrefix = TrackerCoordinationEndpoint.organizationScopedPrefix(
+            from: trackerURLPrefix,
+            organization: organizationName
+        )
+        self.faaProxyURL = faaProxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        usePeers = true
+        standaloneR2CCoordinationEnabled = true
+        sourceDescription = "Managed r2c-tracker enrollment"
+        defaults.set(organizationName, forKey: "org.name")
+        defaults.set(self.trackerURLPrefix, forKey: "org.trackerURLPrefix")
+        defaults.set(self.faaProxyURL, forKey: "org.faaProxyURL")
+        defaults.set(usePeers, forKey: "org.usePeers")
+        defaults.set(
+            standaloneR2CCoordinationEnabled,
+            forKey: "org.standaloneR2CCoordination"
+        )
+        defaults.set(true, forKey: Self.managedStandaloneMigrationKey)
+        defaults.set(sourceDescription, forKey: "org.sourceDescription")
+        try Self.storeTrackerAPIKey(trackerAPIKey)
+    }
 
     var faaConfiguration: FaaSharedConfig? {
         let clientID = Self.loadSecret(account: Self.faaClientIDAccount) ?? ""
@@ -426,6 +512,7 @@ final class AppleOrgConfigSettings: ObservableObject {
         trackFolder = "Drone Tracks"
         teamID = ""
         trackerURLPrefix = ""
+        faaProxyURL = ""
         usePeers = true
         standaloneR2CCoordinationEnabled = false
         predictiveHeadEnabled = true
@@ -664,6 +751,30 @@ final class AppleOrgConfigImporter: ObservableObject {
         }
     }
 
+    func importTrackerEnrollment(
+        _ rawURL: String,
+        orgSettings: AppleOrgConfigSettings
+    ) async {
+        state = .downloading
+        do {
+            let result = try await AppleTrackerEnrollmentClient.redeem(rawURL)
+            try orgSettings.applyTrackerEnrollment(
+                organization: result.organization,
+                trackerURLPrefix: result.trackerBaseURL,
+                trackerAPIKey: result.deviceToken,
+                faaProxyURL: result.faaProxyURL
+            )
+            AppleNotamCenter.shared.enabled = true
+            state = .applied("Joined \(result.organization) on r2c-tracker.")
+            AppleLog.info(
+                "OrgConfig",
+                "Installed managed tracker enrollment org='\(result.organization)'"
+            )
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
+
     func importToken(
         _ rawToken: String,
         caltopoSettings: AppleCaltopoSettings,
@@ -861,7 +972,7 @@ struct ConfigImportView: View {
     var body: some View {
         Form {
             Section("Import Config") {
-                Text("Scan an Android RID2Caltopo org-config QR code or paste its R2C1 token.")
+                Text("Scan an r2c-tracker enrollment QR. Legacy R2C1 tokens remain available for migration.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 TextEditor(text: $tokenText)
@@ -869,7 +980,9 @@ struct ConfigImportView: View {
                     .frame(minHeight: 100)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                if let decodedToken {
+                if isTrackerEnrollment {
+                    LabeledContent("Type", value: "Managed tracker enrollment")
+                } else if let decodedToken {
                     LabeledContent("Type", value: tokenKindName(decodedToken.kind))
                     LabeledContent("Label", value: decodedToken.displayName.isEmpty ? "Unnamed" : decodedToken.displayName)
                     LabeledContent("Token version", value: "\(decodedToken.version)")
@@ -881,15 +994,22 @@ struct ConfigImportView: View {
                     .disabled(!DataScannerViewController.isSupported || !DataScannerViewController.isAvailable)
                 Button("Import Config") {
                     Task {
-                        await importer.importToken(
-                            tokenText,
-                            caltopoSettings: caltopoSettings,
-                            orgSettings: orgSettings,
-                            identityStore: identityStore
-                        )
+                        if isTrackerEnrollment {
+                            await importer.importTrackerEnrollment(
+                                tokenText,
+                                orgSettings: orgSettings
+                            )
+                        } else {
+                            await importer.importToken(
+                                tokenText,
+                                caltopoSettings: caltopoSettings,
+                                orgSettings: orgSettings,
+                                identityStore: identityStore
+                            )
+                        }
                     }
                 }
-                .disabled(decodedToken == nil || importer.state == .downloading)
+                .disabled((decodedToken == nil && !isTrackerEnrollment) || importer.state == .downloading)
             }
             Section("Status") {
                 if importer.state == .downloading { ProgressView() }
@@ -917,6 +1037,9 @@ struct ConfigImportView: View {
     }
 
     private var decodedToken: AndroidConfigJoinToken? { AndroidConfigTokenCodec.decode(tokenText) }
+    private var isTrackerEnrollment: Bool {
+        AppleTrackerEnrollmentClient.isEnrollmentURL(tokenText)
+    }
 
     private func tokenKindName(_ kind: AndroidConfigTokenKind) -> String {
         switch kind {

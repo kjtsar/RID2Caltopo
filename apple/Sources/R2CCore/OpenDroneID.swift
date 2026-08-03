@@ -50,6 +50,7 @@ public struct OpenDroneIDLocation: Equatable, Sendable {
     public let pressureAltitudeMeters: Double
     public let geodeticAltitudeMeters: Double
     public let heightMeters: Double
+    public let horizontalAccuracyCode: UInt8
     public let directionDegrees: Double
     public let horizontalSpeedMetersPerSecond: Double
     public let verticalSpeedMetersPerSecond: Double
@@ -163,6 +164,7 @@ public enum OpenDroneIDParser {
             pressureAltitudeMeters: altitude(uint16LE(data, 13)),
             geodeticAltitudeMeters: altitude(uint16LE(data, 15)),
             heightMeters: altitude(uint16LE(data, 17)),
+            horizontalAccuracyCode: byte(data, 19) & 0x0F,
             directionDegrees: RidHeading.normalized(
                 Double(rawDirection) + (eastWest == 0 ? 0 : 180)
             ) ?? 0,

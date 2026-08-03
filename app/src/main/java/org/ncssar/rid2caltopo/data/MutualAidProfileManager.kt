@@ -64,7 +64,7 @@ object MutualAidProfileManager {
         executor.execute {
             val result = try {
                 val sourceOrg = CaltopoClient.GetMutualAidSourceLabel().ifBlank {
-                    throw IllegalStateException("Load ct_mutual_aid_credentials with source_label before exporting MA config.")
+                    throw IllegalStateException("Set the Mutual Aid source organization label in Settings before exporting MA config.")
                 }
                 val template = CaltopoClient.GetMutualAidTemplate()
                 CaltopoClient.CTDebug(
@@ -318,7 +318,7 @@ object MutualAidProfileManager {
         expiresAtEpochMs: Long
     ): CaltopoProfileRecord {
         val template = CaltopoClient.GetMutualAidTemplate()
-        require(CaltopoClient.HasMutualAidTemplate()) { "Load ct_mutual_aid_credentials before exporting MA config." }
+        require(CaltopoClient.HasMutualAidTemplate()) { "Configure the Mutual Aid account in Settings before exporting MA config." }
         val templateCreds = CaltopoCredentials(template.teamId, template.credentialId, template.credentialSecret)
         val homeCreds = CaltopoClient.GetCaltopoProfiles()
             .firstOrNull { it.profileType == "HOME" }

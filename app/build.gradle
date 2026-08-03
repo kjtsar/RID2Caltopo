@@ -205,9 +205,9 @@ tasks.matching { task ->
 android {
     namespace = "org.ncssar.rid2caltopo"
     compileSdk = 36
-    def versionMajor = 1
-    def versionMinor = 6
-    def versionPatch = 13
+    def versionMajor = 2
+    def versionMinor = 0
+    def versionPatch = 0
 
     signingConfigs {
         register("release") {
@@ -222,8 +222,8 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 97
-        def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
+        versionCode = 117
+        def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
@@ -239,7 +239,6 @@ android {
         buildConfigField "boolean", "ENABLE_FFMPEG_PROBE", "true"
         buildConfigField "boolean", "ENABLE_FFMPEG_RENDER", "true"
         buildConfigField "String", "FFMPEG_RENDER_DESIGNATOR", "\"\""
-
         ndk {
             abiFilters 'arm64-v8a'
         }
@@ -420,6 +419,10 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     // QR code scanning in the Join Org dialog (no camera permission required)
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // On-device OCR fallback for printed aircraft serial numbers.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    // Consent-safe managed-video bandwidth probe. No media tracks are created.
+    implementation("io.github.webrtc-sdk:android:144.7559.09")
     // MQTT peer coordination (replaces WsPipe/VPN-based R2CPeer)
     implementation(libs.paho.mqtt)
 }
@@ -576,12 +579,21 @@ tasks.register("releaseVerification") {
     // connectedDebugAndroidTest requires a reachable adb device/emulator. Keep it
     // out of the default release gate until device-level tests are intentional.
     dependsOn(
+            "thirdPartyRuntimeVerification",
             "testDebugUnitTest",
             "trackerCoordinationTests",
             "colorRealtimeQualification",
             "personRelevanceQualification"
     )
     // dependsOn("connectedDebugAndroidTest")
+}
+
+tasks.register("thirdPartyRuntimeVerification") {
+    group = "verification"
+    description = "Verifies locally rebuilt MediaMTX and FFmpeg release runtimes."
+    doLast {
+        runProcess(rootDir, ["tools/verify_third_party_runtime.sh"])
+    }
 }
 
 tasks.register("uploadReleaseCrashlyticsArtifacts") {

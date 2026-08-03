@@ -96,6 +96,8 @@ public struct OperationalNotam: Codable, Sendable, Equatable, Identifiable {
 }
 
 public enum OperationalNotamPolicy {
+    public static let nauticalMilesPerStatuteMile = 0.868976
+
     public static func sorted(_ notices: [OperationalNotam]) -> [OperationalNotam] {
         notices.sorted {
             let left = ($0.intersectsPilotArea ? 0 : 1, severityRank($0.severity), $0.distanceNM ?? .greatestFiniteMagnitude, $0.title)
@@ -104,11 +106,19 @@ public enum OperationalNotamPolicy {
         }
     }
 
-    public static func filtered(_ notices: [OperationalNotam], radiusNM: Int) -> (visible: [OperationalNotam], suppressed: Int) {
+    public static func filtered(
+        _ notices: [OperationalNotam],
+        radiusStatuteMiles: Int
+    ) -> (visible: [OperationalNotam], suppressed: Int) {
+        let radiusNM = Double(radiusStatuteMiles) * nauticalMilesPerStatuteMile
         let visible = notices.filter {
-            $0.intersectsPilotArea || $0.distanceNM == nil || $0.distanceNM! <= Double(radiusNM)
+            $0.intersectsPilotArea || $0.distanceNM == nil || $0.distanceNM! <= radiusNM
         }
         return (visible, notices.count - visible.count)
+    }
+
+    public static func faaQueryRadiusNM(radiusStatuteMiles: Int) -> Int {
+        max(1, Int(ceil(Double(radiusStatuteMiles) * nauticalMilesPerStatuteMile)))
     }
 
     public static func chipSeverity(
@@ -159,7 +169,9 @@ public enum OperationalNotamPolicy {
     }
 
     private static func distanceLabel(_ notice: OperationalNotam) -> String {
-        notice.distanceNM.map { String(format: "%.1f NM", $0) } ?? "pilot area"
+        notice.distanceNM.map {
+            String(format: "%.1f mi", $0 / nauticalMilesPerStatuteMile)
+        } ?? "pilot area"
     }
 }
 
@@ -360,7 +372,9 @@ public enum OperationalNotamParser {
     private static func humanizedSummary(text: String, intersects: Bool, distanceNM: Double?) -> String {
         let kind = humanizedTitle(text: text, fallback: "Aviation notice")
         if intersects { return "\(kind) intersects the pilot operating area." }
-        if let distanceNM { return "\(kind) is \(String(format: "%.1f", distanceNM)) NM from the pilot." }
+        if let distanceNM {
+            return "\(kind) is \(String(format: "%.1f", distanceNM / OperationalNotamPolicy.nauticalMilesPerStatuteMile)) mi from the pilot."
+        }
         return kind
     }
 

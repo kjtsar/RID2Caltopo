@@ -125,6 +125,7 @@ class TrackerPeerCoordinatorTest {
 
     @After
     fun tearDown() {
+        org.ncssar.rid2caltopo.app.R2CActivity.MyDeviceName = "<unknown>"
         CaltopoClient.ResetPersistedClientState()
         AppUpdateAdvisory.resetForTesting()
         TrackerPeerCoordinator.resetForTesting()
@@ -147,8 +148,49 @@ class TrackerPeerCoordinatorTest {
         val hello = JSONObject(transport.sentMessages.first())
 
         assertEquals("hello", hello.optString("type"))
+        assertEquals("android", hello.optString("appPlatform"))
         assertEquals(BuildConfig.VERSION_CODE, hello.optInt("appVersionCode"))
         assertEquals(BuildConfig.VERSION_NAME, hello.optString("appVersion"))
+    }
+
+    @Test
+    fun managedVideoPresence_includesTabletTimeZone() {
+        org.ncssar.rid2caltopo.app.R2CActivity.MyDeviceName = "Ken's S25 Ultra"
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.updateManagedVideoStreams(
+            "Training",
+            listOf(
+                ManagedVideoStreamAdvertisement(
+                    "00000000-0000-0000-0000-000000000001",
+                    "1sar7DjMn4Pr",
+                    1920,
+                    1080,
+                    30.0,
+                    4_000_000,
+                    "h264",
+                )
+            ),
+        )
+
+        val presence = transport.sentMessages
+            .map(::JSONObject)
+            .last { it.optString("type") == "video_stream_advertisement" }
+        assertEquals(
+            java.time.ZoneId.systemDefault().id,
+            presence.optString("timeZone"),
+        )
+        assertEquals("Ken's S25 Ultra", presence.optString("deviceName"))
+    }
+
+    @Test
+    fun managedVideoPresence_sendsEmptySnapshotToClearTracker() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.updateManagedVideoStreams("Training", emptyList())
+
+        val presence = transport.sentMessages
+            .map(::JSONObject)
+            .last { it.optString("type") == "video_stream_advertisement" }
+        assertEquals(0, presence.getJSONArray("streams").length())
     }
 
     @Test
@@ -178,6 +220,92 @@ class TrackerPeerCoordinatorTest {
         val state = AppUpdateAdvisory.state.value
         assertEquals(BuildConfig.VERSION_CODE, state.recommendedVersionCode)
         assertFalse(state.updateRequired)
+    }
+
+    @Test
+    fun managedVideoRequest_isDeliveredToConsentListener() {
+        var received: VideoStreamViewRequest? = null
+        var deliveryCount = 0
+        coordinator.setVideoStreamRequestListener {
+            received = it
+            deliveryCount += 1
+        }
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.updateManagedVideoStreams(
+            "Training",
+            listOf(
+                ManagedVideoStreamAdvertisement(
+                    "stream-1", "NCS1m3", 1920, 1080, 30.0, 4_000_000, "h264"
+                )
+            ),
+        )
+
+        transport.receive(
+            JSONObject()
+                .put("type", "video_stream_request")
+                .put("requestId", "request-1")
+                .put("requesterEmail", "command@ncssar.example")
+                .put("streamSessionId", "stream-1")
+                .put("incidentName", "Training")
+                .put("droneDesignator", "NCS1m3")
+                .put("sourceWidth", 1920)
+                .put("sourceHeight", 1080)
+                .put("sourceFps", 30.0)
+                .put("sourceBitrateBps", 4_000_000)
+                .put("sourceCodec", "h264")
+                .put("expiresAt", "2026-07-30T18:10:00Z")
+                .put("consentRequired", true)
+                .toString()
+        )
+
+        assertEquals("request-1", received?.requestId)
+        assertEquals("command@ncssar.example", received?.requesterEmail)
+        assertEquals("Training", received?.incidentName)
+        assertEquals("NCS1m3", received?.droneDesignator)
+        assertEquals(1920, received?.sourceWidth)
+        assertEquals(4_000_000L, received?.sourceBitrateBps)
+        assertTrue(received?.consentRequired == true)
+
+        transport.receive(
+            JSONObject()
+                .put("type", "video_stream_request")
+                .put("requestId", "request-1")
+                .put("requesterEmail", "command@ncssar.example")
+                .put("streamSessionId", "stream-1")
+                .put("incidentName", "Training")
+                .put("droneDesignator", "NCS1m3")
+                .put("expiresAt", "2026-07-30T18:10:00Z")
+                .put("consentRequired", true)
+                .toString()
+        )
+        assertEquals(1, deliveryCount)
+    }
+
+    @Test
+    fun managedVideoRequest_withoutMatchingSource_reportsNoSuchStream() {
+        var deliveryCount = 0
+        coordinator.setVideoStreamRequestListener { deliveryCount += 1 }
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.updateManagedVideoStreams("Training", emptyList())
+
+        transport.receive(
+            JSONObject()
+                .put("type", "video_stream_request")
+                .put("requestId", "stale-request")
+                .put("requesterEmail", "command@ncssar.example")
+                .put("streamSessionId", "ended-stream")
+                .put("incidentName", "Training")
+                .put("droneDesignator", "NCS1m3")
+                .toString()
+        )
+
+        assertEquals(0, deliveryCount)
+        val error = transport.sentMessages
+            .map(::JSONObject)
+            .last { it.optString("type") == "video_stream_unavailable" }
+        assertEquals("stale-request", error.optString("requestId"))
+        assertEquals("ended-stream", error.optString("streamSessionId"))
+        assertEquals("e_nosuch_stream", error.optString("errorCode"))
     }
 
     @Test

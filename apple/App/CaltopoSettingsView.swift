@@ -25,6 +25,90 @@ struct CaltopoSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Administration") {
+                NavigationLink {
+                    ConfigImportView(
+                        initialToken: "",
+                        importer: importer,
+                        caltopoSettings: settings,
+                        orgSettings: orgSettings,
+                        identityStore: identityStore
+                    )
+                } label: {
+                    Label("Import Config", systemImage: "qrcode.viewfinder")
+                }
+                NavigationLink {
+                    RidMappingAdminView(
+                        organization: orgSettings,
+                        identities: identityStore
+                    )
+                } label: {
+                    Label(
+                        "RID Map Entries (\(identityStore.importedMappingCount))",
+                        systemImage: "airplane.circle"
+                    )
+                }
+                Text("Organization QR imports populate these Remote ID mappings. Open this editor to review, add, or correct entries stored on this device.")
+                    .font(.footnote)
+            }
+            Section("Organization and operational defaults") {
+                TextField(
+                    "Organization designator",
+                    text: Binding(
+                        get: { orgSettings.organizationName },
+                        set: { orgSettings.setOrganizationNameForRidMappings($0) }
+                    )
+                )
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+                TextField(
+                    "CalTopo track folder",
+                    text: Binding(
+                        get: { orgSettings.trackFolder },
+                        set: { orgSettings.setTrackFolder($0) }
+                    )
+                )
+                TextField(
+                    "Incident",
+                    text: Binding(
+                        get: { orgSettings.incident },
+                        set: { orgSettings.setIncident($0) }
+                    )
+                )
+                TextField(
+                    "Operational period",
+                    text: Binding(
+                        get: { orgSettings.operationalPeriod },
+                        set: { orgSettings.setOperationalPeriod($0) }
+                    )
+                )
+                Text("These are the same organization, track_folder, incident, and op_period values accepted by organization JSON.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("CalTopo Teams account") {
+                AppleScannableTextField(
+                    title: "Team ID",
+                    text: $settings.teamID,
+                    mode: .credential
+                )
+                AppleScannableTextField(
+                    title: "Credential ID",
+                    text: $settings.credentialID,
+                    mode: .credential
+                )
+                AppleScannableTextField(
+                    title: "Credential secret",
+                    text: $settings.credentialSecret,
+                    mode: .credential,
+                    secure: true
+                )
+                Text("Enter the CalTopo team ID, credential ID, and credential secret tuple. The secret is stored in Apple Keychain when the configuration is saved or the map browser is opened.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            AppleTrackerConfigurationSection(settings: orgSettings)
+            AppleMutualAidTupleSection(settings: orgSettings)
             Section("Incident map") {
                 if settings.mapID.isEmpty {
                     Label("No CalTopo map selected", systemImage: "map")
@@ -34,14 +118,15 @@ struct CaltopoSettingsView: View {
                     LabeledContent("Map ID", value: settings.mapID)
                 }
                 Button {
+                    onSave(settings.save())
                     showingTeamMaps = true
                 } label: {
                     Label(settings.mapID.isEmpty ? "Connect to CalTopo Map" : "Switch CalTopo Map", systemImage: "map.fill")
                         .font(.headline)
                 }
                 .disabled(settings.teamID.isEmpty || settings.credentialID.isEmpty || settings.credentialSecret.isEmpty)
-                if settings.teamID.isEmpty {
-                    Text("Import the organization QR code first. It supplies the CalTopo team credential; this browser then lets you choose the incident map just as Android does.")
+                if settings.teamID.isEmpty || settings.credentialID.isEmpty || settings.credentialSecret.isEmpty {
+                    Text("Enter the CalTopo Teams account tuple above before browsing incident maps.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -86,17 +171,6 @@ struct CaltopoSettingsView: View {
             Section("Video") {
                 Toggle("Capture Streams", isOn: $captureStreams)
                 Text("When enabled, incoming streams are recorded as fMP4 under Files > RID2Caltopo > CapturedStreams. Changing this setting restarts the local media server.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            Section("Team credential") {
-                TextField("Credential ID", text: $settings.credentialID)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                SecureField("Credential secret", text: $settings.credentialSecret)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Text("The credential secret is stored in the Apple Keychain. Publishing is off by default and no request is made until enabled.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -180,24 +254,33 @@ struct CaltopoSettingsView: View {
                 }
             }
             Section("NOTAM / TFR") {
-                Toggle("Enable FAA controlled-airspace lookup", isOn: $airspace.enabled)
+                Toggle("Enable FAA Facility Map / LAANC lookup", isOn: $airspace.enabled)
                 Toggle("Refresh controlled airspace automatically", isOn: $airspace.autoRefresh)
                     .disabled(!airspace.enabled)
-                Toggle("Enable nearby NOTAM monitoring", isOn: $notams.enabled)
+                Toggle("Enable nearby NOTAM / TFR monitoring", isOn: $notams.enabled)
                 Toggle("Show NOTAMs on map", isOn: $notams.showOnMap)
                     .disabled(!notams.enabled)
                 Toggle("Refresh automatically", isOn: $notams.autoRefresh)
                     .disabled(!notams.enabled)
-                Stepper("Query radius: \(notams.radiusNM) NM", value: $notams.radiusNM, in: 1 ... 100)
+                Stepper(
+                    "NOTAM radius: \(notams.radiusStatuteMiles) statute " +
+                        (notams.radiusStatuteMiles == 1 ? "mile" : "miles"),
+                    value: $notams.radiusStatuteMiles,
+                    in: 1 ... 100
+                )
                     .disabled(!notams.enabled)
                 Picker("Refresh interval", selection: $notams.refreshIntervalSeconds) {
-                    Text("1 minute").tag(60)
-                    Text("5 minutes").tag(300)
-                    Text("15 minutes").tag(900)
+                    Text("30 minutes").tag(1_800)
+                    Text("60 minutes").tag(3_600)
                 }
                 .disabled(!notams.enabled || !notams.autoRefresh)
-                LabeledContent("FAA credentials", value: orgSettings.faaConfiguration == nil ? "Not loaded" : "Loaded")
-                Text("Controlled-airspace status uses the public FAA UAS Facility Map for Android's one-mile operating area. NOTAM/TFR queries use imported FAA credentials.")
+                LabeledContent(
+                    "FAA proxy",
+                    value: orgSettings.hasNotamAdminConfiguration
+                        ? "Organization configured"
+                        : "Not configured"
+                )
+                Text("Controlled-airspace status uses the public FAA UAS Facility Map. NOTAM proxy access is configured only by importing an r2c-tracker organization QR code.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -264,6 +347,127 @@ struct CaltopoSettingsView: View {
                 orgSettings.setIncidentMapTitle(map.title)
                 onSave(settings.selectMap(map))
                 showingTeamMaps = false
+            }
+        }
+    }
+}
+
+private struct AppleTrackerConfigurationSection: View {
+    @ObservedObject var settings: AppleOrgConfigSettings
+    @State private var trackerURL: String
+    @State private var trackerAPIKey: String
+    @State private var status = ""
+
+    init(settings: AppleOrgConfigSettings) {
+        self.settings = settings
+        _trackerURL = State(initialValue: settings.trackerURLPrefix)
+        _trackerAPIKey = State(initialValue: settings.trackerAPIKey)
+    }
+
+    var body: some View {
+        Section("Tracker coordination") {
+            TextField("Tracker URL", text: $trackerURL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            AppleScannableTextField(
+                title: "Tracker API key",
+                text: $trackerAPIKey,
+                mode: .credential,
+                secure: true
+            )
+            Button("Save Tracker Coordination") {
+                do {
+                    try settings.applyManualTrackerConfiguration(
+                        trackerURLPrefix: trackerURL,
+                        trackerAPIKey: trackerAPIKey
+                    )
+                    status = "Tracker coordination saved."
+                } catch {
+                    status = "Unable to save tracker API key: \(error.localizedDescription)"
+                }
+            }
+            Text("Manual tracker values configure coordination only. Saving them clears the managed FAA-proxy association; import the r2c-tracker organization QR again to restore FAA proxy access.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if !status.isEmpty {
+                Text(status)
+                    .font(.footnote)
+                    .foregroundStyle(status.hasPrefix("Unable") ? .red : .secondary)
+            }
+        }
+    }
+}
+
+private struct AppleMutualAidTupleSection: View {
+    @ObservedObject var settings: AppleOrgConfigSettings
+    @State private var teamID: String
+    @State private var credentialID: String
+    @State private var credentialSecret: String
+    @State private var domainAndPort: String
+    @State private var sourceLabel: String
+    @State private var targetFolderHint: String
+    @State private var status = ""
+
+    init(settings: AppleOrgConfigSettings) {
+        self.settings = settings
+        let template = settings.mutualAidTemplate
+        _teamID = State(initialValue: template?.teamID ?? "")
+        _credentialID = State(initialValue: template?.credentialID ?? "")
+        _credentialSecret = State(initialValue: template?.credentialSecret ?? "")
+        _domainAndPort = State(initialValue: template?.domainAndPort ?? "caltopo.com")
+        _sourceLabel = State(initialValue: template?.sourceLabel ?? settings.organizationName)
+        _targetFolderHint = State(initialValue: template?.targetFolderHint ?? "MAI")
+    }
+
+    var body: some View {
+        Section("Mutual Aid Account") {
+            AppleScannableTextField(
+                title: "Team ID",
+                text: $teamID,
+                mode: .credential
+            )
+            AppleScannableTextField(
+                title: "Credential ID",
+                text: $credentialID,
+                mode: .credential
+            )
+            AppleScannableTextField(
+                title: "Credential secret",
+                text: $credentialSecret,
+                mode: .credential,
+                secure: true
+            )
+            TextField("Domain and port", text: $domainAndPort)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField("Source organization label", text: $sourceLabel)
+            TextField("Target folder hint", text: $targetFolderHint)
+            Button("Save Mutual Aid Account") {
+                do {
+                    try settings.apply(mutualAidTemplate: .init(
+                        teamID: teamID.trimmingCharacters(in: .whitespacesAndNewlines),
+                        credentialID: credentialID.trimmingCharacters(in: .whitespacesAndNewlines),
+                        credentialSecret: credentialSecret.trimmingCharacters(in: .whitespacesAndNewlines),
+                        domainAndPort: domainAndPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? "caltopo.com"
+                            : domainAndPort.trimmingCharacters(in: .whitespacesAndNewlines),
+                        sourceLabel: sourceLabel.trimmingCharacters(in: .whitespacesAndNewlines),
+                        targetFolderHint: targetFolderHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? "MAI"
+                            : targetFolderHint.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ))
+                    status = "Mutual Aid account saved securely."
+                } catch {
+                    status = "Unable to save Mutual Aid account: \(error.localizedDescription)"
+                }
+            }
+            Text("These are the same six values accepted by ct_mutual_aid_credentials JSON. Credential values are stored in Apple Keychain.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if !status.isEmpty {
+                Text(status)
+                    .font(.footnote)
+                    .foregroundStyle(status.hasPrefix("Unable") ? .red : .secondary)
             }
         }
     }

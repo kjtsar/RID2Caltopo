@@ -6,6 +6,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LandRestrictionParserTest {
+    @Test
+    fun toolbarUsesBriefLandLabelWhileStateRetainsAreaDetails() {
+        assertEquals(
+            "Land rules nearby",
+            conciseLandStatusLabel(
+                LandRestrictionUiState(
+                    severity = LandRestrictionSeverity.Caution,
+                    chipLabel = "Land rules: 17 nearby properties with specific restrictions"
+                )
+            )
+        )
+    }
+
     private val source = LandRestrictionSource(
         id = "test-park",
         queryEndpoint = "https://example.gov/query",

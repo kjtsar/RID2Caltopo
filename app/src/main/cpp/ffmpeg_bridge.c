@@ -373,6 +373,19 @@ typedef struct ffmpeg_session_t {
     int anomaly_rgba_width;
     int anomaly_rgba_height;
     enum AVPixelFormat anomaly_src_fmt;
+    // Pilot-approved remote video export. Disabled by default and converted
+    // on the decode thread only at the selected cadence.
+    volatile bool remote_video_enabled;
+    int remote_video_width;
+    int remote_video_height;
+    double remote_video_fps;
+    int64_t remote_video_next_due_ms;
+    struct SwsContext *remote_video_sws;
+    uint8_t *remote_video_i420_buffer;
+    int remote_video_i420_buffer_size;
+    int remote_video_buffer_width;
+    int remote_video_buffer_height;
+    enum AVPixelFormat remote_video_src_fmt;
     int64_t ad_forwarded_without_analysis_count;
     int64_t ad_full_queue_disable_count;
     int64_t ad_analyzed_rendered_frame_count;
@@ -426,6 +439,7 @@ static jclass g_person_relevance_coordinator_class = NULL;
 static jmethodID g_person_relevance_infer_mid = NULL;
 static jclass g_caltopo_client_class = NULL;
 static jmethodID g_dispatch_probe_event_mid = NULL;
+static jmethodID g_dispatch_remote_video_frame_mid = NULL;
 static jmethodID g_ctdebug_mid = NULL;
 static jmethodID g_ctwarn_mid = NULL;
 static jmethodID g_cterror_mid = NULL;
@@ -585,6 +599,130 @@ static void dispatch_probe_event_with_latency(const char *designator,
             camera_yaw,
             heading);
 }
+
+#if HAVE_FFMPEG && HAVE_SWSCALE
+static bool ensure_remote_video_resources(ffmpeg_session_t *session,
+                                          AVFrame *decoded,
+                                          int width,
+                                          int height) {
+    if (session->remote_video_sws != NULL &&
+        session->remote_video_i420_buffer != NULL &&
+        session->remote_video_buffer_width == width &&
+        session->remote_video_buffer_height == height &&
+        session->remote_video_src_fmt == decoded->format) {
+        return true;
+    }
+    if (session->remote_video_sws != NULL) {
+        sws_freeContext(session->remote_video_sws);
+        session->remote_video_sws = NULL;
+    }
+    if (session->remote_video_i420_buffer != NULL) {
+        av_free(session->remote_video_i420_buffer);
+        session->remote_video_i420_buffer = NULL;
+    }
+    session->remote_video_i420_buffer_size = av_image_get_buffer_size(
+            AV_PIX_FMT_YUV420P, width, height, 1);
+    if (session->remote_video_i420_buffer_size <= 0) return false;
+    session->remote_video_i420_buffer = av_malloc(
+            (size_t) session->remote_video_i420_buffer_size);
+    if (session->remote_video_i420_buffer == NULL) return false;
+    session->remote_video_sws = sws_getContext(
+            decoded->width,
+            decoded->height,
+            decoded->format,
+            width,
+            height,
+            AV_PIX_FMT_YUV420P,
+            SWS_BILINEAR,
+            NULL,
+            NULL,
+            NULL);
+    if (session->remote_video_sws == NULL) {
+        av_free(session->remote_video_i420_buffer);
+        session->remote_video_i420_buffer = NULL;
+        return false;
+    }
+    session->remote_video_buffer_width = width;
+    session->remote_video_buffer_height = height;
+    session->remote_video_src_fmt = decoded->format;
+    return true;
+}
+
+static void dispatch_remote_video_frame(ffmpeg_session_t *session,
+                                        AVFrame *decoded,
+                                        int64_t source_ts_us,
+                                        int64_t decoded_at_ms) {
+    int width = 0;
+    int height = 0;
+    double fps = 0.0;
+    pthread_mutex_lock(&g_lock);
+    if (session->remote_video_enabled &&
+        decoded_at_ms >= session->remote_video_next_due_ms) {
+        width = session->remote_video_width;
+        height = session->remote_video_height;
+        fps = session->remote_video_fps;
+        session->remote_video_next_due_ms = decoded_at_ms +
+                (int64_t) llround(1000.0 / fmax(1.0, fps));
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (width <= 0 || height <= 0 || fps <= 0.0 ||
+        g_bridge_class == NULL || g_dispatch_remote_video_frame_mid == NULL) {
+        return;
+    }
+    if (!ensure_remote_video_resources(session, decoded, width, height)) return;
+
+    uint8_t *planes[4] = {NULL, NULL, NULL, NULL};
+    int strides[4] = {0, 0, 0, 0};
+    if (av_image_fill_arrays(
+            planes,
+            strides,
+            session->remote_video_i420_buffer,
+            AV_PIX_FMT_YUV420P,
+            width,
+            height,
+            1) < 0) {
+        return;
+    }
+    int rows = sws_scale(
+            session->remote_video_sws,
+            (const uint8_t *const *) decoded->data,
+            decoded->linesize,
+            0,
+            decoded->height,
+            planes,
+            strides);
+    if (rows != height) return;
+
+    bool did_attach = false;
+    JNIEnv *env = get_env(&did_attach);
+    if (env == NULL) return;
+    jbyteArray payload = (*env)->NewByteArray(
+            env, session->remote_video_i420_buffer_size);
+    if (payload != NULL) {
+        (*env)->SetByteArrayRegion(
+                env,
+                payload,
+                0,
+                session->remote_video_i420_buffer_size,
+                (const jbyte *) session->remote_video_i420_buffer);
+        (*env)->CallStaticVoidMethod(
+                env,
+                g_bridge_class,
+                g_dispatch_remote_video_frame_mid,
+                (jlong) session->session_id,
+                (jint) width,
+                (jint) height,
+                (jlong) source_ts_us,
+                payload);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+        }
+        (*env)->DeleteLocalRef(env, payload);
+    }
+    release_env(did_attach);
+}
+#endif
 
 static void ct_log_call(jmethodID method_id,
                         int android_prio,
@@ -765,7 +903,6 @@ static void ensure_rgba_resources(ffmpeg_session_t *session, int width, int heig
         av_free(session->rgba_buffer);
         session->rgba_buffer = NULL;
     }
-
     session->rgba_frame = av_frame_alloc();
     if (session->rgba_frame == NULL) return;
 
@@ -5404,6 +5541,18 @@ static void close_decoder(ffmpeg_session_t *session) {
     if (session->render_sync_ready) {
         pthread_mutex_unlock(&session->render_lock);
     }
+    if (session->remote_video_sws != NULL) {
+        sws_freeContext(session->remote_video_sws);
+        session->remote_video_sws = NULL;
+    }
+    if (session->remote_video_i420_buffer != NULL) {
+        av_free(session->remote_video_i420_buffer);
+        session->remote_video_i420_buffer = NULL;
+    }
+    session->remote_video_i420_buffer_size = 0;
+    session->remote_video_buffer_width = 0;
+    session->remote_video_buffer_height = 0;
+    session->remote_video_src_fmt = AV_PIX_FMT_NONE;
 #endif
     if (session->codec != NULL) {
         avcodec_free_context(&session->codec);
@@ -5750,7 +5899,8 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         // surface is present.  The RTSP connection is maintained so that when the
         // surface returns (e.g. after a dialog dismissal) decode resumes from the
         // live edge with zero latency from accumulated backlog.
-        if (session->is_render && session->surface_paused) {
+        if (session->is_render && session->surface_paused &&
+            !session->remote_video_enabled) {
             if (!local_file_source) {
                 av_packet_unref(pkt);
                 continue;
@@ -5815,6 +5965,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             last_decoded_frame_at_ms = decoded_at_ms;
             dispatch_probe_event(session->designator, "frame_decoded", session->session_id, pts_us,
                                  NAN, NAN, NAN, NAN, NAN, NAN);
+#if HAVE_SWSCALE
+            dispatch_remote_video_frame(session, frame, pts_us, decoded_at_ms);
+#endif
 #if FFMPEG_TELEMETRY_ENABLED
             emit_telemetry_values(session, "frame-metadata", 0.60, &frame_tv);
 #endif  // FFMPEG_TELEMETRY_ENABLED
@@ -6280,6 +6433,9 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->active = true;
     slot->running = true;
     slot->is_render = is_render;
+#if HAVE_FFMPEG && HAVE_SWSCALE
+    slot->remote_video_src_fmt = AV_PIX_FMT_NONE;
+#endif
     slot->anomaly_cfg.enabled           = false;
     slot->anomaly_cfg.show_hot_overlay  = false;
     slot->anomaly_cfg.show_candidate_blobs = false;
@@ -6533,6 +6689,11 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeInitBridge(
             g_bridge_class,
             "dispatchNativeProbeEvent",
         "(Ljava/lang/String;Ljava/lang/String;JLjava/lang/String;DLjava/lang/String;JJDDDDDD)V");
+    g_dispatch_remote_video_frame_mid = (*env)->GetStaticMethodID(
+            env,
+            g_bridge_class,
+            "dispatchNativeRemoteVideoFrame",
+            "(JIIJ[B)V");
 
     jclass person_local_cls = (*env)->FindClass(
             env,
@@ -7257,6 +7418,97 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetRenderStride(
         }
     }
     pthread_mutex_unlock(&g_lock);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeConfigureRemoteVideoFrames(
+        JNIEnv *env,
+        jobject thiz,
+        jlong session_id,
+        jint width,
+        jint height,
+        jdouble fps,
+        jboolean enabled
+) {
+    (void) env;
+    (void) thiz;
+#if HAVE_FFMPEG && HAVE_SWSCALE
+    bool configured = false;
+    pthread_mutex_lock(&g_lock);
+    ffmpeg_session_t *session = find_session_locked(session_id);
+    if (session != NULL && session->active && session->is_render) {
+        if (enabled == JNI_TRUE) {
+            int configured_width = ((int) width) & ~1;
+            int configured_height = ((int) height) & ~1;
+            double configured_fps = fmax(1.0, fmin(30.0, (double) fps));
+            if (configured_width >= 2 && configured_height >= 2) {
+                session->remote_video_width = configured_width;
+                session->remote_video_height = configured_height;
+                session->remote_video_fps = configured_fps;
+                session->remote_video_next_due_ms = 0;
+                session->remote_video_enabled = true;
+                configured = true;
+            }
+        } else {
+            session->remote_video_enabled = false;
+            session->remote_video_width = 0;
+            session->remote_video_height = 0;
+            session->remote_video_fps = 0.0;
+            session->remote_video_next_due_ms = 0;
+            configured = true;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return configured ? JNI_TRUE : JNI_FALSE;
+#else
+    (void) session_id;
+    (void) width;
+    (void) height;
+    (void) fps;
+    (void) enabled;
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetVideoSourceInfo(
+        JNIEnv *env,
+        jobject thiz,
+        jlong session_id
+) {
+    (void) thiz;
+#if HAVE_FFMPEG
+    jlong values[5] = {0, 0, 0, 0, 0};
+    pthread_mutex_lock(&g_lock);
+    ffmpeg_session_t *session = find_session_locked(session_id);
+    if (session != NULL && session->active && session->codec != NULL) {
+        values[0] = (jlong) session->codec->width;
+        values[1] = (jlong) session->codec->height;
+        values[3] = (jlong) fmax(0, session->codec->bit_rate);
+        values[4] = (jlong) session->codec->codec_id;
+        if (session->fmt != NULL && session->video_stream_index >= 0 &&
+            session->video_stream_index < (int) session->fmt->nb_streams) {
+            AVStream *stream = session->fmt->streams[session->video_stream_index];
+            AVRational rate = stream->avg_frame_rate.num > 0
+                    ? stream->avg_frame_rate : stream->r_frame_rate;
+            if (rate.num > 0 && rate.den > 0) {
+                values[2] = (jlong) llround(av_q2d(rate) * 1000.0);
+            }
+            if (values[3] <= 0 && stream->codecpar != NULL) {
+                values[3] = (jlong) fmax(0, stream->codecpar->bit_rate);
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (values[0] <= 0 || values[1] <= 0) return NULL;
+    jlongArray result = (*env)->NewLongArray(env, 5);
+    if (result != NULL) (*env)->SetLongArrayRegion(env, result, 0, 5, values);
+    return result;
+#else
+    (void) env;
+    (void) session_id;
+    return NULL;
+#endif
 }
 
 JNIEXPORT void JNICALL

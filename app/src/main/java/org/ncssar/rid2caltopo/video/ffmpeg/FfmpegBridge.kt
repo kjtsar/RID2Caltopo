@@ -6,6 +6,22 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.RegisterDebugTags
 import org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig
 
 object FfmpegBridge {
+    data class VideoSourceInfo(
+        val width: Int,
+        val height: Int,
+        val fps: Double,
+        val bitrateBps: Long,
+        val codec: String,
+    )
+    fun interface RemoteVideoFrameListener {
+        fun onFrame(
+            sessionId: Long,
+            width: Int,
+            height: Int,
+            timestampUs: Long,
+            i420: ByteArray,
+        )
+    }
     enum class PersonRelevanceMode(val nativeValue: Int) {
         OFF(0),
         SHADOW(1),
@@ -14,6 +30,7 @@ object FfmpegBridge {
     const val TAG = "FfmpegBridge"
     const val NATIVE_TAG = "ffmpeg_bridge"
     private val probeListeners = linkedSetOf<(String, Long, String, FfmpegTelemetry) -> Unit>()
+    private val remoteVideoFrameListeners = linkedMapOf<Long, RemoteVideoFrameListener>()
     private val listenerLock = Any()
 
     init {
@@ -86,6 +103,37 @@ object FfmpegBridge {
         nativeSetRenderStride(sessionId, stride)
     }
 
+    fun startRemoteVideoFrames(
+        sessionId: Long,
+        width: Int,
+        height: Int,
+        fps: Double,
+        listener: RemoteVideoFrameListener,
+    ): Boolean {
+        if (!nativeLoaded || sessionId <= 0L) return false
+        synchronized(listenerLock) {
+            remoteVideoFrameListeners[sessionId] = listener
+        }
+        val configured = nativeConfigureRemoteVideoFrames(
+            sessionId,
+            width.coerceAtLeast(2),
+            height.coerceAtLeast(2),
+            fps.coerceAtLeast(1.0),
+            true,
+        )
+        if (!configured) {
+            synchronized(listenerLock) { remoteVideoFrameListeners.remove(sessionId) }
+        }
+        return configured
+    }
+
+    fun stopRemoteVideoFrames(sessionId: Long) {
+        synchronized(listenerLock) { remoteVideoFrameListeners.remove(sessionId) }
+        if (nativeLoaded && sessionId > 0L) {
+            nativeConfigureRemoteVideoFrames(sessionId, 0, 0, 0.0, false)
+        }
+    }
+
     fun updateAnomalyConfig(sessionId: Long, config: NativeAnomalyConfig) {
         if (!nativeLoaded || sessionId <= 0L) return
         val nativeTroubleshootingDebug = config.enabled && config.troubleshootingDebug
@@ -136,6 +184,23 @@ object FfmpegBridge {
     fun sessionDebugSummary(sessionId: Long): String? {
         if (!nativeLoaded || sessionId <= 0L) return null
         return nativeGetSessionDebugSummary(sessionId)
+    }
+
+    fun videoSourceInfo(sessionId: Long): VideoSourceInfo? {
+        if (!nativeLoaded || sessionId <= 0L) return null
+        val values = nativeGetVideoSourceInfo(sessionId) ?: return null
+        if (values.size < 5 || values[0] <= 0L || values[1] <= 0L) return null
+        return VideoSourceInfo(
+            width = values[0].toInt(),
+            height = values[1].toInt(),
+            fps = values[2] / 1_000.0,
+            bitrateBps = values[3].coerceAtLeast(0L),
+            codec = when (values[4].toInt()) {
+                27 -> "H264"
+                173 -> "H265"
+                else -> ""
+            },
+        )
     }
 
     fun setLocalPlaybackPaused(sessionId: Long, paused: Boolean) {
@@ -223,6 +288,24 @@ object FfmpegBridge {
         }
     }
 
+    @JvmStatic
+    fun dispatchNativeRemoteVideoFrame(
+        sessionId: Long,
+        width: Int,
+        height: Int,
+        timestampUs: Long,
+        i420: ByteArray,
+    ) {
+        val listener = synchronized(listenerLock) {
+            remoteVideoFrameListeners[sessionId]
+        } ?: return
+        try {
+            listener.onFrame(sessionId, width, height, timestampUs, i420)
+        } catch (t: Throwable) {
+            CTWarn(TAG, "Remote-video frame listener failed for sessionId=$sessionId: ${t.message}")
+        }
+    }
+
     private external fun nativeIsAvailable(): Boolean
     private external fun nativeInitBridge()
     private external fun nativeDecoderBackend(): String
@@ -231,6 +314,14 @@ object FfmpegBridge {
     private external fun nativeAttachSurface(sessionId: Long, surface: Surface): Boolean
     private external fun nativeDetachSurface(sessionId: Long)
     private external fun nativeSetRenderStride(sessionId: Long, stride: Int)
+    private external fun nativeConfigureRemoteVideoFrames(
+        sessionId: Long,
+        width: Int,
+        height: Int,
+        fps: Double,
+        enabled: Boolean,
+    ): Boolean
+    private external fun nativeGetVideoSourceInfo(sessionId: Long): LongArray?
     private external fun nativeUpdateAnomalyConfig(
         sessionId: Long,
         enabled: Boolean,

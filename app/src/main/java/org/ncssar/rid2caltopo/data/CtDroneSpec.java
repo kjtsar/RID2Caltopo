@@ -107,6 +107,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     private String org;
     private String owner;
+    private String ownerName;
     private String model; /* This is the concise text description of the drone. */
     public volatile transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good waypoint was received */
     private volatile transient long mostRecentSignalMsecTimestamp; /* wall-clock time when the most recent received RID position packet was seen */
@@ -540,6 +541,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         this.org = "";
         this.model = "";
         this.owner = "";
+        this.ownerName = "";
         this.localArchiveOnly = false;
     }
 
@@ -548,6 +550,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         mappedId = jo.optString("mappedId");
         org = jo.optString("org");
         owner = jo.optString("owner");
+        ownerName = jo.optString("ownerName");
         model = jo.optString("model");
         goodCount = jo.optInt("goodCount");
         okToLog = false;
@@ -574,6 +577,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public CtDroneSpec(@NonNull String remoteIdIn, @NonNull String mappedIdIn, String orgIn, String modelIn, String ownerIn)
             throws RuntimeException {
+        this(remoteIdIn, mappedIdIn, orgIn, modelIn, "", ownerIn);
+    }
+
+    public CtDroneSpec(@NonNull String remoteIdIn, @NonNull String mappedIdIn, String orgIn,
+                       String modelIn, String ownerNameIn, String ownerCallsignIn)
+            throws RuntimeException {
         if (remoteIdIn.isEmpty()) {
             throw new RuntimeException("missing/invalid required remoteId spec.");
         }
@@ -594,12 +603,15 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (null == modelIn) this.model = "";
         else this.model = modelIn;
 
-        if (null == ownerIn) this.owner = "";
-        else this.owner = ownerIn;
+        if (null == ownerCallsignIn) this.owner = "";
+        else this.owner = ownerCallsignIn;
+
+        if (null == ownerNameIn) this.ownerName = "";
+        else this.ownerName = ownerNameIn;
     }
 
     public CtDroneSpec copy() {
-        CtDroneSpec copy = new CtDroneSpec(remoteId, mappedId, org, model, owner);
+        CtDroneSpec copy = new CtDroneSpec(remoteId, mappedId, org, model, ownerName, owner);
         copy.setLocalArchiveOnly(localArchiveOnly);
         return copy;
     }
@@ -1094,6 +1106,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public void setModel(String newVal) { model = newVal;}
     public String getOwner() { return owner;}
     public void setOwner(String newVal) { owner = newVal;}
+    public String getOwnerName() { return ownerName == null ? "" : ownerName;}
+    public void setOwnerName(String newVal) { ownerName = newVal == null ? "" : newVal;}
 
 
     /** merge a new dronespec into this spec.
@@ -1144,6 +1158,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (!other.mappedId.equals(this.mappedId)) return true;
         if (!other.org.equals(this.org)) return true;
         if (!other.owner.equals(this.owner)) return true;
+        if (!other.getOwnerName().equals(this.getOwnerName())) return true;
         return !other.model.equals(this.model);
     }
  }

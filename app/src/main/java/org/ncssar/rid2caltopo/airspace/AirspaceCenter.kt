@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoMap
 
@@ -26,6 +28,8 @@ object AirspaceCenter {
     private var refreshJob: Job? = null
     private var lastRecords: List<FaaUasFacilityMapRecord> = emptyList()
     private var lastError: String? = null
+    private var hasCompletedRefresh = false
+    private val refreshMutex = Mutex()
 
     fun initialize(context: Context) {
         if (initialized) return
@@ -54,22 +58,33 @@ object AirspaceCenter {
         }
     }
 
-    private suspend fun refresh() {
+    private suspend fun refresh() = refreshMutex.withLock {
+        if (!CaltopoClient.GetNotamEnabled()) {
+            lastRecords = emptyList()
+            lastError = null
+            hasCompletedRefresh = false
+            _uiState.value = AirspaceUiState(visible = false)
+            return@withLock
+        }
         val location = CaltopoMap.GetMyLocation()
         if (location == null) {
             CaltopoClient.CTDebug("Airspace", "Controlled-airspace refresh waiting for GPS location")
             _uiState.value = AirspacePolicy.buildUiState(
                 records = lastRecords,
                 loading = false,
-                errorMessage = lastError ?: "Waiting for GPS location"
+                errorMessage = lastError ?: "Waiting for GPS location",
+                pilotCoordinate = null
             )
-            return
+            return@withLock
         }
-        _uiState.value = AirspacePolicy.buildUiState(
-            records = lastRecords,
-            loading = true,
-            errorMessage = lastError
-        )
+        if (!hasCompletedRefresh) {
+            _uiState.value = AirspacePolicy.buildUiState(
+                records = lastRecords,
+                loading = true,
+                errorMessage = lastError,
+                pilotCoordinate = AirspaceCoordinate(location.latitude, location.longitude)
+            )
+        }
         try {
             lastRecords = repository.fetch(location)
             lastError = null
@@ -83,10 +98,15 @@ object AirspaceCenter {
             lastError = e.message ?: "Controlled-airspace lookup unavailable"
             CaltopoClient.CTWarn("Airspace", lastError, e)
         }
-        _uiState.value = AirspacePolicy.buildUiState(
+        hasCompletedRefresh = true
+        val refreshedState = AirspacePolicy.buildUiState(
             records = lastRecords,
             loading = false,
-            errorMessage = lastError
+            errorMessage = lastError,
+            pilotCoordinate = AirspaceCoordinate(location.latitude, location.longitude)
         )
+        if (_uiState.value != refreshedState) {
+            _uiState.value = refreshedState
+        }
     }
 }

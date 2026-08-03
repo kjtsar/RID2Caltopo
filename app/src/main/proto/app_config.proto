@@ -62,7 +62,10 @@ message AppConfig {
     string mapped_id = 2;
     string org = 3;
     string model = 4;
+    // Legacy releases used owner as the pilot callsign.
     string owner = 5;
+    string owner_name = 6;
+    string owner_callsign = 7;
   }
 
   message LoadedConfigFileRecord {
@@ -134,6 +137,7 @@ message AppConfig {
   string op_period = 51;
   string tracker_api_key = 52;
   string tracker_url_prefix = 53;
+  string tracker_faa_proxy_url = 54;
 
   ArchiveLocation archive_location = 60;
   NotamConfig notam = 61;

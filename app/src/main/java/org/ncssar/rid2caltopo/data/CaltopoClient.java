@@ -212,6 +212,7 @@ class ClientClassState {
     public String opPeriod;
     public String trackerApiKey;
     public String trackerUrlPfx;
+    public String trackerFaaProxyUrl;
     public String coordinateDisplayFormat;
     public boolean captureVideoStreamsFlag;
     public boolean predictiveHeadEnabled;
@@ -267,12 +268,13 @@ class ClientClassState {
         opPeriod = "1";
         trackerApiKey = "";
         trackerUrlPfx = "";
+        trackerFaaProxyUrl = "";
         coordinateDisplayFormat = "decimal";
         captureVideoStreamsFlag = false;
         predictiveHeadEnabled = true;
         proximityAlertSpacingFeet = 40L;
-        notamEnabled = false;
-        notamRadiusNm = 2;
+        notamEnabled = true;
+        notamRadiusNm = 1;
         notamAutoRefresh = true;
         notamRefreshIntervalSeconds = 1800;
         notamWarnInsideOneNm = true;
@@ -376,11 +378,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static final long DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS = 5;
     public static final long LOSS_OF_SIGNAL_TONE_DURATION_SECONDS = 2;
     public static final long OUT_OF_RANGE_DISTANCE_FEET = 300;
-    public static final long OUT_OF_RANGE_TRACK_DELAY_SECONDS = 20 * 60;
     public static final long RETURN_TO_TAKEOFF_DISTANCE_FEET = 30;
     public static final long TAKEOFF_NEAR_TABLET_DISTANCE_FEET = 50;
     public static final long HOME_LOCATION_MAX_TABLET_AGE_MS = 60 * 1000;
-    public static final long REMOTE_LOSS_TRACK_DELAY_MULTIPLIER = 5;
     public static final int DEFAULT_ALARM_VOLUME_PERCENT = 100;
     static final long DEFAULT_BRIDGE_CHECK_DISTANCE_FEET = 20;
     static final long MainThreadId = Process.myTid();
@@ -638,6 +638,37 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             return left.getRemoteId().compareToIgnoreCase(right.getRemoteId());
         });
         return specs;
+    }
+
+    public static void ReplacePersistedDroneSpecs(
+            @NonNull String organization,
+            @NonNull List<EditableRidMapping> mappings
+    ) {
+        List<String> errors = RidMappingRules.INSTANCE.validate(organization, mappings);
+        if (!errors.isEmpty()) {
+            throw new IllegalArgumentException(errors.get(0));
+        }
+        ClientClassState ccs = GetState();
+        Hashtable<String, CtDroneSpec> replacements = new Hashtable<>(Math.max(16, mappings.size()));
+        String normalizedOrg = RidMappingRules.INSTANCE.normalizeOrganization(organization);
+        for (EditableRidMapping mapping : mappings) {
+            String remoteId = RidMappingRules.INSTANCE.normalizeRemoteId(mapping.getRemoteId());
+            String callsign = mapping.getOwnerCallsign().trim();
+            String model = mapping.getModel().trim();
+            CtDroneSpec spec = new CtDroneSpec(
+                    remoteId,
+                    CtDroneSpec.BuildMappedId(callsign, model, remoteId),
+                    normalizedOrg,
+                    model,
+                    mapping.getOwnerName().trim(),
+                    callsign
+            );
+            replacements.put(remoteId, spec);
+        }
+        ccs.cachedDroneSpecTable = replacements;
+        SetHomeOrgName(normalizedOrg);
+        UpdateDroneSpecs();
+        ArchiveState("RID mappings edited in Admin settings");
     }
 
     @NonNull
@@ -1704,6 +1735,36 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     @NonNull
+    public static String GetMutualAidTemplateTeamId() {
+        return GetMutualAidTemplate().teamId;
+    }
+
+    @NonNull
+    public static String GetMutualAidTemplateCredentialId() {
+        return GetMutualAidTemplate().credentialId;
+    }
+
+    @NonNull
+    public static String GetMutualAidTemplateCredentialSecret() {
+        return GetMutualAidTemplate().credentialSecret;
+    }
+
+    @NonNull
+    public static String GetMutualAidTemplateDomainAndPort() {
+        return GetMutualAidTemplate().domainAndPort;
+    }
+
+    @NonNull
+    public static String GetMutualAidTemplateSourceLabel() {
+        return GetMutualAidTemplate().sourceLabel;
+    }
+
+    @NonNull
+    public static String GetMutualAidTemplateTargetFolderHint() {
+        return GetMutualAidTemplate().targetFolderHint;
+    }
+
+    @NonNull
     public static String GetHomeOrgName() {
         ClientClassState ccs = GetState();
         ensureProfileStateFresh(ccs, false);
@@ -1783,6 +1844,88 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ArchiveState("home org name changed");
     }
 
+    public static void SetHomeTrackerCredentials(
+            @NonNull String trackerUrl,
+            @NonNull String trackerApiKey
+    ) {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord home = null;
+        if (ccs.caltopoProfiles != null) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if ("HOME".equals(profile.profileType)) {
+                    home = profile;
+                    break;
+                }
+            }
+        }
+        if (home == null) {
+            SetHomeOrgName("HOME");
+            if (ccs.caltopoProfiles != null) {
+                for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                    if ("HOME".equals(profile.profileType)) {
+                        home = profile;
+                        break;
+                    }
+                }
+            }
+        }
+        if (home != null) {
+            home.trackerUrlPfx = trackerUrl.trim();
+            home.trackerApiKey = trackerApiKey.trim();
+            if (home.profileId.equals(ccs.activeCaltopoProfileId)) {
+                mirrorProfileIntoLegacyFields(ccs, home);
+            }
+        }
+        ccs.trackerUrlPfx = trackerUrl.trim();
+        ccs.trackerApiKey = trackerApiKey.trim();
+        NotifySettingsChanged();
+        ArchiveState("home tracker enrollment changed");
+    }
+
+    @NonNull
+    public static String GetHomeTrackerApiKey() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (ccs.caltopoProfiles != null) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if ("HOME".equals(profile.profileType) && profile.trackerApiKey != null) {
+                    return profile.trackerApiKey;
+                }
+            }
+        }
+        return "";
+    }
+
+    @NonNull
+    public static String GetHomeTrackerUrlPfx() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (ccs.caltopoProfiles != null) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if ("HOME".equals(profile.profileType) && profile.trackerUrlPfx != null) {
+                    return profile.trackerUrlPfx;
+                }
+            }
+        }
+        return "";
+    }
+
+    @NonNull
+    public static String GetTrackerFaaProxyUrl() {
+        return GetState().trackerFaaProxyUrl;
+    }
+
+    public static void SetTrackerFaaProxyUrl(@NonNull String value) {
+        value = value.trim();
+        ClientClassState ccs = GetState();
+        if (!ccs.trackerFaaProxyUrl.equals(value)) {
+            ccs.trackerFaaProxyUrl = value;
+            NotifySettingsChanged();
+            ArchiveState("tracker FAA proxy URL changed");
+        }
+    }
+
     @NonNull
     public static String GetMutualAidSourceLabel() {
         MutualAidTemplateRecord template = GetMutualAidTemplate();
@@ -1794,6 +1937,24 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ccs.mutualAidTemplate = template;
         NotifySettingsChanged();
         ArchiveState("mutual aid template changed");
+    }
+
+    public static void SetMutualAidTemplateFields(
+            @NonNull String teamId,
+            @NonNull String credentialId,
+            @NonNull String credentialSecret,
+            @NonNull String domainAndPort,
+            @NonNull String sourceLabel,
+            @NonNull String targetFolderHint
+    ) {
+        SetMutualAidTemplate(new MutualAidTemplateRecord(
+                teamId,
+                credentialId,
+                credentialSecret,
+                domainAndPort,
+                sourceLabel,
+                targetFolderHint
+        ));
     }
 
     public static String GetCaltopoDomainAndPort() {
@@ -1885,8 +2046,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         boolean usePeers = json.optBoolean("use_peers", true);
         boolean predictiveHeadEnabled = json.optBoolean("predictive_head_enabled", true);
         long proximityAlertSpacingFeet = json.optLong("proximity_alert_spacing_feet", 40L);
-        boolean notamEnabled = json.optBoolean("notam_enabled", false);
-        int notamRadiusNm = json.optInt("notam_radius_nm", 2);
+        boolean notamEnabled = json.optBoolean("notam_enabled", true);
+        int notamRadiusNm = json.optInt(
+                "notam_radius_statute_miles",
+                json.optInt("notam_radius_nm", 1)
+        );
         boolean notamAutoRefresh = json.optBoolean("notam_auto_refresh", true);
         int notamRefreshIntervalSeconds = json.optInt("notam_refresh_interval_seconds", 1800);
         boolean notamWarnInsideOneNm = json.optBoolean("notam_warn_inside_one_nm", true);
@@ -1987,7 +2151,20 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             String org = entry.optString("org");
             String model = entry.optString("model");
             String owner = entry.optString("owner");
-            newDs = new CtDroneSpec(rid, mid, org, model, owner);
+            RidMappingOwnerFields ownerFields = RidMappingRules.INSTANCE.resolveOwnerFields(
+                    entry.optString("ownerName"),
+                    entry.optString("ownerCallsign"),
+                    owner,
+                    mid,
+                    model,
+                    rid);
+            newDs = new CtDroneSpec(
+                    rid,
+                    mid,
+                    org,
+                    model,
+                    ownerFields.getOwnerName(),
+                    ownerFields.getOwnerCallsign());
             CtDroneSpec existingDs = ccs.cachedDroneSpecTable.get(rid);
             boolean changed = (null == existingDs);
             if (!changed) {
@@ -1997,6 +2174,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     existingDs.setMappedId(newDs.getMappedId());
                     existingDs.setOrg(newDs.getOrg());
                     existingDs.setOwner(newDs.getOwner());
+                    existingDs.setOwnerName(newDs.getOwnerName());
                     CTDebug(TAG, String.format(Locale.US,
                             "readRidmapFileContent(): changed persistent dronespec from:\n    %s\n  to:\n    %s",
                             existingDs, newDs));
@@ -2113,6 +2291,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 mapEntry.put("org",      spec.getOrg());
                 mapEntry.put("model",    spec.getModel());
                 mapEntry.put("owner",    spec.getOwner());
+                mapEntry.put("ownerName", spec.getOwnerName());
+                mapEntry.put("ownerCallsign", spec.getOwner());
                 mapArray.put(mapEntry);
             }
             ridmap.put("map", mapArray);
@@ -2152,7 +2332,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             credentials.put("proximity_alert_spacing_feet",      ccs.proximityAlertSpacingFeet);
             // ── NOTAM settings ───────────────────────────────────────────────
             credentials.put("notam_enabled",                   ccs.notamEnabled);
-            credentials.put("notam_radius_nm",                 ccs.notamRadiusNm);
+            credentials.put("notam_radius_statute_miles",      ccs.notamRadiusNm);
             credentials.put("notam_auto_refresh",              ccs.notamAutoRefresh);
             credentials.put("notam_refresh_interval_seconds",  ccs.notamRefreshIntervalSeconds);
             credentials.put("notam_warn_inside_one_nm",        ccs.notamWarnInsideOneNm);
@@ -2736,7 +2916,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
                 long trackDelayInMsec = TrackDelayInMsecForDroneSpec(ds, newTrackDelayInMsec);
                 long droneSpecIdleInMsec = ds.trackTelemetryIdleTimeInMsec(currentTimeInMsec);
-                if (ds.isActive() && droneSpecIdleInMsec > trackDelayInMsec) {
+                if (ds.isActive() && HasTrackAgedOut(droneSpecIdleInMsec, trackDelayInMsec)) {
                     CaltopoClient client = (ClientMap != null) ? ClientMap.get(ds.getRemoteId()) : null;
                     String msg = String.format(Locale.US,
                             "ProcessSortedCurrentDroneSpecArray(%s): %s idle for %.3f/%.3f seconds%s. Finishing track...",
@@ -2796,18 +2976,25 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return TrackDelayInMsecForDroneSpec(ds, newTrackDelayInMsec);
     }
 
+    static boolean HasTrackAgedOutForTests(long telemetryIdleInMsec, long trackDelayInMsec) {
+        return HasTrackAgedOut(telemetryIdleInMsec, trackDelayInMsec);
+    }
+
+    private static boolean HasTrackAgedOut(long telemetryIdleInMsec, long trackDelayInMsec) {
+        return telemetryIdleInMsec >= trackDelayInMsec;
+    }
+
     private static long TrackDelayInMsecForDroneSpec(@NonNull CtDroneSpec ds, long newTrackDelayInMsec) {
-        if (ds.isOutOfRange()) return OUT_OF_RANGE_TRACK_DELAY_SECONDS * 1000L;
-        if (ds.isAwayFromHomeOrTabletBaseline(TAKEOFF_NEAR_TABLET_DISTANCE_FEET)) {
-            return newTrackDelayInMsec * REMOTE_LOSS_TRACK_DELAY_MULTIPLIER;
-        }
+        // Track retirement has one authoritative ceiling: the configured maximum idle
+        // interval. Local RID packets and peer-relayed telemetry both refresh the clock in
+        // CtDroneSpec.trackTelemetryIdleTimeInMsec(). Alert state and aircraft position must
+        // never extend this deadline, otherwise an OOR flight can remain only in memory.
         return newTrackDelayInMsec;
     }
 
     @NonNull
     private static String TrackDelayReasonSuffix(@NonNull CtDroneSpec ds) {
         if (ds.isOutOfRange()) return " (OOR)";
-        if (ds.isAwayFromHomeOrTabletBaseline(TAKEOFF_NEAR_TABLET_DISTANCE_FEET)) return " (remote-loss grace)";
         return "";
     }
 
@@ -3034,7 +3221,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void SetNotamRadiusNm(int radiusNm) {
         int normalized;
-        if (radiusNm <= 2) normalized = 2;
+        if (radiusNm <= 1) normalized = 1;
+        else if (radiusNm <= 2) normalized = 2;
         else if (radiusNm <= 4) normalized = 4;
         else if (radiusNm <= 8) normalized = 8;
         else normalized = 16;

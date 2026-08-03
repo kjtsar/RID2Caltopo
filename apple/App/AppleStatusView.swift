@@ -27,7 +27,7 @@ struct AppleStatusSnapshot {
     let importedMappings: [RidAircraftIdentity]
 
     var buildVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        AppleBuildMetadata.version
     }
 
     var buildNumber: String {
@@ -35,10 +35,7 @@ struct AppleStatusSnapshot {
     }
 
     var buildArtifactDate: String {
-        guard let executableURL = Bundle.main.executableURL,
-              let values = try? executableURL.resourceValues(forKeys: [.contentModificationDateKey]),
-              let date = values.contentModificationDate
-        else { return "unknown" }
+        guard let date = AppleBuildMetadata.artifactDate else { return "unknown" }
         return date.formatted(date: .abbreviated, time: .standard)
     }
 

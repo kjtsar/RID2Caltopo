@@ -4,6 +4,11 @@ import MapKit
 import R2CCore
 import SwiftUI
 
+private let unresolvedAppleMapRegion = MKCoordinateRegion(
+    center: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+    span: MKCoordinateSpan(latitudeDelta: 160, longitudeDelta: 360)
+)
+
 enum AppleOperationalStatusChipTone {
     case danger
     case caution
@@ -33,6 +38,7 @@ struct AppleOperationalStatusChipLabel: View {
             .fontWeight(.medium)
             .foregroundStyle(tone.foregroundColor)
             .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
             .background(
@@ -51,11 +57,9 @@ struct AppleOperationalStatusChipLabel: View {
 
 @MainActor
 private final class AppleMapViewportMemory: ObservableObject {
-    var region = MKCoordinateRegion(
-        center: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
-        span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
-    )
+    var region = unresolvedAppleMapRegion
     var visibleMapRect: MKMapRect?
+    var hasOperationalViewport = false
 }
 
 @MainActor
@@ -365,10 +369,7 @@ struct RIDTrackMapView: View {
     private var videoPipInsetFraction = OperationalPipSizing.defaultInsetFraction
     @AppStorage("video.coordinateDisplayFormat")
     private var coordinateDisplayFormatRaw = OperationalCoordinateDisplayFormat.decimal.rawValue
-    @State private var viewport = MKCoordinateRegion(
-        center: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
-        span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
-    )
+    @State private var viewport = unresolvedAppleMapRegion
     @State private var showMapItems = false
     @State private var showOfflinePreparation = false
     @State private var showMapManagement = false
@@ -408,22 +409,40 @@ struct RIDTrackMapView: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
+                layoutContent(
+                    size: geometry.size,
+                    presentation: streamsFullScreen
+                        ? layout.fullScreenPresentation(pictureInPictureEnabled: videoPipEnabled)
+                        : layout
+                )
                 if streamsFullScreen {
-                    videoPane
-                } else {
-                    layoutContent(size: geometry.size)
-                }
-                if streamsFullScreen {
-                    Button("Exit FS") { streamsFullScreen = false }
-                        .buttonStyle(.borderedProminent)
-                        .padding(10)
-                        .accessibilityLabel("Exit full screen")
+                    HStack {
+                        Button("Exit FS") { streamsFullScreen = false }
+                            .accessibilityLabel("Exit full screen")
+                        Button(videoPipEnabled ? "PiP:On" : "PiP:Off") {
+                            videoPipEnabled.toggle()
+                            if !videoPipEnabled { pipEditorMode = false }
+                            applyPipPreference()
+                        }
+                        .accessibilityLabel(
+                            videoPipEnabled
+                                ? "Turn picture in picture off"
+                                : "Turn picture in picture on"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(10)
                 }
             }
         }
         .safeAreaInset(edge: .top) {
             if !streamsFullScreen {
                 androidLiveViewStatusBar
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if peerCoordinator.activeRemoteVideoConnectionCount > 0 {
+                remoteVideoStatusBar
             }
         }
         .navigationTitle("Live View")
@@ -498,7 +517,13 @@ struct RIDTrackMapView: View {
             }
         }
         .sheet(isPresented: $showNotams) { AppleNotamPanel(center: notams, location: locationProvider.lastLocation) }
-        .sheet(isPresented: $showAirspace) { AppleAirspacePanel(center: airspace, location: locationProvider.lastLocation) }
+        .sheet(isPresented: $showAirspace) {
+            AppleAirspacePanel(
+                center: airspace,
+                notams: notams,
+                location: locationProvider.lastLocation
+            )
+        }
         .sheet(isPresented: $showLandRestrictions) {
             AppleLandRestrictionPanel(center: landRestrictions, location: locationProvider.lastLocation)
         }
@@ -624,9 +649,103 @@ struct RIDTrackMapView: View {
         }
     }
 
+    private var remoteVideoStatusBar: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(
+                    "Remote viewing: \(peerCoordinator.activeRemoteVideoConnectionCount) " +
+                    (peerCoordinator.activeRemoteVideoConnectionCount == 1 ? "connection" : "connections")
+                )
+                .font(.headline)
+                Text(
+                    "\(peerCoordinator.activeRemoteVideoRequesterSummary) • " +
+                    "\(peerCoordinator.activeRemoteVideoRouteSummary) • " +
+                    "\(remoteVideoByteText(peerCoordinator.remoteVideoBytesSent)) sent"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                if peerCoordinator.remoteVideoEffectiveWidth > 0 {
+                    Text(String(
+                        format: "%d×%d • %.1f fps • %.2f Mbps actual",
+                        peerCoordinator.remoteVideoEffectiveWidth,
+                        peerCoordinator.remoteVideoEffectiveHeight,
+                        peerCoordinator.remoteVideoEffectiveFPS,
+                        Double(peerCoordinator.remoteVideoEffectiveBitrateBps) / 1_000_000
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+                if let microphoneError = peerCoordinator.remoteVideoMicrophoneError {
+                    Text(microphoneError)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                }
+                Text(
+                    "VoIP: \(remoteVideoByteText(peerCoordinator.remoteVideoAudioBytesSent)) sent • " +
+                    "\(remoteVideoByteText(peerCoordinator.remoteVideoAudioBytesReceived)) received"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Button {
+                peerCoordinator.toggleRemoteVideoMicrophone()
+            } label: {
+                ZStack {
+                    Image(systemName: "mic.fill")
+                        .font(.title2)
+                    if peerCoordinator.remoteVideoMicrophoneEnabled {
+                        Image(systemName: "megaphone.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                            .offset(x: 16, y: -13)
+                    } else {
+                        Rectangle()
+                            .fill(.red)
+                            .frame(width: 30, height: 3)
+                            .rotationEffect(.degrees(-45))
+                    }
+                }
+                .frame(width: 40, height: 40)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel(
+                peerCoordinator.remoteVideoMicrophoneEnabled
+                    ? "Turn microphone off"
+                    : "Turn microphone on"
+            )
+            Button("Terminate", role: .destructive) {
+                peerCoordinator.terminateAllRemoteVideoStreams()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func remoteVideoByteText(_ bytes: Int64) -> String {
+        let count = Double(max(0, bytes))
+        if count >= 1_000_000_000 { return String(format: "%.2f GB", count / 1_000_000_000) }
+        if count >= 1_000_000 { return String(format: "%.1f MB", count / 1_000_000) }
+        if count >= 1_000 { return String(format: "%.1f KB", count / 1_000) }
+        return "\(Int64(count)) B"
+    }
+
     @ViewBuilder
-    private func layoutContent(size: CGSize) -> some View {
-        switch layout {
+    private func layoutContent(
+        size: CGSize,
+        presentation: OperationalMapVideoLayout? = nil
+    ) -> some View {
+        switch presentation ?? layout {
         case .map:
             mapPane(inset: false)
         case .video:
@@ -1150,6 +1269,26 @@ struct RIDTrackMapView: View {
     private var androidLiveViewStatusBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
+                if airspace.enabled || notams.state.visible {
+                    operationalStatusChip(
+                        conciseAirspaceOrNotamChipLabel,
+                        tone: usesAirspaceRestrictionStatus ? airspaceTone : notamTone
+                    ) {
+                        if usesAirspaceRestrictionStatus { showAirspace = true }
+                        else { showNotams = true }
+                    }
+                }
+                if landRestrictions.enabled {
+                    operationalStatusChip(
+                        OperationalStatusChipText.land(
+                            severity: landRestrictions.state.severity,
+                            detailedLabel: landRestrictions.state.chipLabel
+                        ),
+                        tone: landRestrictionTone
+                    ) {
+                        showLandRestrictions = true
+                    }
+                }
                 Text(ingestAddress.hasPrefix("rtmp://")
                     ? "🟢 In => \(ingestAddress)/<droneDesig>"
                     : "🟡 \(ingestAddress)")
@@ -1167,26 +1306,7 @@ struct RIDTrackMapView: View {
                     .lineLimit(1)
                 Label("\(model.tracks.count) active", systemImage: "airplane.circle")
                 Text("\(model.acceptedObservationCount) points")
-            if airspace.enabled || notams.enabled {
-                operationalStatusChip(
-                    usesAirspaceRestrictionStatus
-                        ? airspace.state.chipLabel
-                        : notams.state.chipLabel,
-                    tone: usesAirspaceRestrictionStatus ? airspaceTone : notamTone
-                ) {
-                    if usesAirspaceRestrictionStatus { showAirspace = true }
-                    else { showNotams = true }
-                }
-            }
-            if landRestrictions.enabled {
-                operationalStatusChip(
-                    landRestrictions.state.chipLabel,
-                    tone: landRestrictionTone
-                ) {
-                    showLandRestrictions = true
-                }
-            }
-            if offlineOnly { Label("Offline", systemImage: "wifi.slash") }
+                if offlineOnly { Label("Offline", systemImage: "wifi.slash") }
             }
         }
         .font(.caption.monospacedDigit())
@@ -1197,6 +1317,19 @@ struct RIDTrackMapView: View {
 
     private var usesAirspaceRestrictionStatus: Bool {
         !notams.state.visible || airspace.state.severity != .normal
+    }
+
+    private var conciseAirspaceOrNotamChipLabel: String {
+        if usesAirspaceRestrictionStatus {
+            return OperationalStatusChipText.airspace(
+                severity: airspace.state.severity,
+                detailedLabel: airspace.state.chipLabel
+            )
+        }
+        return OperationalStatusChipText.notam(
+            severity: notams.state.chipSeverity,
+            detailedLabel: notams.state.chipLabel
+        )
     }
 
     private func operationalStatusChip(
@@ -1425,8 +1558,11 @@ private struct ClueSubmissionView: View {
     @State private var title: String
     @State private var description: String
     @State private var gimbalAngle: Double
+    @State private var cameraHeadingDegrees: Double
+    @State private var cameraHeadingSource: String
     @State private var terrainProjection: OperationalClueProjection?
     @State private var terrainProjectionPending = false
+    @State private var submissionFeedback: String?
     @FocusState private var focusedField: FocusedField?
 
     init(
@@ -1447,6 +1583,8 @@ private struct ClueSubmissionView: View {
         self.onCancel = onCancel
         _selectedAircraftID = State(initialValue: pending.defaultAircraftID)
         _gimbalAngle = State(initialValue: pending.gimbalAngleDegrees)
+        _cameraHeadingDegrees = State(initialValue: pending.heading.degrees ?? 0)
+        _cameraHeadingSource = State(initialValue: Self.headingSourceLabel(pending.heading))
         // Android deliberately opens on an empty, focused title so the
         // operator can immediately type the clue name without clearing a
         // generated value.
@@ -1463,13 +1601,9 @@ private struct ClueSubmissionView: View {
         usesCaptureTelemetry ? pending.altitudeDisplay : altitudeDisplay[selectedAircraftID]
     }
     private var heading: OperationalClueHeadingSelection {
-        if usesCaptureTelemetry {
-            return pending.heading
-        }
-        return OperationalClueGeometry.selectedHeading(
-            cameraYawDegrees: nil,
-            streamHeadingDegrees: nil,
-            ridHeadingDegrees: observation?.headingDegrees
+        OperationalClueHeadingSelection(
+            degrees: cameraHeadingDegrees,
+            sourceLabel: cameraHeadingSource
         )
     }
     private var designator: String {
@@ -1542,6 +1676,14 @@ private struct ClueSubmissionView: View {
                     }
                 }
                 Section("Camera projection") {
+                    LabeledContent("Camera heading", value: headingMeasurement(cameraHeadingDegrees))
+                    Slider(value: Binding(
+                        get: { cameraHeadingDegrees },
+                        set: { value in
+                            cameraHeadingDegrees = RidHeading.normalized(value) ?? 0
+                            cameraHeadingSource = "Operator adjusted"
+                        }
+                    ), in: 0 ... 359, step: 1)
                     LabeledContent("Gimbal angle", value: "\(Int(gimbalAngle.rounded()))°")
                     Slider(value: $gimbalAngle, in: -90 ... 0, step: 1)
                     Text("-90° is straight down; 0° is the horizon.")
@@ -1560,15 +1702,25 @@ private struct ClueSubmissionView: View {
                         .focused($focusedField, equals: .title)
                         .submitLabel(.next)
                         .onSubmit { focusedField = .description }
+                        .onChange(of: title) {
+                            if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                submissionFeedback = nil
+                            }
+                        }
                     TextField("Description", text: $description, axis: .vertical)
                         .lineLimit(3 ... 8)
                         .focused($focusedField, equals: .description)
+                    if let submissionFeedback {
+                        Label(submissionFeedback, systemImage: "exclamationmark.circle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("clue-submission-feedback")
+                    }
                 }
                 Section {
                     Button("Local Marker Only", systemImage: "mappin.and.ellipse") {
                         submit(publish: false)
                     }
-                    .disabled(terrainProjectionPending)
                     Button {
                         submit(publish: true)
                     } label: {
@@ -1576,10 +1728,6 @@ private struct ClueSubmissionView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(
-                        title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            || terrainProjectionPending
-                    )
                 } footer: {
                     Text("Submit saves the clue locally before starting its CalTopo upload.")
                 }
@@ -1594,6 +1742,17 @@ private struct ClueSubmissionView: View {
                 DispatchQueue.main.async {
                     focusedField = .title
                 }
+            }
+            .onChange(of: selectedAircraftID) {
+                let selection = usesCaptureTelemetry
+                    ? pending.heading
+                    : OperationalClueGeometry.selectedHeading(
+                        cameraYawDegrees: nil,
+                        streamHeadingDegrees: nil,
+                        ridHeadingDegrees: observation?.headingDegrees
+                )
+                cameraHeadingDegrees = selection.degrees ?? 0
+                cameraHeadingSource = Self.headingSourceLabel(selection)
             }
             .task(id: projectionInput) {
                 terrainProjection = nil
@@ -1630,13 +1789,21 @@ private struct ClueSubmissionView: View {
             "Clue",
             "Clue form action publish=\(publish) aircraft=\(selectedAircraftID) titleLength=\(trimmedTitle.count)"
         )
+        guard !trimmedTitle.isEmpty else {
+            submissionFeedback = "Title required."
+            focusedField = .title
+            AppleLog.warning("Clue", "Clue form submission needs a title")
+            return
+        }
         guard let observation, let projection else {
+            submissionFeedback = "Aircraft telemetry is unavailable. Select an active aircraft and try again."
             AppleLog.error(
                 "Clue",
                 "Clue form submission blocked because aircraft telemetry is no longer available aircraft=\(selectedAircraftID)"
             )
             return
         }
+        submissionFeedback = nil
         let clueAltitude = projection.altitudeMeters.map { String(format: "%.0f'", $0 * 3.28084) } ?? "N/A"
         let usng = OperationalCoordinateFormatter.format(
             latitude: projection.latitude,
@@ -1687,6 +1854,17 @@ private struct ClueSubmissionView: View {
     private func headingMeasurement(_ value: Double?) -> String {
         guard let heading = RidHeading.roundedWholeDegrees(value) else { return "--" }
         return "\(heading)°"
+    }
+
+    private static func headingSourceLabel(_ selection: OperationalClueHeadingSelection) -> String {
+        switch selection.sourceLabel {
+        case "RID aircraft track":
+            return "RID aircraft track"
+        case nil:
+            return "Operator entry required"
+        case let label?:
+            return label
+        }
     }
 
     private static let timestampFormatter: DateFormatter = {
@@ -2139,14 +2317,36 @@ private struct OperationalMKMapView: UIViewRepresentable {
             inset: inset,
             statusLines: operatorStatusLines
         )
-        let startupCoordinates =
-            [operatorCoordinate].compactMap { $0 }
+        let fallbackTrackCoordinates = tracks.flatMap { track -> [CLLocationCoordinate2D] in
+            var coordinates: [CLLocationCoordinate2D] = []
+            if let latitude = track.lastObservation.operatorLatitude,
+               let longitude = track.lastObservation.operatorLongitude {
+                let operatorCoordinate = CLLocationCoordinate2D(
+                    latitude: latitude,
+                    longitude: longitude
+                )
+                if CLLocationCoordinate2DIsValid(operatorCoordinate), latitude != 0, longitude != 0 {
+                    coordinates.append(operatorCoordinate)
+                }
+            }
+            let aircraftCoordinate = CLLocationCoordinate2D(
+                latitude: track.lastObservation.latitude,
+                longitude: track.lastObservation.longitude
+            )
+            if CLLocationCoordinate2DIsValid(aircraftCoordinate) {
+                coordinates.append(aircraftCoordinate)
+            }
+            return coordinates
+        }
+        let fallbackStartupCoordinates =
+            fallbackTrackCoordinates
             + artifacts.points.map { $0.coordinate.clCoordinate }
             + artifacts.lines.flatMap { $0.coordinates.map(\.clCoordinate) }
             + artifacts.polygons.flatMap { $0.coordinates.map(\.clCoordinate) }
         context.coordinator.rescueInitialOperationalViewport(
             on: map,
-            coordinates: startupCoordinates,
+            operatorCoordinate: operatorCoordinate,
+            fallbackCoordinates: fallbackStartupCoordinates,
             allowed: !operatorAdjustedViewport
                 && focusedAircraftID == nil
         )
@@ -2192,7 +2392,13 @@ private struct OperationalMKMapView: UIViewRepresentable {
         private var operatorCoordinate: CLLocationCoordinate2D?
         private var operatorCircle: MKCircle?
         private var operatorAnnotation: OperatorDeviceAnnotation?
-        private var operatorViewportRescueApplied = false
+        private enum InitialViewportSource {
+            case none
+            case fallbackOperationalData
+            case operatorLocation
+            case preservedTransition
+        }
+        private var initialViewportSource: InitialViewportSource
         private var updating = false
         private var currentInset = false
         private var currentFollowFocusedDrone = false
@@ -2215,7 +2421,10 @@ private struct OperationalMKMapView: UIViewRepresentable {
             _viewport = viewport
             self.viewportMemory = viewportMemory
             _operatorAdjustedViewport = operatorAdjustedViewport
-            pendingVisibleMapRect = viewportMemory.visibleMapRect
+            pendingVisibleMapRect = viewportMemory.hasOperationalViewport
+                ? viewportMemory.visibleMapRect
+                : nil
+            initialViewportSource = pendingVisibleMapRect == nil ? .none : .preservedTransition
             self.onSelectClue = onSelectClue
             self.onSelectAircraft = onSelectAircraft
             self.onLongPressTile = onLongPressTile
@@ -2320,17 +2529,47 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
         func rescueInitialOperationalViewport(
             on map: MKMapView,
-            coordinates: [CLLocationCoordinate2D],
+            operatorCoordinate: CLLocationCoordinate2D?,
+            fallbackCoordinates: [CLLocationCoordinate2D],
             allowed: Bool
         ) {
             guard allowed,
-                  !operatorViewportRescueApplied,
                   map.bounds.width > 0,
                   map.bounds.height > 0
             else { return }
-            let valid = coordinates.filter(CLLocationCoordinate2DIsValid)
+
+            // The operator's current position is the authoritative Live View
+            // startup center. If Remote ID or CalTopo coordinates arrive first,
+            // they may supply a temporary fallback, but a later location fix
+            // gets one chance to replace it. A user gesture, focused drone, or
+            // preserved full/PiP transition prevents this startup correction at
+            // the call site or through the preserved source state.
+            if let operatorCoordinate,
+               CLLocationCoordinate2DIsValid(operatorCoordinate),
+               initialViewportSource != .operatorLocation,
+               initialViewportSource != .preservedTransition {
+                initialViewportSource = .operatorLocation
+                let region = MKCoordinateRegion(
+                    center: operatorCoordinate,
+                    span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
+                )
+                map.setRegion(region, animated: false)
+                viewport = region
+                viewportMemory.region = region
+                viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
+                viewportMemory.hasOperationalViewport = true
+                AppleLog.info(
+                    "MapViewport",
+                    "Initial center set from operator location latitude=\(String(format: "%.6f", operatorCoordinate.latitude)) " +
+                        "longitude=\(String(format: "%.6f", operatorCoordinate.longitude))"
+                )
+                return
+            }
+
+            guard initialViewportSource == .none else { return }
+            let valid = fallbackCoordinates.filter(CLLocationCoordinate2DIsValid)
             guard let first = valid.first else { return }
-            operatorViewportRescueApplied = true
+            initialViewportSource = .fallbackOperationalData
             let points = valid.map(MKMapPoint.init)
             var rect = points.dropFirst().reduce(
                 MKMapRect(origin: points[0], size: MKMapSize(width: 0, height: 0))
@@ -2348,6 +2587,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
                 viewport = map.region
                 viewportMemory.region = map.region
                 viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
+                viewportMemory.hasOperationalViewport = true
             } else {
                 let span = MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
                 let region = MKCoordinateRegion(center: first, span: span)
@@ -2355,7 +2595,9 @@ private struct OperationalMKMapView: UIViewRepresentable {
                 viewport = region
                 viewportMemory.region = region
                 viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
+                viewportMemory.hasOperationalViewport = true
             }
+            AppleLog.info("MapViewport", "Initial center set from available operational coordinates")
         }
 
         func updateOperationalOverlays(
@@ -2749,6 +2991,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             viewport.center = coordinate
             viewportMemory.region.center = coordinate
             viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
+            viewportMemory.hasOperationalViewport = true
         }
 
         func persistViewport(from map: MKMapView) {
@@ -2781,6 +3024,9 @@ private struct OperationalMKMapView: UIViewRepresentable {
             else { return }
             viewportMemory.region = region
             viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
+            if operatorAdjustedViewport {
+                viewportMemory.hasOperationalViewport = true
+            }
         }
 
         func restoreViewportBoundsIfNeeded(on map: MKMapView) {
@@ -2822,6 +3068,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
                   userGesture
             else { return }
             operatorAdjustedViewport = true
+            viewportMemory.hasOperationalViewport = true
         }
 
         private func hasActiveUserGesture(in view: UIView) -> Bool {

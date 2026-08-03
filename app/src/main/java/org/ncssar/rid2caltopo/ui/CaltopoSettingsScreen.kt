@@ -16,9 +16,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
+import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
 import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 
@@ -27,6 +29,24 @@ fun CaltopoSettingsScreen(
     onDismiss: () -> Unit,
     settingsViewModel: CaltopoSettingsViewModel = viewModel()
 ) {
+    var showRidMappingAdmin by remember { mutableStateOf(false) }
+    val ridMappingCount = CaltopoClient.GetPersistedDroneSpecs().size
+    val organizationName by settingsViewModel.organizationName.collectAsState()
+    val trackFolder by settingsViewModel.trackFolder.collectAsState()
+    val incident by settingsViewModel.incident.collectAsState()
+    val opPeriod by settingsViewModel.opPeriod.collectAsState()
+    val caltopoTeamId by settingsViewModel.caltopoTeamId.collectAsState()
+    val caltopoCredentialId by settingsViewModel.caltopoCredentialId.collectAsState()
+    val caltopoCredentialSecret by settingsViewModel.caltopoCredentialSecret.collectAsState()
+    val trackerUrl by settingsViewModel.trackerUrl.collectAsState()
+    val trackerApiKey by settingsViewModel.trackerApiKey.collectAsState()
+    val mutualAidTeamId by settingsViewModel.mutualAidTeamId.collectAsState()
+    val mutualAidCredentialId by settingsViewModel.mutualAidCredentialId.collectAsState()
+    val mutualAidCredentialSecret by settingsViewModel.mutualAidCredentialSecret.collectAsState()
+    val mutualAidDomain by settingsViewModel.mutualAidDomain.collectAsState()
+    val mutualAidSourceLabel by settingsViewModel.mutualAidSourceLabel.collectAsState()
+    val mutualAidTargetFolder by settingsViewModel.mutualAidTargetFolder.collectAsState()
+    val usePeers by settingsViewModel.usePeers.collectAsState()
     val minDistance by settingsViewModel.minDistance.collectAsState()
     val newTrackDelay by settingsViewModel.newTrackDelay.collectAsState()
     val bridgeCheckDistanceFeet by settingsViewModel.bridgeCheckDistanceFeet.collectAsState()
@@ -63,6 +83,188 @@ fun CaltopoSettingsScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text("Settings", style = MaterialTheme.typography.headlineSmall)
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    "Organization / RID Map",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "RID map entries are normally loaded from the organization QR code. " +
+                        "Use this editor to review, add, or correct Remote ID mappings stored on this device.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = { showRidMappingAdmin = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("View or Edit RID Map Entries ($ridMappingCount)")
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                OutlinedTextField(
+                    value = organizationName,
+                    onValueChange = settingsViewModel::onOrganizationNameChanged,
+                    label = { Text("Organization designator") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = trackFolder,
+                    onValueChange = settingsViewModel::onTrackFolderChanged,
+                    label = { Text("CalTopo track folder") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = incident,
+                    onValueChange = settingsViewModel::onIncidentChanged,
+                    label = { Text("Incident") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = opPeriod,
+                    onValueChange = settingsViewModel::onOpPeriodChanged,
+                    label = { Text("Operational period") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    "CalTopo Teams Account",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = caltopoTeamId,
+                    onValueChange = settingsViewModel::onCaltopoTeamIdChanged,
+                    label = { Text("Team ID") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = caltopoCredentialId,
+                    onValueChange = settingsViewModel::onCaltopoCredentialIdChanged,
+                    label = { Text("Credential ID") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = caltopoCredentialSecret,
+                    onValueChange = settingsViewModel::onCaltopoCredentialSecretChanged,
+                    label = { Text("Credential secret") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = caltopoUrl,
+                    onValueChange = settingsViewModel::onCaltopoDomainAndPortChanged,
+                    label = { Text("Domain and port") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    "Tracker Coordination",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = trackerUrl,
+                    onValueChange = settingsViewModel::onTrackerUrlChanged,
+                    label = { Text("Tracker URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = trackerApiKey,
+                    onValueChange = settingsViewModel::onTrackerApiKeyChanged,
+                    label = { Text("Tracker API key") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                LabeledSwitch(
+                    label = "Use tracker peers",
+                    checked = usePeers,
+                    onCheckedChange = settingsViewModel::onUsePeersChanged
+                )
+                Text(
+                    "Manual tracker changes configure coordination only. FAA proxy access remains organization-QR-only and is cleared when these fields are manually changed.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    "Mutual Aid Account",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = mutualAidTeamId,
+                    onValueChange = settingsViewModel::onMutualAidTeamIdChanged,
+                    label = { Text("Team ID") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = mutualAidCredentialId,
+                    onValueChange = settingsViewModel::onMutualAidCredentialIdChanged,
+                    label = { Text("Credential ID") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = mutualAidCredentialSecret,
+                    onValueChange = settingsViewModel::onMutualAidCredentialSecretChanged,
+                    label = { Text("Credential secret") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = mutualAidDomain,
+                    onValueChange = settingsViewModel::onMutualAidDomainChanged,
+                    label = { Text("Domain and port") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = mutualAidSourceLabel,
+                    onValueChange = settingsViewModel::onMutualAidSourceLabelChanged,
+                    label = { Text("Source organization label") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = mutualAidTargetFolder,
+                    onValueChange = settingsViewModel::onMutualAidTargetFolderChanged,
+                    label = { Text("Target folder hint") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "These are the same six values accepted by ct_mutual_aid_credentials JSON.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
                 Spacer(modifier = Modifier.height(16.dp))
                 OutlinedTextField(
                     value = minDistance,
@@ -110,15 +312,6 @@ fun CaltopoSettingsScreen(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     label = { Text("Max App Idle Time (minutes)") }
                 )
-                OutlinedTextField(
-                    value = caltopoUrl,
-                    onValueChange = { settingsViewModel.onCaltopoDomainAndPortChanged(it) },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Caltopo Domain And Port (i.e. caltopo.com)") }
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Capture Streams:")
                     Switch(
@@ -168,7 +361,7 @@ fun CaltopoSettingsScreen(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Enable Nearby NOTAMs:")
+                    Text("Enable Nearby FAA Monitoring (NOTAM/TFR + Airport/LAANC):")
                     Spacer(modifier = Modifier.width(8.dp))
                     Switch(
                         checked = notamEnabled,
@@ -182,7 +375,7 @@ fun CaltopoSettingsScreen(
                     value = notamRadiusNm,
                     onValueChange = { settingsViewModel.onNotamRadiusNmChanged(it.filter { ch -> ch.isDigit() }) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("NOTAM Radius (2, 4, 8, 16 NM)") }
+                    label = { Text("NOTAM Radius (1, 2, 4, 8, 16 statute miles)") }
                 )
 
                 OutlinedTextField(
@@ -327,6 +520,9 @@ fun CaltopoSettingsScreen(
                 }
             }
         }
+    }
+    if (showRidMappingAdmin) {
+        RidMappingAdminDialog(onDismiss = { showRidMappingAdmin = false })
     }
 }
 

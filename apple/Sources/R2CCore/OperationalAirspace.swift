@@ -145,7 +145,8 @@ public enum OperationalFacilityMap {
     public static func state(
         records: [OperationalFacilityMapRecord],
         loading: Bool,
-        errorMessage: String?
+        errorMessage: String?,
+        pilotCoordinate: OperationalAirspaceCoordinate? = nil
     ) -> OperationalAirspaceState {
         if loading {
             return .init(loading: true, chipLabel: "Airspace updating…", records: records, errorMessage: errorMessage)
@@ -155,23 +156,26 @@ public enum OperationalFacilityMap {
         }
         let controlled = records.filter { !$0.airspaceClasses.isEmpty }
         if !controlled.isEmpty {
+            let containing = pilotCoordinate.map { coordinate in
+                controlled.filter { contains($0, coordinate: coordinate) }
+            } ?? []
+            if containing.isEmpty {
+                return nearbyState(
+                    records: records,
+                    controlled: controlled,
+                    pilotCoordinate: pilotCoordinate,
+                    errorMessage: errorMessage
+                )
+            }
             // FAA guidance says an operation spanning multiple UASFM grids must use the
             // lowest published altitude. ArcGIS result order is not deterministic.
-            let representative = controlled.min {
-                let leftLimit = $0.ceilingFeet ?? .max
-                let rightLimit = $1.ceilingFeet ?? .max
-                if leftLimit != rightLimit { return leftLimit < rightLimit }
-                if $0.primaryAirportName != $1.primaryAirportName {
-                    return $0.primaryAirportName < $1.primaryAirportName
-                }
-                return $0.objectID < $1.objectID
-            }!
+            let representative = representative(containing)
             let airport = shortAirportName(representative.primaryAirportName)
-            let classes = Array(Set(controlled.flatMap(\.airspaceClasses)))
+            let classes = Array(Set(containing.flatMap(\.airspaceClasses)))
                 .sorted()
                 .map { "Class \($0)" }
                 .joined(separator: "/")
-            let gridLimit = controlled.compactMap(\.ceilingFeet).min()
+            let gridLimit = containing.compactMap(\.ceilingFeet).min()
             let gridLimitText = gridLimit.map { "; FAA grid limit \($0) ft AGL" } ?? ""
             let coordinationText = gridLimit.map {
                 " The displayed \($0) ft AGL value is the lowest FAA UAS Facility Map limit across the area, not the top of the controlled-airspace class. Requests above it require further FAA coordination."
@@ -180,7 +184,7 @@ public enum OperationalFacilityMap {
                 severity: .danger,
                 chipLabel: "Airspace: Authorization required - \(airport) \(classes)\(gridLimitText)",
                 summary: "\(airport) \(classes)",
-                detail: "Controlled airspace intersects the \(operatingAreaLabel). FAA authorization is required before flight.\(coordinationText)",
+                detail: "The current location is inside an FAA UAS Facility Map grid identified as \(classes). FAA authorization is required before flight.\(coordinationText)",
                 records: records,
                 errorMessage: errorMessage
             )
@@ -188,10 +192,112 @@ public enum OperationalFacilityMap {
         return .init(
             severity: .normal,
             chipLabel: "Airspace clear",
-            summary: "No FAA UAS Facility Map grid at this location",
+            summary: "No FAA UAS Facility Map grid within the \(operatingAreaLabel)",
             records: records,
             errorMessage: errorMessage
         )
+    }
+
+    private static func nearbyState(
+        records: [OperationalFacilityMapRecord],
+        controlled: [OperationalFacilityMapRecord],
+        pilotCoordinate: OperationalAirspaceCoordinate?,
+        errorMessage: String?
+    ) -> OperationalAirspaceState {
+        let nearest: (OperationalFacilityMapRecord, Double)? = pilotCoordinate.flatMap { coordinate in
+            controlled.compactMap { record in
+                distanceStatuteMiles(record, coordinate: coordinate).map { (record, $0) }
+            }.min { $0.1 < $1.1 }
+        }
+        let record = nearest?.0 ?? representative(controlled)
+        let airport = shortAirportName(record.primaryAirportName)
+        let classes = Array(Set(record.airspaceClasses))
+            .sorted()
+            .map { "Class \($0)" }
+            .joined(separator: "/")
+        let distanceText = nearest.map { String(format: " %.1f mi", $0.1) } ?? ""
+        let proximity = nearest.map {
+            " The nearest \(airport) \(classes) facility-map grid is approximately " +
+                "\(String(format: "%.1f", $0.1)) statute miles away and intersects the \(operatingAreaLabel)."
+        } ?? " A controlled-airspace facility-map grid intersects the \(operatingAreaLabel), but its boundary could not be compared with the current position."
+        return .init(
+            severity: .caution,
+            chipLabel: "Airspace nearby - \(airport) \(classes)\(distanceText)",
+            summary: "\(airport) \(classes) nearby",
+            detail: "No FAA UAS Facility Map grid covers the current location.\(proximity) " +
+                "FAA authorization is required only if the planned operation enters controlled airspace. " +
+                "Verify the full planned area in an FAA-approved planning source.",
+            records: records,
+            errorMessage: errorMessage
+        )
+    }
+
+    private static func representative(
+        _ records: [OperationalFacilityMapRecord]
+    ) -> OperationalFacilityMapRecord {
+        records.min {
+            let leftLimit = $0.ceilingFeet ?? .max
+            let rightLimit = $1.ceilingFeet ?? .max
+            if leftLimit != rightLimit { return leftLimit < rightLimit }
+            if $0.primaryAirportName != $1.primaryAirportName {
+                return $0.primaryAirportName < $1.primaryAirportName
+            }
+            return $0.objectID < $1.objectID
+        }!
+    }
+
+    private static func contains(
+        _ record: OperationalFacilityMapRecord,
+        coordinate: OperationalAirspaceCoordinate
+    ) -> Bool {
+        record.rings.filter { pointInRing($0, point: coordinate) }.count % 2 == 1
+    }
+
+    private static func pointInRing(
+        _ ring: [OperationalAirspaceCoordinate],
+        point: OperationalAirspaceCoordinate
+    ) -> Bool {
+        guard ring.count >= 3 else { return false }
+        var inside = false
+        var previous = ring[ring.count - 1]
+        for current in ring {
+            let crossesLatitude = (current.latitude > point.latitude) !=
+                (previous.latitude > point.latitude)
+            if crossesLatitude {
+                let crossingLongitude = (previous.longitude - current.longitude) *
+                    (point.latitude - current.latitude) /
+                    (previous.latitude - current.latitude) + current.longitude
+                if point.longitude < crossingLongitude { inside.toggle() }
+            }
+            previous = current
+        }
+        return inside
+    }
+
+    private static func distanceStatuteMiles(
+        _ record: OperationalFacilityMapRecord,
+        coordinate: OperationalAirspaceCoordinate
+    ) -> Double? {
+        let longitudeMiles = 69.172 * cos(coordinate.latitude * .pi / 180)
+        var minimum: Double?
+        for ring in record.rings where ring.count >= 2 {
+            for index in ring.indices {
+                let start = ring[index]
+                let end = ring[(index + 1) % ring.count]
+                let ax = (start.longitude - coordinate.longitude) * longitudeMiles
+                let ay = (start.latitude - coordinate.latitude) * 69.0
+                let bx = (end.longitude - coordinate.longitude) * longitudeMiles
+                let by = (end.latitude - coordinate.latitude) * 69.0
+                let dx = bx - ax
+                let dy = by - ay
+                let denominator = dx * dx + dy * dy
+                let t = denominator == 0 ? 0 :
+                    max(0, min(1, -(ax * dx + ay * dy) / denominator))
+                let distance = hypot(ax + t * dx, ay + t * dy)
+                minimum = min(minimum ?? distance, distance)
+            }
+        }
+        return minimum
     }
 
     private static func shortAirportName(_ value: String) -> String {

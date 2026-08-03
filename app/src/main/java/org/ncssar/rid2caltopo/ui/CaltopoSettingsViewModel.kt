@@ -11,7 +11,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CApplication
+import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoCredentials
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
 import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
@@ -21,8 +23,14 @@ import org.ncssar.rid2caltopo.notam.NotamAuthManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
 class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListener {
+    private var isSaving = false
 
     // --- Live Data for UI --- //
+
+    private val _organizationName = MutableStateFlow(CaltopoClient.GetHomeOrgName())
+    val organizationName = _organizationName.asStateFlow()
+    private val _trackFolder = MutableStateFlow(CaltopoClient.GetTrackFolderName())
+    val trackFolder = _trackFolder.asStateFlow()
 
     private val _minDistance = MutableStateFlow(CaltopoClient.GetMinDistanceInFeet().toString())
     val minDistance = _minDistance.asStateFlow()
@@ -63,6 +71,32 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     private val _caltopoDomainAndPort = MutableStateFlow( CaltopoClient.GetCaltopoDomainAndPort())
     val caltopoUrl = _caltopoDomainAndPort.asStateFlow()
+    private val initialCaltopoCredentials = CaltopoClient.GetCaltopoCredentials()
+    private val _caltopoTeamId = MutableStateFlow(initialCaltopoCredentials.teamId ?: "")
+    val caltopoTeamId = _caltopoTeamId.asStateFlow()
+    private val _caltopoCredentialId = MutableStateFlow(initialCaltopoCredentials.credentialId ?: "")
+    val caltopoCredentialId = _caltopoCredentialId.asStateFlow()
+    private val _caltopoCredentialSecret = MutableStateFlow(initialCaltopoCredentials.credentialSecret ?: "")
+    val caltopoCredentialSecret = _caltopoCredentialSecret.asStateFlow()
+
+    private val _trackerUrl = MutableStateFlow(CaltopoClient.GetHomeTrackerUrlPfx())
+    val trackerUrl = _trackerUrl.asStateFlow()
+    private val _trackerApiKey = MutableStateFlow(CaltopoClient.GetHomeTrackerApiKey())
+    val trackerApiKey = _trackerApiKey.asStateFlow()
+    private var trackerManuallyEdited = false
+
+    private val _mutualAidTeamId = MutableStateFlow(CaltopoClient.GetMutualAidTemplateTeamId())
+    val mutualAidTeamId = _mutualAidTeamId.asStateFlow()
+    private val _mutualAidCredentialId = MutableStateFlow(CaltopoClient.GetMutualAidTemplateCredentialId())
+    val mutualAidCredentialId = _mutualAidCredentialId.asStateFlow()
+    private val _mutualAidCredentialSecret = MutableStateFlow(CaltopoClient.GetMutualAidTemplateCredentialSecret())
+    val mutualAidCredentialSecret = _mutualAidCredentialSecret.asStateFlow()
+    private val _mutualAidDomain = MutableStateFlow(CaltopoClient.GetMutualAidTemplateDomainAndPort())
+    val mutualAidDomain = _mutualAidDomain.asStateFlow()
+    private val _mutualAidSourceLabel = MutableStateFlow(CaltopoClient.GetMutualAidTemplateSourceLabel())
+    val mutualAidSourceLabel = _mutualAidSourceLabel.asStateFlow()
+    private val _mutualAidTargetFolder = MutableStateFlow(CaltopoClient.GetMutualAidTemplateTargetFolderHint())
+    val mutualAidTargetFolder = _mutualAidTargetFolder.asStateFlow()
 
     private val _notamEnabled = MutableStateFlow(CaltopoClient.GetNotamEnabled())
     val notamEnabled = _notamEnabled.asStateFlow()
@@ -111,6 +145,11 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     }
 
     override fun settingsChanged() {
+        if (isSaving) return
+        _organizationName.value = CaltopoClient.GetHomeOrgName()
+        _trackFolder.value = CaltopoClient.GetTrackFolderName()
+        _incident.value = CaltopoClient.GetIncident()
+        _opPeriod.value = CaltopoClient.GetOpPeriod()
         _usePeers.value = CaltopoClient.GetUsePeersFlag()
         _standaloneR2cCoordinationEnabled.value = CaltopoClient.GetStandaloneR2cCoordinationEnabled()
         _captureIncomingVideo.value = CaltopoClient.GetCaptureVideoStreamsFlag()
@@ -123,6 +162,19 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
         _maxIdleTimeInMinutes.value = CaltopoClient.GetMaxIdleTimeInMinutes().toString()
         _caltopoDomainAndPort.value = CaltopoClient.GetCaltopoDomainAndPort()
+        CaltopoClient.GetCaltopoCredentials().let {
+            _caltopoTeamId.value = it.teamId ?: ""
+            _caltopoCredentialId.value = it.credentialId ?: ""
+            _caltopoCredentialSecret.value = it.credentialSecret ?: ""
+        }
+        _trackerUrl.value = CaltopoClient.GetHomeTrackerUrlPfx()
+        _trackerApiKey.value = CaltopoClient.GetHomeTrackerApiKey()
+        _mutualAidTeamId.value = CaltopoClient.GetMutualAidTemplateTeamId()
+        _mutualAidCredentialId.value = CaltopoClient.GetMutualAidTemplateCredentialId()
+        _mutualAidCredentialSecret.value = CaltopoClient.GetMutualAidTemplateCredentialSecret()
+        _mutualAidDomain.value = CaltopoClient.GetMutualAidTemplateDomainAndPort()
+        _mutualAidSourceLabel.value = CaltopoClient.GetMutualAidTemplateSourceLabel()
+        _mutualAidTargetFolder.value = CaltopoClient.GetMutualAidTemplateTargetFolderHint()
         _notamEnabled.value = CaltopoClient.GetNotamEnabled()
         _notamRadiusNm.value = CaltopoClient.GetNotamRadiusNm().toString()
         _notamRefreshIntervalSeconds.value = CaltopoClient.GetNotamRefreshIntervalSeconds().toString()
@@ -147,6 +199,28 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onMinDistanceChanged(newMinDistance: String) {
         _minDistance.value = newMinDistance
     }
+
+    fun onOrganizationNameChanged(value: String) { _organizationName.value = value }
+    fun onTrackFolderChanged(value: String) { _trackFolder.value = value }
+    fun onIncidentChanged(value: String) { _incident.value = value }
+    fun onOpPeriodChanged(value: String) { _opPeriod.value = value }
+    fun onCaltopoTeamIdChanged(value: String) { _caltopoTeamId.value = value }
+    fun onCaltopoCredentialIdChanged(value: String) { _caltopoCredentialId.value = value }
+    fun onCaltopoCredentialSecretChanged(value: String) { _caltopoCredentialSecret.value = value }
+    fun onTrackerUrlChanged(value: String) {
+        _trackerUrl.value = value
+        trackerManuallyEdited = true
+    }
+    fun onTrackerApiKeyChanged(value: String) {
+        _trackerApiKey.value = value
+        trackerManuallyEdited = true
+    }
+    fun onMutualAidTeamIdChanged(value: String) { _mutualAidTeamId.value = value }
+    fun onMutualAidCredentialIdChanged(value: String) { _mutualAidCredentialId.value = value }
+    fun onMutualAidCredentialSecretChanged(value: String) { _mutualAidCredentialSecret.value = value }
+    fun onMutualAidDomainChanged(value: String) { _mutualAidDomain.value = value }
+    fun onMutualAidSourceLabelChanged(value: String) { _mutualAidSourceLabel.value = value }
+    fun onMutualAidTargetFolderChanged(value: String) { _mutualAidTargetFolder.value = value }
 
     fun onNewTrackDelayChanged(newDelay: String) {
         _newTrackDelay.value = newDelay
@@ -244,7 +318,36 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     }
 
     fun saveSettings() {
+        isSaving = true
+        try {
         val restartMediaMtx = CaltopoClient.GetCaptureVideoStreamsFlag() != _captureIncomingVideo.value
+        CaltopoClient.SetHomeOrgName(_organizationName.value.trim())
+        CaltopoClient.SetTrackFolderName(_trackFolder.value.trim())
+        CaltopoClient.SetIncident(_incident.value.trim())
+        CaltopoClient.SetOpPeriod(_opPeriod.value.trim())
+        CaltopoClient.SetCaltopoCredentials(
+            CaltopoCredentials(
+                _caltopoTeamId.value.trim(),
+                _caltopoCredentialId.value.trim(),
+                _caltopoCredentialSecret.value.trim()
+            )
+        )
+        if (trackerManuallyEdited) {
+            CaltopoClient.SetHomeTrackerCredentials(
+                _trackerUrl.value.trim(),
+                _trackerApiKey.value.trim()
+            )
+            CaltopoClient.SetTrackerFaaProxyUrl("")
+            trackerManuallyEdited = false
+        }
+        CaltopoClient.SetMutualAidTemplateFields(
+            _mutualAidTeamId.value.trim(),
+            _mutualAidCredentialId.value.trim(),
+            _mutualAidCredentialSecret.value.trim(),
+            _mutualAidDomain.value.trim().ifBlank { "caltopo.com" },
+            _mutualAidSourceLabel.value.trim(),
+            _mutualAidTargetFolder.value.trim().ifBlank { "MAI" }
+        )
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
         _newTrackDelay.value.toLongOrNull()?.let { CaltopoClient.SetNewTrackDelayInSeconds(it) }
         (_maxFlatlineToneDuration.value.toLongOrNull()
@@ -285,20 +388,26 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         }
         _notamStatus.value = buildNotamStatus()
         NotamCenter.requestImmediateRefresh()
+        AirspaceCenter.requestImmediateRefresh()
         LandRestrictionCenter.settingsChanged()
         if (restartMediaMtx) {
             R2CApplication.getAppCtxt()?.let { MediaMTXService.requestRestart(it) }
         }
+        } finally {
+            isSaving = false
+            settingsChanged()
+        }
     }
 
     private fun buildNotamStatus(): String {
-        val authConfigured = NotamAuthManager.isConfigured()
+        val proxyConfigured = NotamAuthManager.isConfigured()
         val enabled = CaltopoClient.GetNotamEnabled()
         val radius = CaltopoClient.GetNotamRadiusNm()
+        val radiusUnit = if (radius == 1) "statute mile" else "statute miles"
         return when {
             !enabled -> "Disabled"
-            authConfigured -> "Enabled, credentials loaded, ${radius} NM radius"
-            else -> "Enabled, waiting for FAA credentials, ${radius} NM radius"
+            proxyConfigured -> "Enabled, FAA proxy configured, $radius $radiusUnit radius"
+            else -> "Enabled, FAA proxy not configured; import the r2c-tracker organization QR, $radius $radiusUnit radius"
         }
     }
 }

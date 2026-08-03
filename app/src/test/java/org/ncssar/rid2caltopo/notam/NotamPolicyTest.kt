@@ -9,6 +9,26 @@ import org.junit.Test
 
 class NotamPolicyTest {
     @Test
+    fun toolbarUsesBriefAirspaceLabelWhileStateRetainsAirportDetails() {
+        assertEquals(
+            "Authorization required",
+            conciseSafetyStatusLabel(
+                useAirspaceLabel = true,
+                severity = NotamChipSeverity.Danger,
+                detailedLabel = "Airspace: Authorization required - KBOI Class C 100 ft grid"
+            )
+        )
+        assertEquals(
+            "Airspace nearby",
+            conciseSafetyStatusLabel(
+                useAirspaceLabel = true,
+                severity = NotamChipSeverity.Caution,
+                detailedLabel = "Airspace nearby - Gowen Field Class C 0.4 mi"
+            )
+        )
+    }
+
+    @Test
     fun pendingAirspaceStatusOverridesClearNotamLabel() {
         assertTrue(
             shouldUseAirspaceStatus(
@@ -19,6 +39,19 @@ class NotamPolicyTest {
                 )
             )
         )
+        assertFalse(
+            shouldUseAirspaceStatus(
+                notamVisible = true,
+                airspaceState = AirspaceUiState(
+                    chipSeverity = AirspaceChipSeverity.Normal,
+                    chipLabel = "Airspace clear"
+                )
+            )
+        )
+    }
+
+    @Test
+    fun normalAirspaceDoesNotMaskVisibleDisabledNotamStatus() {
         assertFalse(
             shouldUseAirspaceStatus(
                 notamVisible = true,
@@ -50,7 +83,7 @@ class NotamPolicyTest {
             )
         )
         assertEquals(
-            "NOTAMs: NOTICE 0.0 NM",
+            "NOTAMs: NOTICE 0.0 mi",
             NotamPolicy.chipLabel(
                 notices = listOf(notice),
                 configured = true,
@@ -80,7 +113,7 @@ class NotamPolicyTest {
             )
         )
         assertEquals(
-            "NOTAMs: RESTRICTED 0.0 NM",
+            "NOTAMs: RESTRICTED 0.0 mi",
             NotamPolicy.chipLabel(
                 notices = listOf(notice),
                 configured = true,
@@ -88,5 +121,43 @@ class NotamPolicyTest {
                 hasError = false
             )
         )
+    }
+
+    @Test
+    fun hiddenAirspaceDoesNotOverrideDisabledNotamStatus() {
+        assertFalse(
+            shouldUseAirspaceStatus(
+                notamVisible = true,
+                airspaceState = AirspaceUiState(
+                    visible = false,
+                    chipSeverity = AirspaceChipSeverity.Danger,
+                    chipLabel = "Airspace warning"
+                )
+            )
+        )
+    }
+
+    @Test
+    fun oneStatuteMileRadiusDoesNotIncludeOneNauticalMileNotice() {
+        val inside = NearbyNotam(
+            id = "inside",
+            title = "Inside",
+            summary = "",
+            distanceNm = 0.86
+        )
+        val outside = NearbyNotam(
+            id = "outside",
+            title = "Outside",
+            summary = "",
+            distanceNm = 1.0
+        )
+
+        val (visible, suppressed) = NotamPolicy.filterWithinRadius(
+            notices = listOf(inside, outside),
+            radiusStatuteMiles = 1
+        )
+
+        assertEquals(listOf(inside), visible)
+        assertEquals(1, suppressed)
     }
 }

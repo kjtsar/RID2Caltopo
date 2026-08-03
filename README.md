@@ -114,19 +114,16 @@ are configured, RID2Caltopo will use tracker-backed multi-zone coordination.
 If they are omitted, the app falls back to MQTT-based peer coordination. The
 legacy `tracker_url_pfx` key is still accepted for backward compatibility.
 
-The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the Caltopo Teams
-APIs credentials.  These are the only required fields for this file.    The _map_id_, 
-_group_id_, and _use_direct_flag_ may all be configured separately in the apps Settings 
-menu. The _map_id_ specifies the caltopo map while the _group_id_ paired with the drone's
-RemoteId are used to report the drone's Live Track.  I recommend putting the ridmap.json and
-credentials.json files in your google drive account and sharing with team members as needed.
-You'll need to load the files once when you first start the app and the information is 
-encrypted and stored locally in your account afterwards.  In the app, select the hamburger
-menu and "Load Config File", then select the left-hand hamburger menu in the file selection
+The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the
+CalTopo Teams API credential. Map selection remains in each app.
 
-These tracker settings also flow through shared org config and Mutual Aid profile
-payloads so multi-agency searches can coordinate against the same tracker service
-when the participating organizations choose to use it.
+Managed organizations no longer need to distribute `ridmap.json` or
+`credentials.json`. An organization administrator creates an enrollment QR on
+`r2c-tracker.com`; Android or iOS scans it and exchanges its limited-use locator
+for a revocable device credential. Tracker secrets are not embedded in the QR.
+Organization and RID mappings are edited directly under Settings →
+Organization & RID mappings and persisted in app-private storage. Legacy JSON
+and R2C1 imports remain only as a migration path for existing installations.
 
 ## ct_mutual_aid_credentials
 If you can enlist the help of your Caltopo Teams Admin, have them create a subteam account 
@@ -240,8 +237,9 @@ Target Colors, realtime scheduling, and qualification, see
 
 ## MediaMTX
 The latest version of this app bundles a version of the MediaMTX 1.16.2 server that has been tailored
-to pamper to the sensitivities of the various DJI and Autel drone controllers and to support low latency
-playback.  Please contact me <kjtsar@kjt.us> to get a copy of the changes or the mediamtx executable.
+to the sensitivities of various DJI and Autel drone controllers and to support low-latency playback.
+RID2Caltopo stores only the source patches and reproducible build instructions under
+[`third_party/mediamtx`](third_party/mediamtx); generated executables are intentionally excluded from Git.
 MediaMTX remains licensed under its MIT license; see
 [Third-Party Software Notices](THIRD_PARTY_NOTICES.md).
 

@@ -60,6 +60,7 @@ public actor OpenDroneIDTrackAssembler {
             heightReference: location.heightMeters > -999
                 ? (location.heightType == 0 ? .takeoff : .ground)
                 : nil,
+            horizontalAccuracyCode: location.horizontalAccuracyCode,
             headingDegrees: location.directionDegrees,
             speedMetersPerSecond: location.horizontalSpeedMetersPerSecond,
             operatorLatitude: state.system?.operatorLatitude,

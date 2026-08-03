@@ -259,7 +259,7 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                             "distanceFt=${"%.1f".format(distanceFt)} signalIdleMs=$signalIdleMs " +
                             "thresholdMs=$effectiveIdleThresholdMs " +
                             "takeoffDistanceFt=${takeoffDistanceFt?.let { "%.1f".format(it) } ?: "unknown"} " +
-                            "oorTrackDelayMs=${CaltopoClient.OUT_OF_RANGE_TRACK_DELAY_SECONDS * 1000L}"
+                            "trackAgeOutMs=$newTrackDelayMs"
                     )
                     spec.setOutOfRange(true)
                     CaltopoClient.InvalidateTrackAgingSchedule()

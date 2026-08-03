@@ -86,7 +86,7 @@ internal fun MapPaneMutualAidDialogs(
                         fontSize = 12.sp
                     )
                     Spacer(Modifier.height(12.dp))
-                    Text("Source org: ${sourceLabel.ifBlank { "Not configured in ct_mutual_aid_credentials" }}")
+                    Text("Source org: ${sourceLabel.ifBlank { "Not configured in Settings" }}")
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = displayName,

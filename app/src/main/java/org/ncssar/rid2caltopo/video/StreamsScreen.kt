@@ -9,6 +9,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -38,6 +39,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
@@ -64,6 +67,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -75,6 +79,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContract
@@ -275,6 +280,12 @@ fun StreamsScreen(
     showNavigation: Boolean = true,
     externalContentMode: ExternalDisplayContentMode? = null,
     allowModalDialogs: Boolean = true,
+    remoteVideoStatus: String? = null,
+    remoteVideoActive: Boolean = false,
+    remoteVideoMicrophoneEnabled: Boolean = false,
+    remoteVideoMicrophoneError: String? = null,
+    onToggleRemoteVideoMicrophone: () -> Unit = {},
+    onTerminateRemoteVideo: () -> Unit = {},
 ) {
     val currentOnBack = rememberUpdatedState(onBack)
     val releaseStreamsUiConsumer = remember(viewModel) {
@@ -323,6 +334,10 @@ fun StreamsScreen(
     val overLimitDrones by viewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
+    var confirmRemoteVideoTermination by remember { mutableStateOf(false) }
+    LaunchedEffect(remoteVideoActive) {
+        if (!remoteVideoActive) confirmRemoteVideoTermination = false
+    }
     val persistedLayoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
     val streamPipUiState = viewModel.streamPipUiState
     val layoutMode = when (externalContentMode) {
@@ -360,7 +375,9 @@ fun StreamsScreen(
                     },
                     title = {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             NotamStatusChip(
@@ -391,11 +408,7 @@ fun StreamsScreen(
                                     .widthIn(max = 220.dp)
                                     .height(36.dp)
                             )
-                            Spacer(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp)
-                            )
+                            Spacer(Modifier.width(8.dp))
                         }
                     },
                     navigationIcon = if (showNavigation) {
@@ -458,6 +471,99 @@ fun StreamsScreen(
                             }
                         }
                     }
+                )
+            }
+            if (!remoteVideoStatus.isNullOrBlank()) {
+                Surface(
+                    color = if (remoteVideoActive) Color(0xFFE8F5E9) else Color(0xFFFFF3E0),
+                    contentColor = Color(0xFF1F2937),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = remoteVideoMicrophoneError?.takeIf { it.isNotBlank() }
+                                ?: remoteVideoStatus,
+                            modifier = Modifier.weight(1f),
+                            color = if (!remoteVideoMicrophoneError.isNullOrBlank()) {
+                                Color(0xFFB3261E)
+                            } else {
+                                Color(0xFF1F2937)
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (remoteVideoActive) {
+                            IconButton(onClick = onToggleRemoteVideoMicrophone) {
+                                Box(
+                                    modifier = Modifier.width(42.dp).height(42.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Mic,
+                                        contentDescription = if (remoteVideoMicrophoneEnabled) {
+                                            "Turn microphone off"
+                                        } else {
+                                            "Turn microphone on"
+                                        },
+                                    )
+                                    if (remoteVideoMicrophoneEnabled) {
+                                        Icon(
+                                            imageVector = Icons.Default.Campaign,
+                                            contentDescription = null,
+                                            tint = Color(0xFF1B8F3A),
+                                            modifier = Modifier.width(18.dp).height(18.dp)
+                                                .offset(x = 14.dp, y = (-12).dp),
+                                        )
+                                    } else {
+                                        Canvas(modifier = Modifier.width(32.dp).height(32.dp)) {
+                                            drawLine(
+                                                color = Color.Red,
+                                                start = Offset(3f, size.height - 3f),
+                                                end = Offset(size.width - 3f, 3f),
+                                                strokeWidth = 4f,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            TextButton(onClick = { confirmRemoteVideoTermination = true }) {
+                                Text("Terminate")
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (confirmRemoteVideoTermination && remoteVideoActive) {
+                AlertDialog(
+                    onDismissRequest = { confirmRemoteVideoTermination = false },
+                    title = { Text("Terminate remote video?") },
+                    text = {
+                        Text("The current viewer will immediately lose video and audio.")
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                confirmRemoteVideoTermination = false
+                                onTerminateRemoteVideo()
+                            },
+                        ) {
+                            Text("Terminate")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { confirmRemoteVideoTermination = false }) {
+                            Text("Cancel")
+                        }
+                    },
                 )
             }
 

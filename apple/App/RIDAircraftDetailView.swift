@@ -230,7 +230,8 @@ final class AppleDroneConfirmationStore: ObservableObject {
             let identity = RidAircraftIdentity(
                 remoteID: remoteID,
                 organization: entry["organization"] ?? "",
-                pilotCallsign: Self.importedPilotCallsign(
+                ownerName: entry["ownerName"] ?? entry["owner"] ?? "",
+                pilotCallsign: entry["ownerCallsign"] ?? Self.importedPilotCallsign(
                     mappedID: entry["mappedID"] ?? "",
                     model: entry["model"] ?? "",
                     remoteID: remoteID
@@ -302,6 +303,7 @@ final class AppleDroneConfirmationStore: ObservableObject {
                 RidAircraftIdentity(
                     remoteID: mapping.remoteID,
                     organization: mapping.organization,
+                    ownerName: mapping.owner,
                     pilotCallsign: Self.importedPilotCallsign(
                         mappedID: mapping.mappedID,
                         model: mapping.model,
@@ -319,15 +321,40 @@ final class AppleDroneConfirmationStore: ObservableObject {
                 "organization": mapping.organization,
                 "model": mapping.model,
                 "owner": mapping.owner,
+                "ownerName": mapping.owner,
+                "ownerCallsign": Self.importedPilotCallsign(
+                    mappedID: mapping.mappedID,
+                    model: mapping.model,
+                    remoteID: mapping.remoteID
+                ),
             ]
         }
         defaults.set(persisted, forKey: "org.ridMappings")
+    }
+
+    func replacePersistedMappings(_ mappings: [RidAircraftIdentity]) {
+        importedIdentities = Dictionary(uniqueKeysWithValues: mappings.map { ($0.remoteID, $0) })
+        defaults.set(
+            mappings.map { identity in
+                [
+                    "remoteID": identity.remoteID,
+                    "mappedID": identity.mappedID,
+                    "organization": identity.organization,
+                    "model": identity.droneDescription,
+                    "owner": identity.ownerName,
+                    "ownerName": identity.ownerName,
+                    "ownerCallsign": identity.pilotCallsign,
+                ]
+            },
+            forKey: "org.ridMappings"
+        )
     }
 
     func applyPeerConfirmation(_ identity: TrackerCoordinationIdentity) {
         peerIdentities[identity.remoteID] = RidAircraftIdentity(
             remoteID: identity.remoteID,
             organization: identity.organization,
+            ownerName: identity.ownerName,
             pilotCallsign: identity.ownerName,
             droneDescription: identity.model,
             mappedIDOverride: identity.mappedID

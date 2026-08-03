@@ -32,6 +32,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -43,11 +46,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.savedstate.SavedStateRegistryOwner
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
@@ -76,6 +81,10 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.R2CMqttManager
+import org.ncssar.rid2caltopo.data.PeerCoordinator
+import org.ncssar.rid2caltopo.data.VideoStreamViewRequest
+import org.ncssar.rid2caltopo.data.VideoMediaOffer
+import org.ncssar.rid2caltopo.data.ManagedVideoMediaPeer
 import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
 import org.ncssar.rid2caltopo.notam.NotamCenter
@@ -93,8 +102,13 @@ import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
 import org.ncssar.rid2caltopo.ui.SpokenWarningAlertHost
+import org.ncssar.rid2caltopo.ui.SpokenWarningCenter
+import org.ncssar.rid2caltopo.ui.SpokenWarningKind
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.video.StreamsScreen
+import org.ncssar.rid2caltopo.video.ManagedVideoStreamPresence
+import org.ncssar.rid2caltopo.video.nominalManagedVideoSourceFps
+import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner
 import java.io.File
@@ -105,6 +119,9 @@ import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val EXTRA_OPEN_STREAMS_QUALIFICATION =
@@ -159,6 +176,210 @@ private fun BluetoothDisabledDialog(
     )
 }
 
+@Composable
+private fun VideoStreamRequestDialog(
+    request: VideoStreamViewRequest,
+    preflightRouteKind: String?,
+    estimatedUplinkBps: Long?,
+    preflightFailure: String?,
+    onApprove: (VideoQualityChoice) -> Unit,
+    onDecline: () -> Unit,
+) {
+    val sourceDescription = if (request.sourceWidth > 0 && request.sourceHeight > 0) {
+        val displayedSourceFps = nominalManagedVideoSourceFps(request.sourceFps)
+        buildString {
+            append("${request.sourceWidth}×${request.sourceHeight}")
+            if (displayedSourceFps > 0.0) {
+                append(" at ${String.format(Locale.US, "%.1f", displayedSourceFps)} fps")
+            }
+            if (request.sourceBitrateBps > 0L) {
+                append(
+                    ", ${String.format(
+                        Locale.US,
+                        "%.1f",
+                        request.sourceBitrateBps / 1_000_000.0,
+                    )} Mbps"
+                )
+            }
+        }
+    } else {
+        "Source details pending"
+    }
+    val qualityChoices = videoQualityChoices(request, estimatedUplinkBps)
+    val emergencyFallback = qualityChoices.firstOrNull {
+        it.capacity == LinkCapacity.FALLBACK
+    }
+    var selectedChoice by remember(request.requestId, estimatedUplinkBps) {
+        mutableStateOf(qualityChoices.firstOrNull { it.capacity != LinkCapacity.INSUFFICIENT })
+    }
+    AlertDialog(
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+        title = { Text("Video Stream Request") },
+        text = {
+            Column(modifier = androidx.compose.ui.Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "From ${request.requesterEmail}\n\n" +
+                    "Incident: ${request.incidentName.ifBlank { "Not specified" }}\n" +
+                "Drone: ${request.droneDesignator.ifBlank { "Not specified" }}\n" +
+                    "Source: $sourceDescription\n\n" +
+                    when {
+                        !preflightFailure.isNullOrBlank() ->
+                            "Link test unavailable: $preflightFailure\n\n" +
+                                "Remote video remains off."
+                        !preflightRouteKind.isNullOrBlank() &&
+                            estimatedUplinkBps != null &&
+                            estimatedUplinkBps > 0L ->
+                            "${preflightRouteKind.replaceFirstChar { it.uppercase() }} " +
+                                "link: ${String.format(
+                                    Locale.US,
+                                    "%.1f",
+                                    estimatedUplinkBps / 1_000_000.0,
+                                )} Mbps usable.\n\n" +
+                                "Remote video remains off. Choose a complete quality preset, " +
+                                "then explicitly select Start."
+                        else ->
+                            "Measuring the routed browser-to-tablet link. " +
+                                "Remote video remains off."
+                    }
+                )
+                if (!preflightRouteKind.isNullOrBlank()) {
+                    if (emergencyFallback != null) {
+                        Text(
+                            "The measurement is below every normal profile. " +
+                                "The smallest stream is available as a cautious fallback.",
+                            color = LinkCapacity.FALLBACK.color,
+                        )
+                    }
+                    qualityChoices.forEach { choice ->
+                        TextButton(onClick = { selectedChoice = choice }) {
+                            Text(
+                                (if (selectedChoice == choice) "✓ " else "") + choice.label,
+                                color = choice.capacity.color,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !preflightRouteKind.isNullOrBlank() &&
+                    selectedChoice != null &&
+                    selectedChoice?.capacity != LinkCapacity.INSUFFICIENT,
+                onClick = { selectedChoice?.let(onApprove) },
+            ) {
+                Text("Start")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) { Text("Decline") }
+        },
+    )
+}
+
+internal enum class LinkCapacity(val color: Color) {
+    ENOUGH(Color(0xFF2E7D32)),
+    MARGINAL(Color(0xFFB26A00)),
+    FALLBACK(Color(0xFFB26A00)),
+    INSUFFICIENT(Color(0xFFC62828)),
+}
+
+internal data class VideoQualityChoice(
+    val preset: String,
+    val label: String,
+    val width: Int,
+    val height: Int,
+    val fps: Double,
+    val bitrateBps: Long,
+    val capacity: LinkCapacity,
+)
+
+internal fun videoQualityChoices(
+    request: VideoStreamViewRequest,
+    usableUplinkBps: Long?,
+): List<VideoQualityChoice> {
+    val sourceWidth = request.sourceWidth.takeIf { it > 0 } ?: 1280
+    val sourceHeight = request.sourceHeight.takeIf { it > 0 } ?: 720
+    val sourceFps = nominalManagedVideoSourceFps(request.sourceFps).takeIf { it > 0.0 } ?: 30.0
+    val sourceLongEdge = maxOf(sourceWidth, sourceHeight)
+    data class Preset(val name: String, val longEdge: Int, val fps: Double, val bitrate: Long)
+    val presets = listOf(
+        Preset("High", 1280, 30.0, 2_500_000L),
+        Preset("Balanced", 960, 15.0, 1_200_000L),
+        Preset("Low", 640, 10.0, 500_000L),
+        Preset("Emergency", 640, 5.0, 200_000L),
+    )
+    val usable = usableUplinkBps ?: 0L
+    val choices = presets.map { preset ->
+        val targetLongEdge = minOf(sourceLongEdge, preset.longEdge)
+        val scale = targetLongEdge.toDouble() / sourceLongEdge
+        val width = ((sourceWidth * scale).toInt().coerceAtLeast(2)) and -2
+        val height = ((sourceHeight * scale).toInt().coerceAtLeast(2)) and -2
+        val fps = minOf(sourceFps, preset.fps)
+        val referencePixels = preset.longEdge.toDouble() * preset.longEdge *
+            minOf(sourceWidth, sourceHeight) / sourceLongEdge.toDouble()
+        val pixelScale = minOf(1.0, width.toDouble() * height / maxOf(1.0, referencePixels))
+        val rateScale = minOf(1.0, fps / preset.fps)
+        val minimumBitrate = if (preset.name == "Emergency") 100_000L else 150_000L
+        val bitrate = (preset.bitrate * pixelScale * rateScale).toLong()
+            .coerceIn(minimumBitrate, preset.bitrate)
+        val capacity = when {
+            usable * 100 >= bitrate * 135 -> LinkCapacity.ENOUGH
+            usable >= bitrate -> LinkCapacity.MARGINAL
+            else -> LinkCapacity.INSUFFICIENT
+        }
+        val assessment = when (capacity) {
+            LinkCapacity.ENOUGH -> "enough bandwidth"
+            LinkCapacity.MARGINAL -> "marginal"
+            LinkCapacity.FALLBACK -> "fallback"
+            LinkCapacity.INSUFFICIENT -> "insufficient"
+        }
+        VideoQualityChoice(
+            preset = preset.name,
+            label = "${preset.name} • ${width}×${height} • ${String.format(Locale.US, "%.1f", fps)} fps • " +
+                "est. ${String.format(Locale.US, "%.1f", bitrate / 1_000_000.0)} Mbps • $assessment",
+            width = width,
+            height = height,
+            fps = fps,
+            bitrateBps = bitrate,
+            capacity = capacity,
+        )
+    }
+    if (choices.any { it.capacity != LinkCapacity.INSUFFICIENT }) return choices
+    val fallback = choices.minWithOrNull(
+        compareBy<VideoQualityChoice>(
+            { it.bitrateBps },
+            { maxOf(it.width, it.height) },
+            { it.fps },
+        )
+    ) ?: return choices
+    return choices.map { choice ->
+        if (choice != fallback) choice else choice.copy(
+            label = choice.label.replace(
+                "insufficient",
+                "fallback — try lowest quality",
+            ),
+            capacity = LinkCapacity.FALLBACK,
+        )
+    }
+}
+
+private data class ApprovedVideoSelection(
+    val request: VideoStreamViewRequest,
+    val quality: VideoQualityChoice,
+)
+
+private fun formatManagedVideoBytes(bytes: Long): String = when {
+    bytes >= 1_000_000_000L -> String.format(Locale.US, "%.1f GB", bytes / 1_000_000_000.0)
+    bytes >= 1_000_000L -> String.format(Locale.US, "%.1f MB", bytes / 1_000_000.0)
+    bytes >= 1_000L -> String.format(Locale.US, "%.1f KB", bytes / 1_000.0)
+    else -> "$bytes B"
+}
+
 data class LogArchiveDayOption(
     val directoryName: String,
     val logFileCount: Int,
@@ -166,7 +387,10 @@ data class LogArchiveDayOption(
     val isToday: Boolean,
 )
 
-class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener  {
+class R2CActivity :
+    AppCompatActivity(),
+    R2CMqttManager.PeerListChangedListener,
+    PeerCoordinator.VideoStreamRequestListener {
     var locationRequest: LocationRequest? = null
     var locationCallback: LocationCallback? = null
     var mFusedLocationClient: FusedLocationProviderClient? = null
@@ -178,6 +402,21 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     private var externalDisplayPresentation: ExternalDisplayPresentation? = null
     private var displayManager: DisplayManager? = null
     private var bluetoothDisabled by mutableStateOf(false)
+    private var pendingVideoStreamRequest by mutableStateOf<VideoStreamViewRequest?>(null)
+    private var pendingVideoPreflightRouteKind by mutableStateOf<String?>(null)
+    private var pendingVideoPreflightBps by mutableStateOf<Long?>(null)
+    private var pendingVideoPreflightFailure by mutableStateOf<String?>(null)
+    private val approvedVideoSelections = linkedMapOf<String, ApprovedVideoSelection>()
+    private var managedVideoMediaPeer: ManagedVideoMediaPeer? = null
+    private var activeRemoteVideoRequest by mutableStateOf<VideoStreamViewRequest?>(null)
+    private var activeRemoteVideoSelection: ApprovedVideoSelection? = null
+    private var activeRemoteVideoOfferSdp: String? = null
+    private var activeRemoteVideoMetrics by mutableStateOf<ManagedVideoMediaPeer.Metrics?>(null)
+    private var activeRemoteVideoFailure by mutableStateOf<String?>(null)
+    private var activeRemoteVideoMicrophoneEnabled by mutableStateOf(false)
+    private var activeRemoteVideoMicrophoneError by mutableStateOf<String?>(null)
+    private var managedVideoSourceRecoveryJob: Job? = null
+    private var pendingManagedVideoMicrophoneEnable = false
     private var bluetoothStateReceiverRegistered = false
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -393,7 +632,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 val token = OrgConfigToken.MAGIC_PREFIX + uri.toString().removePrefix("r2c1://")
                 CTDebug(TAG, "handleR2cIntent(): joining org from scanned QR")
                 OrgConfigManager.joinFromToken(this, token) { _, message ->
-                    showToast(message)
+                    Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
                 }
             }
             "r2cma1" -> {
@@ -463,6 +702,8 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         }
         AppActivity = this
         R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.setPeerListChangedListener(this)
+        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+            .setVideoStreamRequestListener(this)
         localViewModel = ViewModelProvider(
             this,
             R2CViewModelFactory(
@@ -515,6 +756,37 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         confirmationToneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 300)
                     }
                 }
+                LaunchedEffect(Unit) {
+                    StreamRegistry.streams.collect { streams ->
+                        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                            .updateManagedVideoStreams(
+                                CaltopoClient.GetIncident(),
+                                ManagedVideoStreamPresence.snapshot(
+                                    streams,
+                                    streamsViewModel::managedVideoSourceInfo,
+                                    streamsViewModel::hasRecentManagedVideoFrame,
+                                ),
+                            )
+                        maintainManagedVideoSource(streams)
+                        while (StreamRegistry.streams.value.values.any {
+                                it.state == org.ncssar.rid2caltopo.video.StreamState.LIVE &&
+                                    !it.isLocalPlayback
+                            }) {
+                            delay(2_000L)
+                            val refreshedStreams = StreamRegistry.streams.value
+                            maintainManagedVideoSource(refreshedStreams)
+                            R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                                .updateManagedVideoStreams(
+                                    CaltopoClient.GetIncident(),
+                                    ManagedVideoStreamPresence.snapshot(
+                                        refreshedStreams,
+                                        streamsViewModel::managedVideoSourceInfo,
+                                        streamsViewModel::hasRecentManagedVideoFrame,
+                                    ),
+                                )
+                        }
+                    }
+                }
                 when (activeScreen) {
                     ActiveScreen.MAIN -> {
                         MainScreen(
@@ -551,7 +823,33 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         StreamsScreen(
                             onBack = { localViewModel.showMain() },
                             onMapStatusTap = { localViewModel.openConnectionOverlayFromCurrentScreen() },
-                            viewModel = streamsViewModel
+                            viewModel = streamsViewModel,
+                            remoteVideoStatus = activeRemoteVideoRequest?.let { request ->
+                                val metrics = activeRemoteVideoMetrics
+                                buildString {
+                                    append("Remote viewing: ${request.requesterEmail}")
+                                    if (metrics != null) {
+                                        append(" • ${metrics.routeKind.replaceFirstChar { it.uppercase() }}")
+                                        append(" • ${formatManagedVideoBytes(metrics.bytesSent)} sent")
+                                        if (metrics.width > 0 && metrics.height > 0) {
+                                            append(" • ${metrics.width}×${metrics.height}")
+                                        }
+                                        if (metrics.framesPerSecond > 0.0) {
+                                            append(" • ${String.format(Locale.US, "%.1f", metrics.framesPerSecond)} fps")
+                                        }
+                                        if (metrics.bitrateBps > 0L) {
+                                            append(" • ${String.format(Locale.US, "%.1f", metrics.bitrateBps / 1_000_000.0)} Mbps actual")
+                                        }
+                                    } else {
+                                        append(" • Connecting")
+                                    }
+                                }
+                            } ?: activeRemoteVideoFailure,
+                            remoteVideoActive = activeRemoteVideoRequest != null,
+                            remoteVideoMicrophoneEnabled = activeRemoteVideoMicrophoneEnabled,
+                            remoteVideoMicrophoneError = activeRemoteVideoMicrophoneError,
+                            onToggleRemoteVideoMicrophone = { toggleManagedVideoMicrophone() },
+                            onTerminateRemoteVideo = { terminateManagedVideo() },
                         )
                     }
                 }
@@ -595,6 +893,41 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 DroneSignalLossAlertHost()
                 ControllerSignalStrengthAlertHost()
                 SpokenWarningAlertHost()
+                pendingVideoStreamRequest?.let { request ->
+                    VideoStreamRequestDialog(
+                        request = request,
+                        preflightRouteKind = pendingVideoPreflightRouteKind,
+                        estimatedUplinkBps = pendingVideoPreflightBps,
+                        preflightFailure = pendingVideoPreflightFailure,
+                        onApprove = { choice ->
+                            approvedVideoSelections[request.requestId] =
+                                ApprovedVideoSelection(request, choice)
+                            R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                                .respondToVideoStreamRequest(
+                                    request.requestId,
+                                    true,
+                                    choice.width,
+                                    choice.height,
+                                    choice.fps,
+                                    choice.bitrateBps,
+                                )
+                            pendingVideoStreamRequest = null
+                            pendingVideoPreflightRouteKind = null
+                            pendingVideoPreflightBps = null
+                            pendingVideoPreflightFailure = null
+                        },
+                        onDecline = {
+                            R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                                .respondToVideoStreamRequest(
+                                    request.requestId, false, 0, 0, 0.0, 0L,
+                                )
+                            pendingVideoStreamRequest = null
+                            pendingVideoPreflightRouteKind = null
+                            pendingVideoPreflightBps = null
+                            pendingVideoPreflightFailure = null
+                        },
+                    )
+                }
                 if (maPackageImportState !is org.ncssar.rid2caltopo.data.MutualAidPackageImportState.Idle) {
                     MutualAidPackageImportDialog(
                         state = maPackageImportState,
@@ -856,6 +1189,17 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         CTDebug(TAG,String.format(Locale.US,
             "onRequestPermissionsResult(%d)", requestCode))
         super.onRequestPermissionsResult(requestCode, permissions as Array<out String>, grantResults)
+        if (requestCode == REQUEST_MANAGED_VIDEO_MICROPHONE) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            pendingManagedVideoMicrophoneEnable = false
+            if (granted) {
+                managedVideoMediaPeer?.setMicrophoneEnabled(true)
+            } else {
+                activeRemoteVideoMicrophoneEnabled = false
+                activeRemoteVideoMicrophoneError = "Microphone permission denied"
+            }
+            return
+        }
         if (requestCode == Constants.REQUEST_BULK_PERMISSIONS) {
             for (i in permissions.indices) {
                 outstandingPermissionsList.remove(permissions[i])
@@ -1017,6 +1361,9 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     }
 
     public override fun onDestroy() {
+        managedVideoMediaPeer?.close()
+        managedVideoMediaPeer = null
+        setVolumeControlStream(AudioManager.STREAM_ALARM)
         unregisterBluetoothStateReceiver()
         displayManager?.unregisterDisplayListener(displayListener)
         dismissExternalDisplay(returnPhoneToMain = false)
@@ -1027,6 +1374,8 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
             try {
                 stopLocationUpdates()
                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.setPeerListChangedListener(null)
+                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                    .setVideoStreamRequestListener(null)
                 CTDebug(TAG,"onDestroy() shutting down streaming service..." )
                 MediaMTXService.requestStop(this)
                 CTDebug(TAG,"onDestroy() shutting down scanning service..." )
@@ -1066,8 +1415,270 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         super.onDestroy()
     }
 
+    override fun onVideoStreamRequest(request: VideoStreamViewRequest) {
+        runOnUiThread {
+            pendingVideoStreamRequest = request
+            pendingVideoPreflightRouteKind = null
+            pendingVideoPreflightBps = null
+            pendingVideoPreflightFailure = null
+            SpokenWarningCenter.requestSpokenPhrase(
+                kind = SpokenWarningKind.VideoStreamRequest,
+                sourceKey = request.requestId,
+                phrase = "Video Stream Request from ${request.requesterEmail}",
+            )
+        }
+    }
+
+    override fun onVideoPreflightResult(
+        requestId: String,
+        routeKind: String,
+        estimatedUplinkBps: Long,
+    ) {
+        runOnUiThread {
+            if (pendingVideoStreamRequest?.requestId == requestId) {
+                pendingVideoPreflightRouteKind = routeKind
+                pendingVideoPreflightBps = estimatedUplinkBps
+                pendingVideoPreflightFailure = null
+            }
+        }
+    }
+
+    override fun onVideoPreflightFailure(requestId: String, reason: String) {
+        runOnUiThread {
+            if (pendingVideoStreamRequest?.requestId == requestId) {
+                pendingVideoPreflightFailure = reason
+            }
+        }
+    }
+
+    override fun onVideoStreamRequestCancelled(requestId: String) {
+        runOnUiThread {
+            if (pendingVideoStreamRequest?.requestId == requestId) {
+                pendingVideoStreamRequest = null
+                pendingVideoPreflightRouteKind = null
+                pendingVideoPreflightBps = null
+                pendingVideoPreflightFailure = null
+            }
+            approvedVideoSelections.remove(requestId)
+            if (activeRemoteVideoRequest?.requestId == requestId) {
+                managedVideoMediaPeer?.close()
+                managedVideoMediaPeer = null
+                setVolumeControlStream(AudioManager.STREAM_ALARM)
+                activeRemoteVideoRequest = null
+                activeRemoteVideoSelection = null
+                activeRemoteVideoOfferSdp = null
+                activeRemoteVideoMetrics = null
+            }
+        }
+    }
+
+    override fun onVideoMediaOffer(offer: VideoMediaOffer) {
+        runOnUiThread {
+            val activeSelection = activeRemoteVideoSelection
+                ?.takeIf { it.request.requestId == offer.requestId }
+            if (activeSelection != null && activeRemoteVideoOfferSdp == offer.sdp) {
+                CaltopoClient.CTDebug(
+                    "ManagedVideoMedia",
+                    "Ignoring replayed media offer for active request=${offer.requestId}",
+                )
+                return@runOnUiThread
+            }
+            // Keep the pilot's approval until an answer is actually ready.
+            // The tracker can replay the same pending offer through its direct,
+            // notification, and reconnect paths; consuming approval on receipt
+            // lets a later replay incorrectly terminate a legitimate attempt.
+            val approved = approvedVideoSelections[offer.requestId] ?: activeSelection
+            if (approved == null) {
+                CaltopoClient.CTWarn(
+                    "ManagedVideoMedia",
+                    "Ignoring media offer without pilot approval request=${offer.requestId}",
+                )
+                return@runOnUiThread
+            }
+            if (activeSelection != null) {
+                CaltopoClient.CTDebug(
+                    "ManagedVideoMedia",
+                    "Replacing media peer after browser reconnect request=${offer.requestId}",
+                )
+            }
+            val sessionId = streamsViewModel.managedVideoRenderSessionId(
+                approved.request.droneDesignator,
+            )
+            if (sessionId == null) {
+                approvedVideoSelections.remove(offer.requestId)
+                activeRemoteVideoFailure = "Remote video could not start: drone source unavailable."
+                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                    .sendVideoStreamTerminated(offer.requestId, "Drone source unavailable")
+                return@runOnUiThread
+            }
+            managedVideoMediaPeer?.close()
+            activeRemoteVideoMetrics = null
+            activeRemoteVideoFailure = null
+            activeRemoteVideoMicrophoneEnabled = false
+            activeRemoteVideoMicrophoneError = null
+            activeRemoteVideoRequest = approved.request
+            activeRemoteVideoSelection = approved
+            activeRemoteVideoOfferSdp = offer.sdp
+            setVolumeControlStream(AudioManager.STREAM_VOICE_CALL)
+            lateinit var peer: ManagedVideoMediaPeer
+            peer = ManagedVideoMediaPeer(object : ManagedVideoMediaPeer.Sink {
+                override fun sendAnswer(requestId: String, sdp: String) {
+                    if (managedVideoMediaPeer !== peer) return
+                    approvedVideoSelections.remove(requestId)
+                    R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                        .sendVideoMediaAnswer(requestId, sdp)
+                }
+
+                override fun onMetrics(metrics: ManagedVideoMediaPeer.Metrics) {
+                    runOnUiThread {
+                        if (
+                            managedVideoMediaPeer === peer &&
+                            activeRemoteVideoRequest?.requestId == metrics.requestId
+                        ) {
+                            activeRemoteVideoMetrics = metrics
+                        }
+                    }
+                }
+
+                override fun onFailure(requestId: String, reason: String) {
+                    runOnUiThread {
+                        if (
+                            managedVideoMediaPeer === peer &&
+                            activeRemoteVideoRequest?.requestId == requestId
+                        ) {
+                            approvedVideoSelections.remove(requestId)
+                            managedVideoMediaPeer = null
+                            activeRemoteVideoRequest = null
+                            activeRemoteVideoSelection = null
+                            activeRemoteVideoOfferSdp = null
+                            activeRemoteVideoMetrics = null
+                            activeRemoteVideoFailure = "Remote video stopped: $reason"
+                            setVolumeControlStream(AudioManager.STREAM_ALARM)
+                            R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                                .sendVideoStreamTerminated(requestId, reason)
+                        }
+                    }
+                }
+
+                override fun onMicrophoneState(requestId: String, enabled: Boolean, error: String?) {
+                    runOnUiThread {
+                        if (
+                            managedVideoMediaPeer === peer &&
+                            activeRemoteVideoRequest?.requestId == requestId
+                        ) {
+                            activeRemoteVideoMicrophoneEnabled = enabled
+                            activeRemoteVideoMicrophoneError = error
+                        }
+                    }
+                }
+            })
+            managedVideoMediaPeer = peer
+            // WebRTC factory/network-monitor creation can wait for Android
+            // connectivity callbacks. Starting it on the UI thread can stall
+            // before SDP callbacks are dispatched, leaving the browser without
+            // an answer while the rest of the app appears responsive.
+            lifecycleScope.launch(Dispatchers.IO) {
+                val started = peer.start(
+                        applicationContext,
+                        offer,
+                        sessionId,
+                        approved.quality.width,
+                        approved.quality.height,
+                        approved.quality.fps,
+                        approved.quality.bitrateBps,
+                    )
+                if (!started) {
+                    withContext(Dispatchers.Main) {
+                        if (managedVideoMediaPeer === peer) {
+                            managedVideoMediaPeer = null
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun terminateManagedVideo(reason: String = "Pilot terminated stream") {
+        val requestId = activeRemoteVideoRequest?.requestId ?: return
+        managedVideoSourceRecoveryJob?.cancel()
+        managedVideoSourceRecoveryJob = null
+        managedVideoMediaPeer?.close()
+        managedVideoMediaPeer = null
+        activeRemoteVideoRequest = null
+        activeRemoteVideoSelection = null
+        activeRemoteVideoOfferSdp = null
+        activeRemoteVideoMetrics = null
+        activeRemoteVideoFailure = null
+        activeRemoteVideoMicrophoneEnabled = false
+        activeRemoteVideoMicrophoneError = null
+        setVolumeControlStream(AudioManager.STREAM_ALARM)
+        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+            .sendVideoStreamTerminated(requestId, reason)
+    }
+
+    private fun maintainManagedVideoSource(
+        streams: Map<String, org.ncssar.rid2caltopo.video.StreamInfo>,
+    ) {
+        val request = activeRemoteVideoRequest
+        val peer = managedVideoMediaPeer
+        if (request == null || peer == null) {
+            managedVideoSourceRecoveryJob?.cancel()
+            managedVideoSourceRecoveryJob = null
+            return
+        }
+        val stream = streams[request.droneDesignator]
+        if (stream?.state == org.ncssar.rid2caltopo.video.StreamState.LIVE) {
+            managedVideoSourceRecoveryJob?.cancel()
+            managedVideoSourceRecoveryJob = null
+            streamsViewModel.managedVideoRenderSessionId(request.droneDesignator)?.let { sessionId ->
+                peer.rebindVideoSource(sessionId)
+            }
+            return
+        }
+        if (managedVideoSourceRecoveryJob != null) return
+        val requestId = request.requestId
+        CaltopoClient.CTWarn(
+            "ManagedVideoMedia",
+            "Drone source interrupted; preserving WebRTC during decoder recovery request=$requestId",
+        )
+        managedVideoSourceRecoveryJob = lifecycleScope.launch {
+            delay(MANAGED_VIDEO_SOURCE_RECOVERY_GRACE_MS)
+            managedVideoSourceRecoveryJob = null
+            if (
+                activeRemoteVideoRequest?.requestId == requestId &&
+                StreamRegistry.streams.value[request.droneDesignator]?.state !=
+                org.ncssar.rid2caltopo.video.StreamState.LIVE
+            ) {
+                terminateManagedVideo("Drone video source did not recover")
+            }
+        }
+    }
+
+    private fun toggleManagedVideoMicrophone() {
+        val peer = managedVideoMediaPeer ?: return
+        activeRemoteVideoMicrophoneError = null
+        if (activeRemoteVideoMicrophoneEnabled) {
+            peer.setMicrophoneEnabled(false)
+            return
+        }
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            peer.setMicrophoneEnabled(true)
+        } else if (!pendingManagedVideoMicrophoneEnable) {
+            pendingManagedVideoMicrophoneEnable = true
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                REQUEST_MANAGED_VIDEO_MICROPHONE,
+            )
+        }
+    }
+
     companion object {
+        private const val MANAGED_VIDEO_SOURCE_RECOVERY_GRACE_MS = 30_000L
         const val TAG: String = "R2CActivity"
+        private const val REQUEST_MANAGED_VIDEO_MICROPHONE = 7310
         private var AppActivity: R2CActivity? = null
         @JvmStatic
         fun getR2CActivity(): R2CActivity? {

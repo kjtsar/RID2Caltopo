@@ -1,11 +1,12 @@
 Latest changes:
+- Pilot-approved remote video now shows connected viewers, route type, and tablet data sent, with a Terminate control and frozen-frame cleanup when the controller stream ends.
 - Matched Android's Main Screen, Live View, MapPane controls, aircraft columns, device naming, stream grid, and anomaly-detector menus.
 - Added signed CalTopo team-map browsing with nested artifacts, hidden-folder defaults, operational markers, lines, polygons, media, and translucent search areas.
-- Live Map starts at the iPad GPS fix, keeps the focused drone centered, and fits the same geographic bounds and operational overlays when swapping between full, split, and PiP layouts.
+- Live Map starts at the iPad GPS fix, keeps the focused drone centered, and fits the same bounds and overlays when swapping between full, split, and PiP layouts.
 - Added Android-style stream focus, telemetry pairing, zoom/pan, double-tap clue capture, close/restart controls, performance diagnostics, and four-stream/external-display support.
 - Hardened native video with automatic MediaMTX startup, RTMP guidance, publisher/listener health checks, stall recovery, lag diagnostics, and reliable first-stream rendering.
 - Fixed blank video, sole-stream fill, grid/focus, Exit FS, Back navigation, PiP startup, and controller connection guidance.
-- Added Capture Streams, Android-compatible clue-photo KMZ flight archives, and safe dated-folder cleanup through Developer Tools.
+- Added Capture Streams, Android-compatible clue-photo KMZ flight archives, and dated-folder cleanup in Developer Tools.
 - Prevented iPad auto-lock while Live View is active and added bounded tracker reconnect backoff.
 - Live View now shows the Wi-Fi SSID, scrolls all settings, and keeps the compass clear of the gear.
 - Added Android-compatible flight confirmation, ownership, track colors, timestamps, publishing, retry/replay, standalone tracker coordination, update advisories, and Proximity Pairs diagnostics.

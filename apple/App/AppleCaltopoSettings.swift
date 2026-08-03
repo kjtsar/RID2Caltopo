@@ -36,7 +36,7 @@ final class AppleCaltopoSettings: ObservableObject {
     @Published private(set) var mapTitle: String
     @Published var credentialID: String
     @Published var credentialSecret: String
-    @Published private(set) var teamID: String
+    @Published var teamID: String
     @Published private(set) var status = "Not configured"
     @Published private(set) var teamMaps: [CaltopoTeamMapNode] = []
     @Published private(set) var isLoadingTeamMaps = false
@@ -83,6 +83,7 @@ final class AppleCaltopoSettings: ObservableObject {
         defaults.set(value.mapID, forKey: "caltopo.mapID")
         defaults.set(value.mapTitle, forKey: "caltopo.mapTitle")
         defaults.set(value.credentialID, forKey: "caltopo.credentialID")
+        defaults.set(value.teamID, forKey: "caltopo.teamID")
         do {
             try Self.storeSecret(value.credentialSecret)
             status = value.liveConfiguration == nil
@@ -160,7 +161,7 @@ final class AppleCaltopoSettings: ObservableObject {
     func loadTeamMaps() async {
         let value = configuration
         guard !value.teamID.isEmpty, !value.credentialID.isEmpty, !value.credentialSecret.isEmpty else {
-            status = "Import an organization QR code before browsing team maps"
+            status = "Enter the CalTopo team ID, credential ID, and credential secret before browsing team maps"
             teamMaps = []
             return
         }

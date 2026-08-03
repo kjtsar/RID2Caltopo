@@ -56,17 +56,14 @@ prints a release warning.
 Radio, background behavior, controller networking, and performance must be
 qualified on a physical device even when equivalent Simulator tests pass.
 
-The Apple app accepts the same configuration QR payloads produced by Android:
-organization (`R2C1:`), FAA (`R2CFAA1:`), and mutual-aid (`R2CMA1:`). Choose
-**Import Config** from the incident card or the More menu, then scan the QR code
-or paste its text. Android's corresponding `r2c1://`, `r2cfaa1://`, and
-`r2cma1://` links also open the importer. Public Google Drive bundles use the
-same Android token decoding and encrypted-field formats; credential secrets are
-stored in Keychain while non-secret incident settings and imported Remote ID
-mappings are persisted locally. Organization bundles also apply Android's
-embedded FAA configuration and mutual-aid credential template. Simulator tests
-cover decoding and the import UI, but camera scanning and a real Drive-hosted
-bundle remain physical-device field-test gates.
+Choose **Import Config** and scan the managed enrollment QR from
+`r2c-tracker.com`. The app exchanges its signed, limited-use locator for a
+revocable device credential and stores that credential in Keychain. Configure
+organization and aircraft under Settings → Organization & RID mappings; the
+drone designator is derived from owner callsign and model. Legacy `R2C1:`,
+`R2CFAA1:`, `R2CMA1:`, and file imports remain available only for migration and
+mutual-aid compatibility. Camera scanning and live credential redemption remain
+physical-device field-test gates.
 
 The app owns a `CLLocationManager`, requests When In Use authorization at
 startup, publishes accuracy/error state on the Status screen, and renders the

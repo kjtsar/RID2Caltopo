@@ -8,7 +8,11 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import android.os.Build;
+
 import org.ncssar.rid2caltopo.BuildConfig;
+import org.ncssar.rid2caltopo.app.R2CApplication;
+import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -16,8 +20,10 @@ import java.io.EOFException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.time.ZoneId;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -54,6 +60,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private static volatile long idleParkDelayMs = DEFAULT_IDLE_PARK_DELAY_MS;
     private static final long RECONNECT_BASE_DELAY_MS = 2_000L;
     private static final long RECONNECT_MAX_DELAY_MS = 10_000L;
+    private static final long VIDEO_PRESENCE_INTERVAL_MS = 15_000L;
 
     private static volatile TrackerCoordinationTransportFactory transportFactory =
             OkHttpTrackerCoordinationTransport::new;
@@ -87,18 +94,26 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private final ConcurrentHashMap<String, String> ownerByRemoteId = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, Long> leaseSeqByRemoteId = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, Boolean> locallyConfirmedRemoteIds = new ConcurrentHashMap<>();
+    @NonNull private final LinkedHashSet<String> seenVideoStreamRequestIds =
+            new LinkedHashSet<>();
     @NonNull private final DelayedExec heartbeatTimer = new DelayedExec(false);
     @NonNull private final DelayedExec reconnectTimer = new DelayedExec(false);
     @NonNull private final DelayedExec ackWatchdogTimer = new DelayedExec(false);
     @NonNull private final DelayedExec heartbeatCoalesceTimer = new DelayedExec(false);
     @NonNull private final DelayedExec idleParkTimer = new DelayedExec(false);
+    @NonNull private final DelayedExec videoPresenceTimer = new DelayedExec(false);
     @NonNull private final ConcurrentHashMap<String, Long> lastSightingSentByRemoteId = new ConcurrentHashMap<>();
+    @NonNull private final ManagedVideoPreflightPeer videoPreflightPeer;
     @Nullable private volatile String lastOutboundJsonForTesting;
     @Nullable private volatile String lastWaypointRemoteIdForTesting;
 
     @Nullable private volatile TrackerCoordinationTransport transport;
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
     @Nullable private volatile CoordinationIndicatorListener coordinationIndicatorListener;
+    @Nullable private volatile VideoStreamRequestListener videoStreamRequestListener;
+    @NonNull private volatile String managedVideoIncidentName = "";
+    @NonNull private volatile List<ManagedVideoStreamAdvertisement> managedVideoStreams =
+            Collections.emptyList();
     @Nullable private volatile HardFailureListener hardFailureListener;
 
     @Nullable private volatile String mapId;
@@ -133,6 +148,53 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private volatile boolean suppressScheduledHeartbeatRequestsForTesting;
 
     private TrackerPeerCoordinator() {
+        videoPreflightPeer = new ManagedVideoPreflightPeer(
+                new ManagedVideoPreflightPeer.Sink() {
+                    @Override
+                    public void sendAnswer(
+                            @NonNull String requestId,
+                            @NonNull String sdp) {
+                        sendVideoPreflightAnswer(requestId, sdp);
+                    }
+
+                    @Override
+                    public void sendResult(
+                            @NonNull String requestId,
+                            @NonNull String routeKind,
+                            long estimatedUplinkBps) {
+                        sendVideoPreflightResult(
+                                requestId,
+                                routeKind,
+                                estimatedUplinkBps);
+                        VideoStreamRequestListener listener =
+                                videoStreamRequestListener;
+                        if (listener != null) {
+                            listener.onVideoPreflightResult(
+                                    requestId,
+                                    routeKind,
+                                    estimatedUplinkBps);
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(
+                            @NonNull String requestId,
+                            @NonNull String reason) {
+                        CTWarn(
+                                TAG,
+                                "Managed video preflight failed request="
+                                        + requestId
+                                        + " reason="
+                                        + reason);
+                        VideoStreamRequestListener listener =
+                                videoStreamRequestListener;
+                        if (listener != null) {
+                            listener.onVideoPreflightFailure(
+                                    requestId,
+                                    reason);
+                        }
+                    }
+                });
     }
 
     @NonNull
@@ -258,6 +320,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         ackWatchdogTimer.stop();
         heartbeatCoalesceTimer.stop();
         idleParkTimer.stop();
+        videoPresenceTimer.stop();
+        videoPreflightPeer.cancel();
         Iterator<Map.Entry<String, PendingDrone>> iterator = pendingDrones.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, PendingDrone> entry = iterator.next();
@@ -283,6 +347,22 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         reconnectPending = false;
         intentionallyParked = false;
         notifyCoordinationIndicatorListener();
+    }
+
+    @Override
+    public void updateManagedVideoStreams(
+            @NonNull String incidentName,
+            @NonNull List<ManagedVideoStreamAdvertisement> streams) {
+        managedVideoIncidentName = incidentName.trim();
+        managedVideoStreams = Collections.unmodifiableList(
+                new ArrayList<>(streams.subList(0, Math.min(streams.size(), 4)))
+        );
+        if (!managedVideoStreams.isEmpty()) {
+            wakeForCoordinationActivity("video_stream");
+        } else {
+            scheduleIdleParkIfEligible();
+        }
+        sendManagedVideoPresence();
     }
 
     @Override
@@ -459,6 +539,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
     }
 
+    @Override
+    public void setVideoStreamRequestListener(
+            @Nullable VideoStreamRequestListener listener) {
+        videoStreamRequestListener = listener;
+    }
+
     @NonNull
     @Override
     public List<R2CMqttManager.PeerState> getPeerList() {
@@ -566,7 +652,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         return started &&
                 pendingDrones.isEmpty() &&
                 ownerByRemoteId.isEmpty() &&
-                pendingConfirmationsByRemoteId.isEmpty();
+                pendingConfirmationsByRemoteId.isEmpty() &&
+                managedVideoStreams.isEmpty();
     }
 
     private boolean shouldSkipIntervalHeartbeat() {
@@ -773,6 +860,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         markAllPendingFirstSightingsDirty();
         replayPendingFirstSightings();
         flushPendingConfirmations();
+        sendManagedVideoPresence();
+        videoPresenceTimer.start(
+                this::sendManagedVideoPresence,
+                VIDEO_PRESENCE_INTERVAL_MS,
+                VIDEO_PRESENCE_INTERVAL_MS
+        );
         scheduleIdleParkIfEligible();
         notifyCoordinationIndicatorListener();
     }
@@ -837,6 +930,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("zoneId", myGuid);
             jo.put("guid", myGuid);
             jo.put("name", myName);
+            jo.put("appPlatform", "android");
             putFinite(jo, "lat", myLat);
             putFinite(jo, "lng", myLon);
             jo.put("appVersion", BuildConfig.VERSION_NAME);
@@ -961,6 +1055,39 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         return activeTransport.send(jo.toString());
     }
 
+    private void sendManagedVideoPresence() {
+        if (!started || !isConnected()) return;
+        List<ManagedVideoStreamAdvertisement> snapshot = managedVideoStreams;
+        if (managedVideoIncidentName.isEmpty()) return;
+        JSONObject message = new JSONObject();
+        JSONArray streams = new JSONArray();
+        try {
+            for (ManagedVideoStreamAdvertisement stream : snapshot) {
+                JSONObject advertised = new JSONObject();
+                advertised.put("sessionId", stream.sessionId);
+                advertised.put("droneDesignator", stream.droneDesignator);
+                advertised.put("sourceWidth", stream.sourceWidth);
+                advertised.put("sourceHeight", stream.sourceHeight);
+                advertised.put("sourceFps", stream.sourceFps);
+                advertised.put("sourceBitrateBps", stream.sourceBitrateBps);
+                advertised.put("sourceCodec", stream.sourceCodec);
+                streams.put(advertised);
+            }
+            message.put("type", "video_stream_advertisement");
+            message.put(
+                    "deviceName",
+                    AndroidDeviceIdentity.selectDisplayName(
+                            R2CActivity.MyDeviceName,
+                            (Build.MANUFACTURER + " " + Build.MODEL).trim()));
+            message.put("incidentName", managedVideoIncidentName);
+            message.put("timeZone", ZoneId.systemDefault().getId());
+            message.put("streams", streams);
+            sendJson(message);
+        } catch (Exception e) {
+            CTError(TAG, "sendManagedVideoPresence() raised", e);
+        }
+    }
+
     private void flushPendingConfirmations() {
         TrackerCoordinationTransport activeTransport = transport;
         if (activeTransport == null || !activeTransport.isConnected()) {
@@ -1069,12 +1196,241 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 case "drone_confirmed":
                     onDroneConfirmedByPeer(jo);
                     break;
+                case "video_stream_request":
+                    onVideoStreamRequest(jo);
+                    break;
+                case "video_preflight_offer":
+                    onVideoPreflightOffer(jo);
+                    break;
+                case "video_media_offer":
+                    onVideoMediaOffer(jo);
+                    break;
+                case "video_stream_request_cancelled":
+                    onVideoStreamRequestCancelled(jo);
+                    break;
+                case "video_stream_advertisement_ack":
+                    if (jo.optBoolean("accepted", false)) {
+                        JSONArray sessionIds = jo.optJSONArray("sessionIds");
+                        CTDebug(TAG, "Managed video presence accepted sessions="
+                                + (sessionIds == null ? 0 : sessionIds.length()));
+                    } else {
+                        CTWarn(TAG, "Managed video presence rejected: "
+                                + jo.optString("error", "Tracker rejected presence"));
+                    }
+                    break;
                 default:
                     CTDebug(TAG, "Ignoring tracker message type: " + type);
                     break;
             }
         } catch (Exception e) {
             CTError(TAG, "handleIncomingMessage() raised for: " + text, e);
+        }
+    }
+
+    private void onVideoStreamRequest(@NonNull JSONObject jo) {
+        String requestId = jo.optString("requestId").trim();
+        String requesterEmail = jo.optString("requesterEmail").trim();
+        String streamSessionId = jo.optString("streamSessionId").trim();
+        if (requestId.isEmpty() || requesterEmail.isEmpty() || streamSessionId.isEmpty()) {
+            CTWarn(TAG, "Ignoring incomplete video stream request.");
+            return;
+        }
+        synchronized (seenVideoStreamRequestIds) {
+            if (!seenVideoStreamRequestIds.add(requestId)) {
+                CTDebug(TAG, "Ignoring replayed video stream request: " + requestId);
+                return;
+            }
+            while (seenVideoStreamRequestIds.size() > 50) {
+                String oldest = seenVideoStreamRequestIds.iterator().next();
+                seenVideoStreamRequestIds.remove(oldest);
+            }
+        }
+        boolean hasActiveStream = false;
+        for (ManagedVideoStreamAdvertisement stream : managedVideoStreams) {
+            if (stream.sessionId.equals(streamSessionId)) {
+                hasActiveStream = true;
+                break;
+            }
+        }
+        if (!hasActiveStream) {
+            sendVideoStreamUnavailable(requestId, streamSessionId);
+            CTWarn(TAG, "Rejected video stream request error=e_nosuch_stream request="
+                    + requestId + " session=" + streamSessionId);
+            return;
+        }
+        VideoStreamRequestListener listener = videoStreamRequestListener;
+        if (listener == null) {
+            CTWarn(TAG, "Video stream request arrived without an active UI listener.");
+            return;
+        }
+        listener.onVideoStreamRequest(
+                new VideoStreamViewRequest(
+                        requestId,
+                        requesterEmail,
+                        streamSessionId,
+                        jo.optString("incidentName").trim(),
+                        jo.optString("droneDesignator").trim(),
+                        jo.optInt("sourceWidth", 0),
+                        jo.optInt("sourceHeight", 0),
+                        jo.optDouble("sourceFps", 0.0),
+                        jo.optLong("sourceBitrateBps", 0L),
+                        jo.optString("sourceCodec").trim(),
+                        jo.optString("expiresAt").trim(),
+                        jo.optBoolean("consentRequired", true)));
+    }
+
+    private void sendVideoStreamUnavailable(
+            @NonNull String requestId,
+            @NonNull String streamSessionId) {
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", "video_stream_unavailable");
+            message.put("requestId", requestId);
+            message.put("streamSessionId", streamSessionId);
+            message.put("errorCode", "e_nosuch_stream");
+            if (!sendJson(message)) {
+                CTWarn(TAG, "Unable to report unavailable managed video stream.");
+            }
+        } catch (Exception exception) {
+            CTError(TAG, "Unable to encode unavailable managed video stream.", exception);
+        }
+    }
+
+    private void onVideoPreflightOffer(@NonNull JSONObject jo) {
+        String requestId = jo.optString("requestId").trim();
+        String sdp = jo.optString("sdp").trim();
+        if (requestId.isEmpty() || !sdp.startsWith("v=0")) {
+            CTWarn(TAG, "Ignoring incomplete managed video preflight offer.");
+            return;
+        }
+        videoPreflightPeer.start(
+                R2CApplication.getAppCtxt(),
+                requestId,
+                sdp,
+                jo.optJSONArray("iceServers"));
+    }
+
+    private void onVideoStreamRequestCancelled(@NonNull JSONObject jo) {
+        String requestId = jo.optString("requestId").trim();
+        if (requestId.isEmpty()) {
+            CTWarn(TAG, "Ignoring incomplete managed video cancellation.");
+            return;
+        }
+        // A request cancellation retires only this probe. Keep the peer's
+        // executor available for the next independently authorized request.
+        videoPreflightPeer.cancel();
+        VideoStreamRequestListener listener = videoStreamRequestListener;
+        if (listener != null) {
+            listener.onVideoStreamRequestCancelled(requestId);
+        }
+        CTDebug(TAG, "Managed video request cancelled: " + requestId);
+    }
+
+    private void onVideoMediaOffer(@NonNull JSONObject jo) {
+        String requestId = jo.optString("requestId").trim();
+        String streamSessionId = jo.optString("streamSessionId").trim();
+        String sdp = jo.optString("sdp").trim();
+        if (requestId.isEmpty() || !sdp.startsWith("v=0")) {
+            CTWarn(TAG, "Ignoring incomplete managed-video media offer.");
+            return;
+        }
+        VideoStreamRequestListener listener = videoStreamRequestListener;
+        if (listener != null) {
+            listener.onVideoMediaOffer(new VideoMediaOffer(
+                    requestId,
+                    streamSessionId,
+                    sdp,
+                    jo.optJSONArray("iceServers")));
+        }
+    }
+
+    private void sendVideoPreflightAnswer(
+            @NonNull String requestId,
+            @NonNull String sdp) {
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", "video_preflight_answer");
+            message.put("requestId", requestId);
+            message.put("sdp", sdp);
+            if (!sendJson(message)) {
+                CTWarn(TAG, "Unable to send managed video preflight answer.");
+            }
+        } catch (Exception exception) {
+            CTError(TAG, "Unable to encode managed video preflight answer.", exception);
+        }
+    }
+
+    private void sendVideoPreflightResult(
+            @NonNull String requestId,
+            @NonNull String routeKind,
+            long estimatedUplinkBps) {
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", "video_preflight_result");
+            message.put("requestId", requestId);
+            message.put("routeKind", routeKind);
+            message.put("estimatedUplinkBps", estimatedUplinkBps);
+            if (!sendJson(message)) {
+                CTWarn(TAG, "Unable to send managed video preflight result.");
+            }
+        } catch (Exception exception) {
+            CTError(TAG, "Unable to encode managed video preflight result.", exception);
+        }
+    }
+
+    @Override
+    public void respondToVideoStreamRequest(
+            @NonNull String requestId,
+            boolean approved,
+            int selectedWidth,
+            int selectedHeight,
+            double selectedFps,
+            long selectedBitrateBps) {
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", "video_stream_decision");
+            message.put("requestId", requestId);
+            message.put("decision", approved ? "approve" : "decline");
+            if (approved) {
+                message.put("selectedWidth", selectedWidth);
+                message.put("selectedHeight", selectedHeight);
+                message.put("selectedFps", selectedFps);
+                message.put("selectedBitrateBps", selectedBitrateBps);
+            }
+            if (!sendJson(message)) {
+                CTWarn(TAG, "Unable to send managed video decision.");
+            }
+        } catch (Exception exception) {
+            CTError(TAG, "Unable to encode managed video decision.", exception);
+        }
+    }
+
+    @Override
+    public void sendVideoMediaAnswer(@NonNull String requestId, @NonNull String sdp) {
+        sendManagedVideoMessage("video_media_answer", requestId, sdp, "");
+    }
+
+    @Override
+    public void sendVideoStreamTerminated(@NonNull String requestId, @NonNull String reason) {
+        sendManagedVideoMessage("video_stream_terminated", requestId, "", reason);
+    }
+
+    private void sendManagedVideoMessage(
+            @NonNull String type,
+            @NonNull String requestId,
+            @NonNull String sdp,
+            @NonNull String reason) {
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", type);
+            message.put("requestId", requestId);
+            if (!sdp.isEmpty()) message.put("sdp", sdp);
+            if (!reason.isEmpty()) message.put("reason", reason);
+            if (!sendJson(message)) {
+                CTWarn(TAG, "Unable to send managed-video message type=" + type);
+            }
+        } catch (Exception exception) {
+            CTError(TAG, "Unable to encode managed-video message type=" + type, exception);
         }
     }
 
@@ -1547,6 +1903,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         INSTANCE.myLon = 0.0;
         INSTANCE.myCaltopoRttMs = 2_000L;
         INSTANCE.peerListChangedListener = null;
+        INSTANCE.videoStreamRequestListener = null;
+        INSTANCE.seenVideoStreamRequestIds.clear();
+        INSTANCE.managedVideoIncidentName = "";
+        INSTANCE.managedVideoStreams = Collections.emptyList();
         INSTANCE.hardFailureListener = null;
         INSTANCE.hardFailureNotified = false;
         INSTANCE.forcedReconnectCount = 0L;

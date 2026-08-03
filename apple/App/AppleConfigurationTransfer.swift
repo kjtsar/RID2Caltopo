@@ -67,7 +67,7 @@ final class AppleConfigurationTransferManager: ObservableObject {
         organization: AppleOrgConfigSettings
     ) async {
         guard let template = organization.mutualAidTemplate else {
-            status = "Load ct_mutual_aid_credentials before exporting an MA package."
+            status = "Configure the Mutual Aid account in Settings before exporting an MA package."
             return
         }
         isWorking = true

@@ -60,6 +60,7 @@ public class OpenDroneIdDataManager {
     // Tracks the last-logged altitude-source key per drone to suppress duplicate log spam.
     // Logged once on first contact and again whenever the key changes (altSource, isAtoType, fallback).
     private final ConcurrentHashMap<String, String> lastLoggedAltKey = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Integer> lastLoggedHorizontalAccuracyCode = new ConcurrentHashMap<>();
 
     public static class Callback {
         public void onNewAircraft(AircraftObject object) {}
@@ -139,6 +140,11 @@ public class OpenDroneIdDataManager {
 
     private static boolean isRidAltitudeValid(double altitudeMeters) {
         return altitudeMeters != RID_INVALID_ALTITUDE_METERS && Double.isFinite(altitudeMeters);
+    }
+
+    /** F3411-19 Table 2: NACp codes 10-12 declare a 95% horizontal bound under 10 m. */
+    static boolean isHorizontalAccuracySufficient(int horizontalAccuracyCode) {
+        return horizontalAccuracyCode >= 10 && horizontalAccuracyCode <= 12;
     }
 
     static SelectedTrackAltitude selectTrackAltitudeMeters(
@@ -336,6 +342,18 @@ public class OpenDroneIdDataManager {
         // Count any received RID position packet as connectivity, even if waypoint-quality
         // filters later reject it for tracking purposes.
         droneSpec.noteRidPositionPacketReceived(nowWallMsec);
+
+        int horizontalAccuracyCode = location.getHorizontalAccuracyCode();
+        if (!isHorizontalAccuracySufficient(horizontalAccuracyCode)) {
+            Integer previousCode = lastLoggedHorizontalAccuracyCode.put(idStr, horizontalAccuracyCode);
+            if (previousCode == null || previousCode != horizontalAccuracyCode) {
+                CaltopoClient.CTDebug(TAG, String.format(Locale.US,
+                        "rid_filter remoteId=%s reason=horizontal_accuracy code=%d requiredCode=10",
+                        idStr, horizontalAccuracyCode));
+            }
+            return;
+        }
+        lastLoggedHorizontalAccuracyCode.put(idStr, horizontalAccuracyCode);
 
         // feed altitude context into droneSpec for cross-broadcast tracking.
         CtDroneSpec.AltSourceEnum altSource =

@@ -43,6 +43,7 @@ import java.time.format.DateTimeFormatter
 import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigToken
+import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
 
 // ── QR bitmap helper ──────────────────────────────────────────────────────────
 
@@ -168,7 +169,7 @@ fun OrgConfigExportDialog(
                             style = MaterialTheme.typography.bodySmall
                         )
                         Spacer(Modifier.height(12.dp))
-                        Text("Source org: ${sourceOrgName.ifBlank { "Not configured in ct_credentials.json" }}")
+                        Text("Source org: ${sourceOrgName.ifBlank { "Not configured in Settings" }}")
                     }
 
                     is ExportStep.Uploading -> {
@@ -437,7 +438,7 @@ fun MutualAidExportDialog(
                             style = MaterialTheme.typography.bodySmall
                         )
                         Spacer(Modifier.height(12.dp))
-                        Text("Source org: ${sourceOrgName.ifBlank { "Not configured in ct_mutual_aid_credentials" }}")
+                        Text("Source org: ${sourceOrgName.ifBlank { "Not configured in Settings" }}")
                         Spacer(Modifier.height(8.dp))
                         OutlinedTextField(
                             value = displayName,
@@ -613,6 +614,7 @@ fun ImportConfigDialog(
     onJoin: (token: String) -> Unit,
     onFaaJoin: (token: String) -> Unit,
     onMutualAidJoin: (token: String) -> Unit,
+    onTrackerJoin: (url: String) -> Unit,
     onPickFile: () -> Unit
 ) {
     val context = LocalContext.current
@@ -621,7 +623,10 @@ fun ImportConfigDialog(
     val orgDecoded = remember(normalizedToken) { OrgConfigToken.decode(normalizedToken) }
     val faaDecoded = remember(normalizedToken) { FaaConfigToken.decode(normalizedToken) }
     val mutualAidDecoded = remember(normalizedToken) { MutualAidToken.decode(normalizedToken) }
-    val isValid = orgDecoded != null || faaDecoded != null || mutualAidDecoded != null
+    val trackerEnrollment = remember(normalizedToken) {
+        TrackerEnrollmentClient.isEnrollmentUrl(normalizedToken)
+    }
+    val isValid = orgDecoded != null || faaDecoded != null || mutualAidDecoded != null || trackerEnrollment
 
     val scanner = remember(context) {
         GmsBarcodeScanning.getClient(
@@ -638,7 +643,7 @@ fun ImportConfigDialog(
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "Scan a config QR code, paste a config token, or choose an MA package file.",
+                    "Scan an r2c-tracker enrollment QR code. Legacy config tokens and MA packages remain available for migration.",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Spacer(Modifier.height(12.dp))
@@ -672,6 +677,7 @@ fun ImportConfigDialog(
                                 "FAA: ${faaDecoded.label.ifBlank { "Shared NOTAM credentials" }}"
                             )
                             mutualAidDecoded != null -> Text("MA: ${mutualAidDecoded.sourceOrg}")
+                            trackerEnrollment -> Text("Managed r2c-tracker enrollment")
                             else -> Text(
                                 "Token not recognised",
                                 color = MaterialTheme.colorScheme.error
@@ -687,6 +693,7 @@ fun ImportConfigDialog(
                 enabled = isValid,
                 onClick = {
                     when {
+                        trackerEnrollment -> onTrackerJoin(normalizedToken)
                         faaDecoded != null -> onFaaJoin(normalizedToken)
                         mutualAidDecoded != null -> onMutualAidJoin(normalizedToken)
                         else -> onJoin(normalizedToken)

@@ -198,6 +198,153 @@ struct ContentView: View {
             } message: {
                 Text("Continue with limited functionality until RID2Caltopo is upgraded.")
             }
+            .sheet(item: Binding(
+                get: { peerCoordinator.pendingVideoStreamRequest },
+                set: { value in
+                    if value == nil {
+                        peerCoordinator.acknowledgeVideoStreamRequest()
+                    }
+                }
+            )) { request in
+                NavigationStack {
+                    VStack(spacing: 0) {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 18) {
+                                Text("Video Stream Request")
+                                    .font(.title2.bold())
+                                LabeledContent("From", value: request.requesterEmail)
+                        LabeledContent(
+                            "Incident",
+                            value: request.incidentName.isEmpty
+                                ? "Not specified"
+                                : request.incidentName
+                        )
+                        LabeledContent(
+                            "Drone",
+                            value: request.droneDesignator.isEmpty
+                                ? "Not specified"
+                                : request.droneDesignator
+                        )
+                        if let width = request.sourceWidth,
+                           let height = request.sourceHeight,
+                           width > 0,
+                           height > 0 {
+                            let frameRate = request.sourceFps ?? 0
+                            let bitrate = request.sourceBitrateBps ?? 0
+                            let source = [
+                                "\(width)×\(height)",
+                                frameRate > 0
+                                    ? String(format: "%.1f fps", frameRate)
+                                    : nil,
+                                bitrate > 0
+                                    ? String(
+                                        format: "%.1f Mbps",
+                                        Double(bitrate) / 1_000_000
+                                    )
+                                    : nil,
+                            ]
+                            .compactMap { $0 }
+                            .joined(separator: ", ")
+                            LabeledContent("Source", value: source)
+                        } else {
+                            LabeledContent(
+                                "Source",
+                                value: "Source details pending"
+                            )
+                        }
+                        if let failure = peerCoordinator.videoPreflightFailure {
+                            LabeledContent("Link", value: "Measurement unavailable")
+                            Text(failure)
+                                .foregroundStyle(.orange)
+                        } else if
+                            let route = peerCoordinator.videoPreflightRouteKind,
+                            let bitsPerSecond = peerCoordinator.videoPreflightEstimatedUplinkBps
+                        {
+                            LabeledContent(
+                                "Link",
+                                value: route == "direct" ? "Direct" : "Routed"
+                            )
+                            LabeledContent(
+                                "Usable uplink",
+                                value: String(
+                                    format: "%.2f Mbps",
+                                    Double(bitsPerSecond) / 1_000_000
+                                )
+                            )
+                        } else {
+                            LabeledContent("Link", value: "Measuring routed link…")
+                        }
+                        Text(
+                            "Remote video remains off. This check exchanges only " +
+                            "synthetic data. Choose a complete quality preset, " +
+                            "then explicitly select Start."
+                        )
+                        .foregroundStyle(.secondary)
+                                if peerCoordinator.videoQualityChoices.contains(where: {
+                                    $0.capacity == "fallback"
+                                }) {
+                                    Text(
+                                        "The measurement is below every normal profile. " +
+                                        "The smallest stream is available as a cautious fallback."
+                                    )
+                                    .foregroundStyle(.orange)
+                                }
+                                if peerCoordinator.videoPreflightRouteKind != nil {
+                                    ForEach(peerCoordinator.videoQualityChoices) { choice in
+                                        Button {
+                                            peerCoordinator.selectVideoQuality(choice.id)
+                                        } label: {
+                                            HStack {
+                                                Image(systemName:
+                                                    peerCoordinator.selectedVideoQualityID == choice.id
+                                                        ? "checkmark.circle.fill"
+                                                        : "circle"
+                                                )
+                                                Text(choice.label)
+                                            }
+                                        }
+                                        .foregroundStyle(
+                                            choice.capacity == "enough"
+                                                ? Color.green
+                                                : choice.capacity == "marginal" ||
+                                                    choice.capacity == "fallback"
+                                                    ? Color.orange
+                                                    : Color.red
+                                        )
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(24)
+                        }
+                        Divider()
+                        HStack {
+                            Button("Decline", role: .destructive) {
+                                peerCoordinator.declineVideoStreamRequest()
+                            }
+                            Spacer()
+                            Button(
+                                peerCoordinator.videoPreflightRouteKind != nil
+                                    ? "Start"
+                                    : peerCoordinator.videoPreflightFailure != nil
+                                        ? "Measurement unavailable"
+                                        : "Measuring link…"
+                            ) {
+                                peerCoordinator.approveVideoStreamRequest()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(
+                                peerCoordinator.videoPreflightRouteKind == nil ||
+                                !peerCoordinator.selectedVideoQualityIsStartable
+                            )
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(24)
+                    }
+                    .navigationBarTitleDisplayMode(.inline)
+                    .interactiveDismissDisabled()
+                }
+            }
             .sheet(item: $pendingDroneConfirmation, onDismiss: queueNextDroneConfirmation) { request in
                 DroneConfirmationView(
                     remoteID: request.id,
@@ -265,7 +412,14 @@ struct ContentView: View {
                     notams.installSimulatorDemo()
                     airspace.installSimulatorDemo()
                 } else {
-                    notams.configure(orgConfigSettings.faaConfiguration)
+                    notams.reconcileEnrollmentActivation(
+                        hasNotamAdminConfiguration: orgConfigSettings.hasNotamAdminConfiguration
+                    )
+                    notams.configure(
+                        faaProxyURL: orgConfigSettings.faaProxyURL,
+                        trackerURLPrefix: orgConfigSettings.trackerURLPrefix,
+                        trackerAPIKey: orgConfigSettings.trackerAPIKey
+                    )
                     notams.update(location: locationProvider.lastLocation)
                     airspace.update(location: locationProvider.lastLocation)
                     landRestrictions.update(location: locationProvider.lastLocation)
@@ -370,6 +524,25 @@ struct ContentView: View {
                     showImportConfig = true
                 }
             }
+            .onChange(of: managedVideoPresenceFingerprint, initial: true) {
+                peerCoordinator.updateManagedVideoStreams(
+                    incidentName: currentIncidentName,
+                    sessions: streamRegistry.sessions
+                )
+            }
+            .task {
+                while !Task.isCancelled {
+                    if streamRegistry.sessions.contains(where: {
+                        $0.state == .live && $0.id != "demo"
+                    }) {
+                        peerCoordinator.updateManagedVideoStreams(
+                            incidentName: currentIncidentName,
+                            sessions: streamRegistry.sessions
+                        )
+                    }
+                    try? await Task.sleep(for: .seconds(2))
+                }
+            }
         }
     }
 
@@ -398,7 +571,11 @@ struct ContentView: View {
                 guard !ProcessInfo.processInfo.arguments.contains("--demo-notam") else { return }
                 Task { @MainActor in
                     await Task.yield()
-                    notams.configure(orgConfigSettings.faaConfiguration)
+                    notams.configure(
+                        faaProxyURL: orgConfigSettings.faaProxyURL,
+                        trackerURLPrefix: orgConfigSettings.trackerURLPrefix,
+                        trackerAPIKey: orgConfigSettings.trackerAPIKey
+                    )
                     notams.update(location: locationProvider.lastLocation)
                 }
             }
@@ -555,6 +732,18 @@ struct ContentView: View {
 
     var body: some View {
         monitoredRoot
+            .onAppear {
+                AppleApplicationCleanupCenter.shared.register(
+                    markerCleanup: {
+                        await ridTracks.setLocalDeviceMarkerPublishingEnabled(false)
+                    },
+                    fullCleanup: {
+                        await ridTracks.setLocalDeviceMarkerPublishingEnabled(false)
+                        await peerCoordinator.shutdown()
+                        await mediaMTX.shutdown()
+                    }
+                )
+            }
     }
 
     private var rootScreen: some View {
@@ -602,7 +791,7 @@ struct ContentView: View {
 
     private var androidParityDashboard: some View {
         ScrollView(.vertical) {
-            ScrollView(.horizontal) {
+            ScrollView(.horizontal, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 8) {
                     androidRestrictionStrip
                     androidIncidentEditor
@@ -653,7 +842,7 @@ struct ContentView: View {
             androidHeaderCell("", deviceVersionText, width: 190)
             androidHeaderCell("Up Time", appUptimeText, width: 100)
             androidHeaderCell("Caltopo msg rtt", caltopoRTTText, width: 145)
-            androidHeaderCell("Invalid RID msgs", "\(ridTracks.filteredObservationCount)", width: 125)
+            androidHeaderCell("Invalid RID msgs", "\(ridTracks.invalidObservationCount)", width: 125)
         }
         .padding(2)
         .background(Color.accentColor.opacity(0.18))
@@ -661,18 +850,20 @@ struct ContentView: View {
 
     private var androidRestrictionStrip: some View {
         HStack(spacing: 8) {
-            if airspace.enabled || notams.enabled {
+            if airspace.enabled || notams.state.visible {
                 NavigationLink {
                     if usesAirspaceRestrictionStatus {
-                        AppleAirspacePanel(center: airspace, location: locationProvider.lastLocation)
+                        AppleAirspacePanel(
+                            center: airspace,
+                            notams: notams,
+                            location: locationProvider.lastLocation
+                        )
                     } else {
                         AppleNotamPanel(center: notams, location: locationProvider.lastLocation)
                     }
                 } label: {
                     AppleOperationalStatusChipLabel(
-                        title: usesAirspaceRestrictionStatus
-                            ? airspace.state.chipLabel
-                            : notams.state.chipLabel,
+                        title: conciseAirspaceOrNotamChipLabel,
                         tone: usesAirspaceRestrictionStatus ? airspaceChipTone : notamChipTone
                     )
                 }
@@ -683,7 +874,10 @@ struct ContentView: View {
                     AppleLandRestrictionPanel(center: landRestrictions, location: locationProvider.lastLocation)
                 } label: {
                     AppleOperationalStatusChipLabel(
-                        title: landRestrictions.state.chipLabel,
+                        title: OperationalStatusChipText.land(
+                            severity: landRestrictions.state.severity,
+                            detailedLabel: landRestrictions.state.chipLabel
+                        ),
                         tone: landRestrictionChipTone
                     )
                 }
@@ -696,6 +890,19 @@ struct ContentView: View {
 
     private var usesAirspaceRestrictionStatus: Bool {
         !notams.state.visible || airspace.state.severity != .normal
+    }
+
+    private var conciseAirspaceOrNotamChipLabel: String {
+        if usesAirspaceRestrictionStatus {
+            return OperationalStatusChipText.airspace(
+                severity: airspace.state.severity,
+                detailedLabel: airspace.state.chipLabel
+            )
+        }
+        return OperationalStatusChipText.notam(
+            severity: notams.state.chipSeverity,
+            detailedLabel: notams.state.chipLabel
+        )
     }
 
     private var notamChipTone: AppleOperationalStatusChipTone {
@@ -964,14 +1171,20 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var flightRestrictionsSection: some View {
-        if notams.enabled || airspace.enabled {
+        if notams.state.visible || airspace.enabled {
             Section("Flight Restrictions") {
                 if airspace.enabled {
-                    NavigationLink { AppleAirspacePanel(center: airspace, location: locationProvider.lastLocation) } label: {
+                    NavigationLink {
+                        AppleAirspacePanel(
+                            center: airspace,
+                            notams: notams,
+                            location: locationProvider.lastLocation
+                        )
+                    } label: {
                         LabeledContent("Controlled airspace", value: airspace.state.chipLabel)
                     }
                 }
-                if notams.enabled {
+                if notams.state.visible {
                     NavigationLink { AppleNotamPanel(center: notams, location: locationProvider.lastLocation) } label: {
                         LabeledContent("Nearby NOTAMs", value: notams.state.chipLabel)
                     }
@@ -1232,6 +1445,20 @@ struct ContentView: View {
         "\(orgConfigSettings.proximityAlertSpacingFeet)|\(orgConfigSettings.predictiveHeadEnabled)"
     }
 
+    private var managedVideoPresenceFingerprint: String {
+        let streams = streamRegistry.sessions
+            .map {
+                let eligible = ManagedVideoPresencePolicy.hasRecentDecodedFrame(
+                    frameCount: $0.model.frameCount,
+                    decodedFrameAge: $0.model.decodedFrameAgeSeconds
+                )
+                return "\($0.sourcePath)|\($0.state.rawValue)|\(eligible ? 1 : 0)"
+            }
+            .sorted()
+            .joined(separator: ",")
+        return "\(currentIncidentName)|\(streamRegistry.managedPresenceRevision)|\(streams)"
+    }
+
     private func configurePeerCoordinator() {
         let arguments = ProcessInfo.processInfo.arguments
         peerCoordinator.updatePosition(locationProvider.lastLocation)
@@ -1273,16 +1500,7 @@ struct ContentView: View {
     }
 
     private func removeLocalDeviceMarkerInBackground() {
-        let taskID = UIApplication.shared.beginBackgroundTask(
-            withName: "Remove CalTopo device marker",
-            expirationHandler: nil
-        )
-        Task {
-            await ridTracks.setLocalDeviceMarkerPublishingEnabled(false)
-            if taskID != .invalid {
-                UIApplication.shared.endBackgroundTask(taskID)
-            }
-        }
+        AppleApplicationCleanupCenter.shared.removeMarkerForBackgrounding()
     }
 
     private func configureTrackArchive() {

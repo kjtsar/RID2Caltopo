@@ -26,3 +26,10 @@ Current status:
 
 - If required libs are missing, `ffmpeg_bridge` builds in `stub` mode.
 - Stub mode exercises session/surface/event plumbing only and does not decode video.
+
+RID2Caltopo currently pins the unmodified official FFmpeg `n7.0` tag at
+commit `083443d67cb159ce469e5d902346b8d0c2cd1c93`. Use
+`tools/build_ffmpeg_android_arm64.sh` for Android or
+`apple/Native/FFmpeg/build-xcframework.sh` for Apple. Both scripts verify the
+source revision before building; generated headers and libraries are excluded
+from Git.

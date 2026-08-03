@@ -39,6 +39,10 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     @NonNull private final Map<String, ActiveTrackRegistration> activeTracks = new ConcurrentHashMap<>();
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
     @Nullable private volatile CoordinationIndicatorListener coordinationIndicatorListener;
+    @Nullable private volatile VideoStreamRequestListener videoStreamRequestListener;
+    @NonNull private volatile String managedVideoIncidentName = "";
+    @NonNull private volatile List<ManagedVideoStreamAdvertisement> managedVideoStreams =
+            java.util.Collections.emptyList();
     @Nullable private volatile String startedMapId;
     @Nullable private volatile String startedGuid;
     @Nullable private volatile String startedName;
@@ -112,6 +116,11 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             activeCoordinator.setPeerListChangedListener(peerListChangedListener);
         }
         activeCoordinator.setCoordinationIndicatorListener(this::handleChildCoordinationIndicatorStateChanged);
+        activeCoordinator.setVideoStreamRequestListener(videoStreamRequestListener);
+        activeCoordinator.updateManagedVideoStreams(
+                managedVideoIncidentName,
+                managedVideoStreams
+        );
         activeCoordinator.start(mapId, guid, name, brokerUri);
         activeCoordinator.updateCaltopoRtt(myCaltopoRttMs);
         activeCoordinator.updateMyPosition(myLat, myLon);
@@ -240,6 +249,55 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         if (listener != null) {
             listener.onCoordinationIndicatorStateChanged(getCoordinationIndicatorState());
         }
+    }
+
+    @Override
+    public void setVideoStreamRequestListener(
+            @Nullable VideoStreamRequestListener listener) {
+        videoStreamRequestListener = listener;
+        activeCoordinator.setVideoStreamRequestListener(listener);
+    }
+
+    @Override
+    public void updateManagedVideoStreams(
+            @NonNull String incidentName,
+            @NonNull List<ManagedVideoStreamAdvertisement> streams) {
+        managedVideoIncidentName = incidentName;
+        managedVideoStreams = java.util.Collections.unmodifiableList(
+                new ArrayList<>(streams)
+        );
+        activeCoordinator.updateManagedVideoStreams(
+                managedVideoIncidentName,
+                managedVideoStreams
+        );
+    }
+
+    @Override
+    public void respondToVideoStreamRequest(
+            @NonNull String requestId,
+            boolean approved,
+            int selectedWidth,
+            int selectedHeight,
+            double selectedFps,
+            long selectedBitrateBps) {
+        activeCoordinator.respondToVideoStreamRequest(
+                requestId,
+                approved,
+                selectedWidth,
+                selectedHeight,
+                selectedFps,
+                selectedBitrateBps
+        );
+    }
+
+    @Override
+    public void sendVideoMediaAnswer(@NonNull String requestId, @NonNull String sdp) {
+        activeCoordinator.sendVideoMediaAnswer(requestId, sdp);
+    }
+
+    @Override
+    public void sendVideoStreamTerminated(@NonNull String requestId, @NonNull String reason) {
+        activeCoordinator.sendVideoStreamTerminated(requestId, reason);
     }
 
     @NonNull

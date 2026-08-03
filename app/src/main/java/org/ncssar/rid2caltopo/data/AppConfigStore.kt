@@ -23,7 +23,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 14
+    const val SCHEMA_VERSION = 15
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -252,6 +252,7 @@ object AppConfigStore {
         if (config.opPeriod.isNotBlank()) return true
         if (config.trackerApiKey.isNotBlank()) return true
         if (config.trackerUrlPrefix.isNotBlank()) return true
+        if (config.trackerFaaProxyUrl.isNotBlank()) return true
         if (config.archiveLocation.treeUri.isNotBlank()) return true
         if (config.archiveLocation.selectionHintUri.isNotBlank()) return true
         if (config.archiveLocation.requiresRegrant) return true
@@ -320,6 +321,7 @@ object AppConfigStore {
         state.opPeriod = activeProfile?.opPeriod?.ifBlank { "1" } ?: config.opPeriod.ifBlank { "1" }
         state.trackerApiKey = activeProfile?.trackerApiKey ?: config.trackerApiKey
         state.trackerUrlPfx = activeProfile?.trackerUrlPfx ?: config.trackerUrlPrefix
+        state.trackerFaaProxyUrl = config.trackerFaaProxyUrl
         state.coordinateDisplayFormat = config.coordinateDisplayFormat.ifBlank { "decimal" }
         state.captureVideoStreamsFlag = config.captureVideoStreams
         state.usePeersFlag = config.usePeers
@@ -334,8 +336,8 @@ object AppConfigStore {
         }
         state.notamEnabled = config.notam.enabled
         state.notamRadiusNm = when {
-            config.notam.radiusNm >= 2 -> config.notam.radiusNm
-            else -> 2
+            config.notam.radiusNm >= 1 -> config.notam.radiusNm
+            else -> 1
         }
         state.notamAutoRefresh = if (config.schemaVersion >= 2) config.notam.autoRefresh else true
         state.notamRefreshIntervalSeconds = when {
@@ -363,12 +365,21 @@ object AppConfigStore {
         FaaConfigManager.applyCachedPayloadToState(state)
         state.cachedDroneSpecTable = Hashtable<String, CtDroneSpec>(16)
         for (mapping in config.ridMappingsList) {
+            val ownerFields = RidMappingRules.resolveOwnerFields(
+                ownerName = mapping.ownerName,
+                ownerCallsign = mapping.ownerCallsign,
+                legacyOwner = mapping.owner,
+                mappedId = mapping.mappedId,
+                model = mapping.model,
+                remoteId = mapping.remoteId
+            )
             val spec = CtDroneSpec(
                 mapping.remoteId,
                 mapping.mappedId,
                 mapping.org,
                 mapping.model,
-                mapping.owner
+                ownerFields.ownerName,
+                ownerFields.ownerCallsign
             )
             state.cachedDroneSpecTable[spec.remoteId] = spec
         }
@@ -430,6 +441,7 @@ object AppConfigStore {
             .setOpPeriod(activeProfile.opPeriod)
             .setTrackerApiKey(activeProfile.trackerApiKey)
             .setTrackerUrlPrefix(activeProfile.trackerUrlPfx)
+            .setTrackerFaaProxyUrl(state.trackerFaaProxyUrl ?: "")
             .setNotam(
                 AppConfig.NotamConfig.newBuilder()
                     .setEnabled(state.notamEnabled)
@@ -499,6 +511,8 @@ object AppConfigStore {
                         .setOrg(spec.org ?: "")
                         .setModel(spec.model ?: "")
                         .setOwner(spec.owner ?: "")
+                        .setOwnerName(spec.ownerName ?: "")
+                        .setOwnerCallsign(spec.owner ?: "")
                         .build()
                 )
             }

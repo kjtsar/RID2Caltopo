@@ -1007,8 +1007,14 @@ class StreamsViewModel(
                 _droneStates.remove(key)
             }
         }
+        val complianceNowMs = System.currentTimeMillis()
         val overLimit = _droneStates.mapNotNull { (designator, state) ->
             if (state.source.isLocalArchiveOnly) return@mapNotNull null
+            if (!ComplianceAlertCenter.isFreshAltitudeSample(
+                    state.source.mostRecentMsecTimestamp,
+                    complianceNowMs,
+                )
+            ) return@mapNotNull null
             val displayState = altitudeCoordinator.displayStateByDesignator[designator] ?: return@mapNotNull null
             val aglFt = displayState.aglFt ?: return@mapNotNull null
             if (aglFt < COMPLIANCE_ALERT_AGL_LIMIT_FT) return@mapNotNull null
@@ -1033,7 +1039,11 @@ class StreamsViewModel(
                         mappedId = it.mappedId,
                         aglFt = it.aglFt,
                         thresholdFt = it.thresholdFt,
-                        staleDem = it.staleDem
+                        staleDem = it.staleDem,
+                        telemetryTimestampMs = _droneStates[it.mappedId]
+                            ?.source
+                            ?.mostRecentMsecTimestamp
+                            ?: 0L,
                     )
                 }
         )
@@ -1057,7 +1067,11 @@ class StreamsViewModel(
                         mappedId = it.mappedId,
                         aglFt = it.aglFt,
                         thresholdFt = it.thresholdFt,
-                        staleDem = it.staleDem
+                        staleDem = it.staleDem,
+                        telemetryTimestampMs = _droneStates[it.mappedId]
+                            ?.source
+                            ?.mostRecentMsecTimestamp
+                            ?: 0L,
                     )
                 }
         )
@@ -1383,6 +1397,15 @@ class StreamsViewModel(
         }
         return true
     }
+
+    fun managedVideoRenderSessionId(designator: String): Long? =
+        ffmpegProbeService?.activeRenderSessionId(designator)
+
+    fun managedVideoSourceInfo(designator: String) =
+        ffmpegProbeService?.videoSourceInfo(designator)
+
+    fun hasRecentManagedVideoFrame(designator: String, maxAgeMs: Long = 6_000L): Boolean =
+        ffmpegProbeService?.hasRecentFrame(designator, maxAgeMs) == true
 
     fun closeStream(designator: String) {
         if (closeLocalPlaybackEntry(designator, showToast = true)) {

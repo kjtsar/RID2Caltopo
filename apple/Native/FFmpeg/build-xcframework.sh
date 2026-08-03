@@ -11,6 +11,7 @@ if [[ ! -x "$FFMPEG_SOURCE_DIR/configure" ]]; then
   echo "FFmpeg source not found at $FFMPEG_SOURCE_DIR" >&2
   exit 1
 fi
+"$REPO_ROOT/tools/verify_ffmpeg_source.sh" "$FFMPEG_SOURCE_DIR"
 
 build_slice() {
   local sdk="$1"

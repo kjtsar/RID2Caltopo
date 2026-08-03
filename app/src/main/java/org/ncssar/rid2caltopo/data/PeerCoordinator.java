@@ -10,6 +10,22 @@ public interface PeerCoordinator {
     interface CoordinationIndicatorListener {
         void onCoordinationIndicatorStateChanged(@NonNull CoordinationIndicatorState state);
     }
+    interface VideoStreamRequestListener {
+        void onVideoStreamRequest(@NonNull VideoStreamViewRequest request);
+        default void onVideoPreflightResult(
+                @NonNull String requestId,
+                @NonNull String routeKind,
+                long estimatedUplinkBps) {
+        }
+        default void onVideoPreflightFailure(
+                @NonNull String requestId,
+                @NonNull String reason) {
+        }
+        default void onVideoStreamRequestCancelled(@NonNull String requestId) {
+        }
+        default void onVideoMediaOffer(@NonNull VideoMediaOffer offer) {
+        }
+    }
 
     enum CoordinationIndicatorState {
         HEALTHY,
@@ -47,6 +63,25 @@ public interface PeerCoordinator {
     void updateMyPosition(double lat, double lon);
     void setPeerListChangedListener(@Nullable R2CMqttManager.PeerListChangedListener listener);
     void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener);
+    default void setVideoStreamRequestListener(
+            @Nullable VideoStreamRequestListener listener) {
+    }
+    default void updateManagedVideoStreams(
+            @NonNull String incidentName,
+            @NonNull List<ManagedVideoStreamAdvertisement> streams) {
+    }
+    default void respondToVideoStreamRequest(
+            @NonNull String requestId,
+            boolean approved,
+            int selectedWidth,
+            int selectedHeight,
+            double selectedFps,
+            long selectedBitrateBps) {
+    }
+    default void sendVideoMediaAnswer(@NonNull String requestId, @NonNull String sdp) {
+    }
+    default void sendVideoStreamTerminated(@NonNull String requestId, @NonNull String reason) {
+    }
     @NonNull List<R2CMqttManager.PeerState> getPeerList();
     @NonNull CoordinationIndicatorState getCoordinationIndicatorState();
     @NonNull

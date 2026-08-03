@@ -14,7 +14,7 @@ struct AppleNotamState: Equatable {
     var statusLine = ""
     var lastUpdated: Date?
     var queryCoordinate: OperationalNotamCoordinate?
-    var radiusNM = 2
+    var radiusStatuteMiles = 1
     var notices: [OperationalNotam] = []
     var suppressedCount = 0
     var errorMessage: String?
@@ -23,47 +23,69 @@ struct AppleNotamState: Equatable {
 @MainActor
 final class AppleNotamCenter: ObservableObject {
     static let shared = AppleNotamCenter()
+    private static let enrollmentActivationMigrationKey = "notam.enrollmentActivationMigration.v1"
 
     @Published private(set) var state = AppleNotamState()
-    @Published var enabled: Bool { didSet { defaults.set(enabled, forKey: "notam.enabled") } }
+    @Published var enabled: Bool {
+        didSet {
+            defaults.set(enabled, forKey: "notam.enabled")
+            rebuildState(loading: false, coordinate: state.queryCoordinate, error: state.errorMessage)
+        }
+    }
     @Published var showOnMap: Bool { didSet { defaults.set(showOnMap, forKey: "notam.showOnMap") } }
     @Published var autoRefresh: Bool { didSet { defaults.set(autoRefresh, forKey: "notam.autoRefresh") } }
-    @Published var radiusNM: Int { didSet { defaults.set(radiusNM, forKey: "notam.radiusNM") } }
+    @Published var radiusStatuteMiles: Int {
+        didSet { defaults.set(radiusStatuteMiles, forKey: "notam.radiusStatuteMiles") }
+    }
     @Published var refreshIntervalSeconds: Int { didSet { defaults.set(refreshIntervalSeconds, forKey: "notam.refreshSeconds") } }
 
     private let defaults: UserDefaults
-    private var credentials: FaaSharedConfig?
-    private var token: String?
-    private var tokenExpiry = Date.distantPast
     private var lastFetchCoordinate: OperationalNotamCoordinate?
     private var lastAttempt = Date.distantPast
     private var lastSuccessfulNotices: [OperationalNotam] = []
     private var refreshTask: Task<Void, Never>?
+    private var proxyURL: URL?
+    private var proxyToken = ""
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         enabled = defaults.object(forKey: "notam.enabled") as? Bool ?? false
         showOnMap = defaults.object(forKey: "notam.showOnMap") as? Bool ?? true
         autoRefresh = defaults.object(forKey: "notam.autoRefresh") as? Bool ?? true
-        radiusNM = max(1, min(100, defaults.object(forKey: "notam.radiusNM") as? Int ?? 2))
-        refreshIntervalSeconds = max(30, defaults.object(forKey: "notam.refreshSeconds") as? Int ?? 300)
+        radiusStatuteMiles = max(
+            1,
+            min(100, defaults.object(forKey: "notam.radiusStatuteMiles") as? Int ?? 1)
+        )
+        refreshIntervalSeconds = max(
+            1_800,
+            defaults.object(forKey: "notam.refreshSeconds") as? Int ?? 1_800
+        )
         rebuildState(loading: false, coordinate: nil, error: nil)
     }
 
-    func configure(_ credentials: FaaSharedConfig?) {
-        let old = self.credentials
-        self.credentials = credentials
-        if old != credentials {
-            token = nil
-            tokenExpiry = .distantPast
-            rebuildState(loading: false, coordinate: state.queryCoordinate, error: nil)
+    func configure(faaProxyURL: String, trackerURLPrefix: String, trackerAPIKey: String) {
+        proxyURL = Self.validatedProxyURL(
+            faaProxyURL,
+            trackerURLPrefix: trackerURLPrefix
+        )
+        proxyToken = proxyURL == nil
+            ? ""
+            : trackerAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        rebuildState(loading: false, coordinate: state.queryCoordinate, error: nil)
+    }
+
+    func reconcileEnrollmentActivation(hasNotamAdminConfiguration: Bool) {
+        guard !defaults.bool(forKey: Self.enrollmentActivationMigrationKey) else { return }
+        if !hasNotamAdminConfiguration {
+            enabled = false
         }
+        defaults.set(true, forKey: Self.enrollmentActivationMigrationKey)
     }
 
     func update(location: CLLocation?, force: Bool = false) {
         let coordinate = location.map { OperationalNotamCoordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
         guard enabled else {
-            state = AppleNotamState(visible: false, enabled: false, configured: credentials != nil, radiusNM: radiusNM)
+            rebuildState(loading: false, coordinate: coordinate, error: nil)
             return
         }
         guard force || shouldRefresh(coordinate) else {
@@ -78,13 +100,15 @@ final class AppleNotamCenter: ObservableObject {
             defer { refreshTask = nil }
             do {
                 guard let coordinate else { throw AppleNotamError.locationUnavailable }
-                guard let credentials else { throw AppleNotamError.credentialsUnavailable }
-                let bearer = try await bearerToken(credentials)
-                let notices = try await fetchNotams(coordinate: coordinate, credentials: credentials, bearer: bearer)
+                guard isConfigured else { throw AppleNotamError.proxyUnavailable }
+                let notices = try await fetchNotams(coordinate: coordinate)
                 lastFetchCoordinate = coordinate
                 lastSuccessfulNotices = notices
                 rebuildState(loading: false, coordinate: coordinate, error: nil, successfulAt: Date())
-                AppleLog.info("NOTAM", "Fetched \(notices.count) notices radiusNM=\(radiusNM)")
+                AppleLog.info(
+                    "NOTAM",
+                    "Fetched \(notices.count) notices radiusStatuteMiles=\(radiusStatuteMiles)"
+                )
             } catch {
                 let message = error.localizedDescription
                 rebuildState(loading: false, coordinate: coordinate, error: message)
@@ -117,9 +141,10 @@ final class AppleNotamCenter: ObservableObject {
         lastSuccessfulNotices = [notice]
         state = AppleNotamState(
             visible: true, enabled: true, configured: true, loading: false, stale: false,
-            chipSeverity: .danger, chipLabel: "NOTAMs: RESTRICTED 0.0 NM",
+            chipSeverity: .danger, chipLabel: "NOTAMs: RESTRICTED 0.0 mi",
             statusLine: "1 nearby NOTAM (simulator).", lastUpdated: Date(),
-            queryCoordinate: .init(latitude: 39.7392, longitude: -104.9903), radiusNM: radiusNM,
+            queryCoordinate: .init(latitude: 39.7392, longitude: -104.9903),
+            radiusStatuteMiles: radiusStatuteMiles,
             notices: [notice]
         )
     }
@@ -138,8 +163,24 @@ final class AppleNotamCenter: ObservableObject {
         error: String?,
         successfulAt: Date? = nil
     ) {
-        let configured = credentials != nil
-        let filtered = OperationalNotamPolicy.filtered(lastSuccessfulNotices, radiusNM: radiusNM)
+        let configured = isConfigured
+        guard enabled else {
+            state = AppleNotamState(
+                visible: true,
+                enabled: false,
+                configured: configured,
+                chipSeverity: .neutral,
+                chipLabel: "NOTAMs disabled",
+                statusLine: "Nearby NOTAM monitoring is disabled.",
+                queryCoordinate: coordinate,
+                radiusStatuteMiles: radiusStatuteMiles
+            )
+            return
+        }
+        let filtered = OperationalNotamPolicy.filtered(
+            lastSuccessfulNotices,
+            radiusStatuteMiles: radiusStatuteMiles
+        )
         let updated = successfulAt ?? state.lastUpdated
         let stale = updated.map { Date().timeIntervalSince($0) > Double(max(refreshIntervalSeconds * 2, 600)) } ?? false
         state = AppleNotamState(
@@ -153,63 +194,77 @@ final class AppleNotamCenter: ObservableObject {
             statusLine: statusLine(configured: configured, loading: loading, count: filtered.visible.count, error: error),
             lastUpdated: updated,
             queryCoordinate: coordinate,
-            radiusNM: radiusNM,
+            radiusStatuteMiles: radiusStatuteMiles,
             notices: filtered.visible,
             suppressedCount: filtered.suppressed,
             errorMessage: error
         )
     }
 
-    private func bearerToken(_ credentials: FaaSharedConfig) async throws -> String {
-        if let token, Date().addingTimeInterval(60) < tokenExpiry { return token }
-        let url = URL(string: credentials.tokenURL.isEmpty ? "https://api-nms.aim.faa.gov/v1/auth/token" : credentials.tokenURL)
-        guard let url else { throw AppleNotamError.invalidConfiguration }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("Basic \(Data("\(credentials.clientID):\(credentials.clientSecret)".utf8).base64EncodedString())", forHTTPHeaderField: "Authorization")
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data("grant_type=client_credentials".utf8)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw AppleNotamError.service("No HTTP token response") }
-        guard (200 ..< 300).contains(http.statusCode) else { throw AppleNotamError.service("NOTAM authentication failed (HTTP \(http.statusCode)).") }
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let value = object["access_token"] as? String, !value.isEmpty
-        else { throw AppleNotamError.service("NOTAM token response did not include an access token.") }
-        token = value
-        tokenExpiry = Date().addingTimeInterval(max(60, (object["expires_in"] as? NSNumber)?.doubleValue ?? 1_800))
-        return value
+    private var isConfigured: Bool {
+        proxyURL != nil && !proxyToken.isEmpty
     }
 
     private func fetchNotams(
-        coordinate: OperationalNotamCoordinate,
-        credentials: FaaSharedConfig,
-        bearer: String
+        coordinate: OperationalNotamCoordinate
     ) async throws -> [OperationalNotam] {
-        let base = credentials.apiBaseURL.isEmpty ? "https://api-nms.aim.faa.gov/nmsapi" : credentials.apiBaseURL
-        guard var components = URLComponents(string: base + (base.hasSuffix("/") ? "v1/notams" : "/v1/notams")) else {
+        guard let proxyURL,
+              var components = URLComponents(url: proxyURL, resolvingAgainstBaseURL: false)
+        else {
             throw AppleNotamError.invalidConfiguration
         }
         components.queryItems = [
             URLQueryItem(name: "latitude", value: String(format: "%.6f", coordinate.latitude)),
             URLQueryItem(name: "longitude", value: String(format: "%.6f", coordinate.longitude)),
-            URLQueryItem(name: "radius", value: String(radiusNM)),
+            URLQueryItem(
+                name: "radius",
+                value: String(
+                    OperationalNotamPolicy.faaQueryRadiusNM(
+                        radiusStatuteMiles: radiusStatuteMiles
+                    )
+                )
+            ),
         ]
         guard let url = components.url else { throw AppleNotamError.invalidConfiguration }
         var request = URLRequest(url: url)
         request.timeoutInterval = 45
-        request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
-        request.setValue("GEOJSON", forHTTPHeaderField: "nmsResponseFormat")
+        request.setValue(proxyToken, forHTTPHeaderField: "X-SAR-Token")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AppleNotamError.service("No HTTP NOTAM response") }
         guard (200 ..< 300).contains(http.statusCode) else { throw AppleNotamError.service("NOTAM query failed (HTTP \(http.statusCode)).") }
-        return try OperationalNotamParser.parseResponse(data, pilot: coordinate, operatingRadiusNM: 2)
+        return try OperationalNotamParser.parseResponse(
+            data,
+            pilot: coordinate,
+            operatingRadiusNM: OperationalFacilityMap.operatingRadiusNM
+        )
+    }
+
+    private static func validatedProxyURL(
+        _ value: String,
+        trackerURLPrefix: String
+    ) -> URL? {
+        guard let proxy = URLComponents(
+            string: value.trimmingCharacters(in: .whitespacesAndNewlines)
+        ),
+        let tracker = URLComponents(
+            string: trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        ),
+        proxy.scheme?.lowercased() == "https",
+        tracker.scheme?.lowercased() == "https",
+        let proxyHost = proxy.host?.lowercased(),
+        let trackerHost = tracker.host?.lowercased(),
+        proxyHost == trackerHost,
+        proxy.port == tracker.port,
+        proxy.path == "/faa/notams",
+        proxyHost == "r2c-tracker.com" || proxyHost.hasSuffix(".r2c-tracker.com")
+        else { return nil }
+        return proxy.url
     }
 
     private func statusLine(configured: Bool, loading: Bool, count: Int, error: String?) -> String {
         if loading { return "Refreshing nearby NOTAMs…" }
         if let error { return error }
-        if !configured { return "FAA NOTAM credentials have not been imported." }
+        if !configured { return "FAA proxy access is unavailable in this build." }
         return count == 0 ? "No nearby NOTAM restrictions found." : "\(count) nearby NOTAM(s)."
     }
 
@@ -221,15 +276,15 @@ final class AppleNotamCenter: ObservableObject {
 
 private enum AppleNotamError: LocalizedError {
     case locationUnavailable
-    case credentialsUnavailable
+    case proxyUnavailable
     case invalidConfiguration
     case service(String)
 
     var errorDescription: String? {
         switch self {
         case .locationUnavailable: "Waiting for GPS location before querying NOTAMs."
-        case .credentialsUnavailable: "NOTAM monitoring is enabled, but FAA credentials have not been imported."
-        case .invalidConfiguration: "FAA NOTAM service configuration is invalid."
+        case .proxyUnavailable: "NOTAM monitoring is enabled, but FAA proxy access is unavailable."
+        case .invalidConfiguration: "FAA proxy configuration is invalid."
         case let .service(message): message
         }
     }
@@ -252,11 +307,17 @@ struct AppleNotamPanel: View {
                     }
                     if center.state.stale { Label("Results are stale", systemImage: "clock.badge.exclamationmark").foregroundStyle(.orange) }
                     Button("Refresh Now") { center.refreshNow(location: location) }
-                        .disabled(center.state.loading)
+                        .disabled(center.state.loading || !center.state.enabled)
                 }
                 Section("Nearby NOTAMs") {
                     if center.state.notices.isEmpty {
-                        Text(center.state.configured ? "No nearby notices." : "Import an FAA configuration to enable queries.")
+                        Text(
+                            !center.state.enabled
+                                ? "Nearby NOTAM monitoring is disabled."
+                                : (center.state.configured
+                                    ? "No nearby notices."
+                                    : "Load the organization tracker configuration to enable queries.")
+                        )
                             .foregroundStyle(.secondary)
                     }
                     ForEach(center.state.notices) { notice in

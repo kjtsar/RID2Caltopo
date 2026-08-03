@@ -87,3 +87,21 @@ enum AppleDeviceIdentity {
         OperationalDeviceName.displayName(fromHostname: hostname) ?? "iPad"
     }
 }
+
+enum AppleBuildMetadata {
+    static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+    }
+
+    static var artifactDate: Date? {
+        guard let executableURL = Bundle.main.executableURL,
+              let values = try? executableURL.resourceValues(forKeys: [.contentModificationDateKey])
+        else { return nil }
+        return values.contentModificationDate
+    }
+
+    static var buildTime: String {
+        guard let artifactDate else { return "unknown" }
+        return RidBuildMetadata.formattedBuildTime(artifactDate)
+    }
+}

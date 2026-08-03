@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.notam
 
 import java.util.Locale
+import org.ncssar.rid2caltopo.airspace.OperatingArea
 
 internal object NotamPolicy {
     private fun severityRank(severity: NotamChipSeverity): Int = when (severity) {
@@ -21,11 +22,15 @@ internal object NotamPolicy {
         )
     }
 
-    fun filterWithinRadius(notices: List<NearbyNotam>, radiusNm: Int): Pair<List<NearbyNotam>, Int> {
+    fun filterWithinRadius(
+        notices: List<NearbyNotam>,
+        radiusStatuteMiles: Int
+    ): Pair<List<NearbyNotam>, Int> {
+        val radiusNm = OperatingArea.statuteMilesToNauticalMiles(radiusStatuteMiles.toDouble())
         val visible = notices.filter { notice ->
             notice.intersectsPilotBubble ||
                 notice.distanceNm == null ||
-                notice.distanceNm <= radiusNm.toDouble()
+                notice.distanceNm <= radiusNm
         }
         return visible to (notices.size - visible.size)
     }
@@ -70,5 +75,7 @@ internal object NotamPolicy {
     }
 
     private fun formatDistance(notice: NearbyNotam): String =
-        notice.distanceNm?.let { String.format(Locale.US, "%.1f NM", it) } ?: "pilot area"
+        notice.distanceNm?.let {
+            String.format(Locale.US, "%.1f mi", it / OperatingArea.radiusNm)
+        } ?: "pilot area"
 }

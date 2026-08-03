@@ -10,7 +10,24 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
 
     private var manager: CLLocationManager?
     private var physicalLocation: CLLocation?
+    private var physicalLocationIsProvisional = false
     private var started = false
+
+    // A Wi-Fi-only iPad can temporarily have no live Core Location fix even
+    // though Location Services remain authorized. Prefer the device's recent
+    // last-known position to an application-wide map default while a fresh fix
+    // is requested. The status text continues to make the fallback explicit.
+    private let maximumProvisionalLocationAge: TimeInterval = 2 * 60 * 60
+    private let defaults = UserDefaults.standard
+
+    private enum PersistedLocationKey {
+        static let latitude = "location.lastPhysical.latitude"
+        static let longitude = "location.lastPhysical.longitude"
+        static let altitude = "location.lastPhysical.altitude"
+        static let horizontalAccuracy = "location.lastPhysical.horizontalAccuracy"
+        static let verticalAccuracy = "location.lastPhysical.verticalAccuracy"
+        static let timestamp = "location.lastPhysical.timestamp"
+    }
 
     override init() {
         authorizationStatus = .notDetermined
@@ -36,6 +53,8 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
             return
         }
         let manager = makeManager()
+        publishProvisionalLocationIfUsable(manager.location, source: "Core Location cache")
+        publishProvisionalLocationIfUsable(persistedPhysicalLocation(), source: "persisted device fix")
         applyAuthorizationStatus(manager.authorizationStatus)
     }
 
@@ -80,6 +99,9 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
         guard locationOverride != nil else { return }
         locationOverride = nil
         lastLocation = physicalLocation
+        if physicalLocationIsProvisional, physicalLocation != nil {
+            errorMessage = "Using last known location; current fix unavailable"
+        }
         AppleLog.info("Location", "Developer override cleared")
     }
 
@@ -101,22 +123,24 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let location = locations.last,
-              location.horizontalAccuracy >= 0,
-              abs(location.timestamp.timeIntervalSinceNow) < 30
-        else { return }
-        physicalLocation = location
-        if locationOverride == nil {
-            lastLocation = location
+        guard let location = locations.last(where: { $0.horizontalAccuracy >= 0 }) else { return }
+        let age = max(0, -location.timestamp.timeIntervalSinceNow)
+        guard age < 30 else {
+            publishProvisionalLocationIfUsable(location, source: "location update cache")
+            return
         }
-        errorMessage = nil
+        publishPhysicalLocation(location, provisional: false, source: "fresh fix")
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         if let locationError = error as? CLError, locationError.code == .locationUnknown {
             return
         }
-        errorMessage = error.localizedDescription
+        if physicalLocationIsProvisional, physicalLocation != nil {
+            errorMessage = "Using last known location; current fix unavailable"
+        } else {
+            errorMessage = error.localizedDescription
+        }
         AppleLog.error("Location", "Update failed: \(error.localizedDescription)")
     }
 
@@ -139,6 +163,73 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
             manager?.stopUpdatingLocation()
             errorMessage = "Unknown location authorization state"
         }
+    }
+
+    private func publishProvisionalLocationIfUsable(_ location: CLLocation?, source: String) {
+        guard physicalLocation == nil,
+              let location,
+              location.horizontalAccuracy >= 0
+        else { return }
+        let age = max(0, -location.timestamp.timeIntervalSinceNow)
+        guard age <= maximumProvisionalLocationAge else {
+            AppleLog.info(
+                "Location",
+                "Ignored stale \(source) ageSeconds=\(Int(age.rounded()))"
+            )
+            return
+        }
+        publishPhysicalLocation(location, provisional: true, source: source)
+    }
+
+    private func publishPhysicalLocation(
+        _ location: CLLocation,
+        provisional: Bool,
+        source: String
+    ) {
+        physicalLocation = location
+        physicalLocationIsProvisional = provisional
+        if !provisional {
+            persistPhysicalLocation(location)
+        }
+        if locationOverride == nil {
+            lastLocation = location
+        }
+        errorMessage = provisional
+            ? "Using last known location while locating…"
+            : nil
+        let age = max(0, -location.timestamp.timeIntervalSinceNow)
+        AppleLog.info(
+            "Location",
+            "Published \(source) latitude=\(String(format: "%.6f", location.coordinate.latitude)) " +
+                "longitude=\(String(format: "%.6f", location.coordinate.longitude)) " +
+                "accuracyMeters=\(Int(location.horizontalAccuracy.rounded())) " +
+                "ageSeconds=\(Int(age.rounded())) provisional=\(provisional)"
+        )
+    }
+
+    private func persistPhysicalLocation(_ location: CLLocation) {
+        defaults.set(location.coordinate.latitude, forKey: PersistedLocationKey.latitude)
+        defaults.set(location.coordinate.longitude, forKey: PersistedLocationKey.longitude)
+        defaults.set(location.altitude, forKey: PersistedLocationKey.altitude)
+        defaults.set(location.horizontalAccuracy, forKey: PersistedLocationKey.horizontalAccuracy)
+        defaults.set(location.verticalAccuracy, forKey: PersistedLocationKey.verticalAccuracy)
+        defaults.set(location.timestamp.timeIntervalSince1970, forKey: PersistedLocationKey.timestamp)
+    }
+
+    private func persistedPhysicalLocation() -> CLLocation? {
+        guard defaults.object(forKey: PersistedLocationKey.timestamp) != nil else { return nil }
+        let coordinate = CLLocationCoordinate2D(
+            latitude: defaults.double(forKey: PersistedLocationKey.latitude),
+            longitude: defaults.double(forKey: PersistedLocationKey.longitude)
+        )
+        guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+        return CLLocation(
+            coordinate: coordinate,
+            altitude: defaults.double(forKey: PersistedLocationKey.altitude),
+            horizontalAccuracy: defaults.double(forKey: PersistedLocationKey.horizontalAccuracy),
+            verticalAccuracy: defaults.double(forKey: PersistedLocationKey.verticalAccuracy),
+            timestamp: Date(timeIntervalSince1970: defaults.double(forKey: PersistedLocationKey.timestamp))
+        )
     }
 
     private func authorizationDescription(_ status: CLAuthorizationStatus) -> String {

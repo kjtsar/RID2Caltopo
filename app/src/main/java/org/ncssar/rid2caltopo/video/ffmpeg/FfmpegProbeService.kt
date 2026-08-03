@@ -616,6 +616,15 @@ class FfmpegProbeService(
         }
     }
 
+    fun activeRenderSessionId(designator: String): Long? = synchronized(stateLock) {
+        renderSessions[designator] ?: suspendedRenderSessions[designator]
+    }
+
+    fun videoSourceInfo(designator: String): FfmpegBridge.VideoSourceInfo? {
+        val sessionId = activeRenderSessionId(designator) ?: return null
+        return FfmpegBridge.videoSourceInfo(sessionId)
+    }
+
     private fun sessionIdsForDesignatorLocked(designator: String): List<Long> {
         val activeSessionId = renderSessions[designator]
         val managedSessionIds = managedRenderSessions

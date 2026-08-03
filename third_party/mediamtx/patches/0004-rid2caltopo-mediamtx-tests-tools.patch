@@ -1,0 +1,732 @@
+diff --git a/internal/servers/rtmp/conn_ping_test.go b/internal/servers/rtmp/conn_ping_test.go
+new file mode 100644
+index 00000000..6ba97c53
+--- /dev/null
++++ b/internal/servers/rtmp/conn_ping_test.go
+@@ -0,0 +1,73 @@
++package rtmp
++
++import (
++	"errors"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++func TestStartIdlePingRequests(t *testing.T) {
++	var mu sync.Mutex
++	var values []uint32
++	lastMediaUnixNano := time.Now().UnixNano()
++
++	done := startIdlePingRequests(10*time.Millisecond, 2*time.Millisecond, &lastMediaUnixNano, func(serverTime uint32) error {
++		mu.Lock()
++		values = append(values, serverTime)
++		mu.Unlock()
++		return nil
++	}, nil)
++
++	time.Sleep(20 * time.Millisecond)
++
++	mu.Lock()
++	got := len(values)
++	mu.Unlock()
++	if got != 1 {
++		t.Fatalf("expected 1 ping request after going idle, got %d", got)
++	}
++
++	atomic.StoreInt64(&lastMediaUnixNano, time.Now().UnixNano())
++	time.Sleep(5 * time.Millisecond)
++	atomic.StoreInt64(&lastMediaUnixNano, time.Now().Add(-20*time.Millisecond).UnixNano())
++	time.Sleep(20 * time.Millisecond)
++
++	close(done)
++
++	mu.Lock()
++	defer mu.Unlock()
++
++	if len(values) < 2 {
++		t.Fatalf("expected a second ping request after a new idle period, got %d", len(values))
++	}
++}
++
++func TestStartIdlePingRequestsStopsOnError(t *testing.T) {
++	errBoom := errors.New("boom")
++	called := make(chan error, 1)
++	attempts := 0
++	lastMediaUnixNano := time.Now().Add(-20 * time.Millisecond).UnixNano()
++
++	done := startIdlePingRequests(10*time.Millisecond, 2*time.Millisecond, &lastMediaUnixNano, func(uint32) error {
++		attempts++
++		return errBoom
++	}, func(err error) {
++		called <- err
++	})
++	defer close(done)
++
++	select {
++	case err := <-called:
++		if !errors.Is(err, errBoom) {
++			t.Fatalf("unexpected error: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("timed out waiting for error callback")
++	}
++
++	if attempts != 1 {
++		t.Fatalf("expected 1 ping attempt, got %d", attempts)
++	}
++}
+diff --git a/scripts/rtmp_capture_analyzer/main.go b/scripts/rtmp_capture_analyzer/main.go
+new file mode 100644
+index 00000000..0f2cbfd0
+--- /dev/null
++++ b/scripts/rtmp_capture_analyzer/main.go
+@@ -0,0 +1,556 @@
++package main
++
++import (
++	"bufio"
++	"bytes"
++	"errors"
++	"flag"
++	"fmt"
++	"os"
++	"os/exec"
++	"regexp"
++	"sort"
++	"strconv"
++	"strings"
++)
++
++type peerBandwidth struct {
++	Value uint32
++	Type  uint8
++}
++
++type directionStats struct {
++	Bytes            uint64
++	Frames           int
++	Retransmissions  int
++	RTMPTypeCounts   map[uint8]int
++	Acknowledgements []uint32
++	WindowAckSizes   []uint32
++	PeerBandwidths   []peerBandwidth
++	FirstFrame       uint64
++	LastFrame        uint64
++	FirstTimestamp   float64
++	LastTimestamp    float64
++}
++
++type streamStats struct {
++	ID         int
++	Directions map[string]*directionStats
++}
++
++type row struct {
++	FrameNumber        uint64
++	TimeEpoch          float64
++	StreamID           int
++	SrcIP              string
++	SrcPort            uint16
++	DstIP              string
++	DstPort            uint16
++	TCPLen             uint64
++	Retransmission     bool
++	TypeIDs            []uint8
++	AcknowledgeValues  []uint32
++	WindowAckValues    []uint32
++	PeerBandwidthTypes []uint8
++}
++
++var digitsRegexp = regexp.MustCompile(`\d+`)
++
++func main() {
++	var pcapPath string
++	var tsharkPath string
++	var streamFilter int
++	var portFilter int
++
++	flag.StringVar(&pcapPath, "pcap", "", "pcap or pcapng file to analyze")
++	flag.StringVar(&tsharkPath, "tshark", "tshark", "path to tshark")
++	flag.IntVar(&streamFilter, "stream", -1, "optional tcp.stream filter")
++	flag.IntVar(&portFilter, "port", 0, "optional TCP port to decode as RTMP")
++	flag.Parse()
++
++	if pcapPath == "" {
++		fmt.Fprintln(os.Stderr, "missing required -pcap flag")
++		os.Exit(2)
++	}
++
++	ports, err := discoverTCPPorts(tsharkPath, pcapPath, streamFilter, portFilter)
++	if err != nil {
++		fmt.Fprintf(os.Stderr, "discover ports: %v\n", err)
++		os.Exit(1)
++	}
++
++	rows, err := extractRows(tsharkPath, pcapPath, ports, streamFilter)
++	if err != nil {
++		fmt.Fprintf(os.Stderr, "extract rtmp rows: %v\n", err)
++		os.Exit(1)
++	}
++
++	if len(rows) == 0 {
++		fmt.Println("No RTMP-decoded TCP payload was found in the capture.")
++		return
++	}
++
++	streams := aggregate(rows)
++	printReport(streams)
++}
++
++func discoverTCPPorts(tsharkPath, pcapPath string, streamFilter int, portFilter int) ([]uint16, error) {
++	if portFilter > 0 {
++		return []uint16{uint16(portFilter)}, nil
++	}
++
++	args := []string{"-r", pcapPath}
++	filter := "tcp.len > 0"
++	if streamFilter >= 0 {
++		filter += fmt.Sprintf(" && tcp.stream == %d", streamFilter)
++	}
++	args = append(args,
++		"-Y", filter,
++		"-T", "fields",
++		"-e", "tcp.srcport",
++		"-e", "tcp.dstport",
++		"-E", "header=n",
++		"-E", "separator=,",
++	)
++
++	out, err := exec.Command(tsharkPath, args...).CombinedOutput()
++	if err != nil {
++		if len(bytes.TrimSpace(out)) == 0 {
++			return nil, err
++		}
++	}
++
++	uniq := make(map[uint16]struct{})
++	scanner := bufio.NewScanner(bytes.NewReader(out))
++	for scanner.Scan() {
++		for _, field := range digitsRegexp.FindAllString(scanner.Text(), -1) {
++			v, err := strconv.ParseUint(field, 10, 16)
++			if err != nil {
++				return nil, fmt.Errorf("parse port %q: %w", field, err)
++			}
++			uniq[uint16(v)] = struct{}{}
++		}
++	}
++	if err := scanner.Err(); err != nil {
++		return nil, err
++	}
++
++	ports := make([]uint16, 0, len(uniq))
++	for port := range uniq {
++		ports = append(ports, port)
++	}
++	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
++	return ports, nil
++}
++
++func extractRows(tsharkPath, pcapPath string, ports []uint16, streamFilter int) ([]row, error) {
++	args := []string{"-r", pcapPath}
++	for _, port := range ports {
++		args = append(args, "-d", fmt.Sprintf("tcp.port==%d,rtmpt", port))
++	}
++
++	filter := "tcp.len > 0"
++	if streamFilter >= 0 {
++		filter += fmt.Sprintf(" && tcp.stream == %d", streamFilter)
++	}
++
++	args = append(args,
++		"-Y", filter,
++		"-T", "fields",
++		"-e", "frame.number",
++		"-e", "frame.time_epoch",
++		"-e", "tcp.stream",
++		"-e", "ip.src",
++		"-e", "ipv6.src",
++		"-e", "tcp.srcport",
++		"-e", "ip.dst",
++		"-e", "ipv6.dst",
++		"-e", "tcp.dstport",
++		"-e", "tcp.len",
++		"-e", "tcp.analysis.retransmission",
++		"-e", "tcp.analysis.fast_retransmission",
++		"-e", "tcp.analysis.spurious_retransmission",
++		"-e", "rtmpt.header.typeid",
++		"-e", "rtmpt.scm.seq",
++		"-e", "rtmpt.scm.was",
++		"-e", "rtmpt.scm.limittype",
++		"-E", "header=n",
++		"-E", "separator=/t",
++		"-E", "occurrence=a",
++	)
++
++	out, err := exec.Command(tsharkPath, args...).CombinedOutput()
++	if err != nil {
++		var exitErr *exec.ExitError
++		if errors.As(err, &exitErr) {
++			if len(bytes.TrimSpace(out)) != 0 {
++				goto parseOutput
++			}
++			return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
++		}
++		return nil, err
++	}
++
++parseOutput:
++	var rows []row
++	scanner := bufio.NewScanner(bytes.NewReader(out))
++	for scanner.Scan() {
++		line := scanner.Text()
++		if strings.TrimSpace(line) == "" {
++			continue
++		}
++		if !strings.Contains(line, "\t") {
++			continue
++		}
++
++		r, err := parseTSVRow(line)
++		if err != nil {
++			return nil, err
++		}
++		if len(r.TypeIDs) == 0 {
++			continue
++		}
++		rows = append(rows, r)
++	}
++	if err := scanner.Err(); err != nil {
++		return nil, err
++	}
++
++	return rows, nil
++}
++
++func parseTSVRow(line string) (row, error) {
++	fields := strings.Split(line, "\t")
++	if len(fields) < 17 {
++		return row{}, fmt.Errorf("unexpected tshark row with %d fields", len(fields))
++	}
++
++	frameNumber, err := strconv.ParseUint(firstToken(fields[0]), 10, 64)
++	if err != nil {
++		return row{}, fmt.Errorf("parse frame number %q: %w", fields[0], err)
++	}
++	timeEpoch, err := strconv.ParseFloat(firstToken(fields[1]), 64)
++	if err != nil {
++		return row{}, fmt.Errorf("parse time %q: %w", fields[1], err)
++	}
++	streamID, err := strconv.Atoi(firstToken(fields[2]))
++	if err != nil {
++		return row{}, fmt.Errorf("parse stream id %q: %w", fields[2], err)
++	}
++	srcPort, err := strconv.ParseUint(firstToken(fields[5]), 10, 16)
++	if err != nil {
++		return row{}, fmt.Errorf("parse src port %q: %w", fields[5], err)
++	}
++	dstPort, err := strconv.ParseUint(firstToken(fields[8]), 10, 16)
++	if err != nil {
++		return row{}, fmt.Errorf("parse dst port %q: %w", fields[8], err)
++	}
++	tcpLen, err := strconv.ParseUint(firstToken(fields[9]), 10, 64)
++	if err != nil {
++		return row{}, fmt.Errorf("parse tcp len %q: %w", fields[9], err)
++	}
++
++	typeIDs, err := parseUint8List(fields[13])
++	if err != nil {
++		return row{}, fmt.Errorf("parse type ids %q: %w", fields[13], err)
++	}
++	acks, err := parseUint32List(fields[14])
++	if err != nil {
++		return row{}, fmt.Errorf("parse acknowledge values %q: %w", fields[14], err)
++	}
++	windowAcks, err := parseUint32List(fields[15])
++	if err != nil {
++		return row{}, fmt.Errorf("parse window ack values %q: %w", fields[15], err)
++	}
++	peerTypes, err := parseUint8List(fields[16])
++	if err != nil {
++		return row{}, fmt.Errorf("parse peer bandwidth types %q: %w", fields[16], err)
++	}
++
++	return row{
++		FrameNumber:        frameNumber,
++		TimeEpoch:          timeEpoch,
++		StreamID:           streamID,
++		SrcIP:              firstNonEmpty(firstToken(fields[3]), firstToken(fields[4])),
++		SrcPort:            uint16(srcPort),
++		DstIP:              firstNonEmpty(firstToken(fields[6]), firstToken(fields[7])),
++		DstPort:            uint16(dstPort),
++		TCPLen:             tcpLen,
++		Retransmission:     fields[10] != "" || fields[11] != "" || fields[12] != "",
++		TypeIDs:            typeIDs,
++		AcknowledgeValues:  acks,
++		WindowAckValues:    windowAcks,
++		PeerBandwidthTypes: peerTypes,
++	}, nil
++}
++
++func parseUint8List(in string) ([]uint8, error) {
++	parts := splitMultiValue(in)
++	out := make([]uint8, 0, len(parts))
++	for _, part := range parts {
++		v, err := strconv.ParseUint(part, 0, 8)
++		if err != nil {
++			return nil, err
++		}
++		out = append(out, uint8(v))
++	}
++	return out, nil
++}
++
++func parseUint32List(in string) ([]uint32, error) {
++	parts := splitMultiValue(in)
++	out := make([]uint32, 0, len(parts))
++	for _, part := range parts {
++		v, err := strconv.ParseUint(part, 0, 32)
++		if err != nil {
++			return nil, err
++		}
++		out = append(out, uint32(v))
++	}
++	return out, nil
++}
++
++func splitMultiValue(in string) []string {
++	if in == "" {
++		return nil
++	}
++	return strings.FieldsFunc(in, func(r rune) bool {
++		return r == ','
++	})
++}
++
++func firstToken(in string) string {
++	parts := splitMultiValue(in)
++	if len(parts) == 0 {
++		return ""
++	}
++	return parts[0]
++}
++
++func firstNonEmpty(values ...string) string {
++	for _, v := range values {
++		if v != "" {
++			return v
++		}
++	}
++	return ""
++}
++
++func aggregate(rows []row) []*streamStats {
++	streamMap := make(map[int]*streamStats)
++
++	for _, r := range rows {
++		st := streamMap[r.StreamID]
++		if st == nil {
++			st = &streamStats{
++				ID:         r.StreamID,
++				Directions: make(map[string]*directionStats),
++			}
++			streamMap[r.StreamID] = st
++		}
++
++		key := fmt.Sprintf("%s:%d -> %s:%d", r.SrcIP, r.SrcPort, r.DstIP, r.DstPort)
++		ds := st.Directions[key]
++		if ds == nil {
++			ds = &directionStats{RTMPTypeCounts: make(map[uint8]int)}
++			st.Directions[key] = ds
++		}
++
++		ds.Bytes += r.TCPLen
++		ds.Frames++
++		if r.Retransmission {
++			ds.Retransmissions++
++		}
++		if ds.FirstFrame == 0 || r.FrameNumber < ds.FirstFrame {
++			ds.FirstFrame = r.FrameNumber
++			ds.FirstTimestamp = r.TimeEpoch
++		}
++		if r.FrameNumber > ds.LastFrame {
++			ds.LastFrame = r.FrameNumber
++			ds.LastTimestamp = r.TimeEpoch
++		}
++
++		ackIndex := 0
++		windowIndex := 0
++		peerTypeIndex := 0
++		for _, typeID := range r.TypeIDs {
++			ds.RTMPTypeCounts[typeID]++
++			switch typeID {
++			case 3:
++				if ackIndex < len(r.AcknowledgeValues) {
++					ds.Acknowledgements = append(ds.Acknowledgements, r.AcknowledgeValues[ackIndex])
++					ackIndex++
++				}
++			case 5:
++				if windowIndex < len(r.WindowAckValues) {
++					ds.WindowAckSizes = append(ds.WindowAckSizes, r.WindowAckValues[windowIndex])
++					windowIndex++
++				}
++			case 6:
++				if windowIndex < len(r.WindowAckValues) {
++					pb := peerBandwidth{Value: r.WindowAckValues[windowIndex]}
++					windowIndex++
++					if peerTypeIndex < len(r.PeerBandwidthTypes) {
++						pb.Type = r.PeerBandwidthTypes[peerTypeIndex]
++						peerTypeIndex++
++					}
++					ds.PeerBandwidths = append(ds.PeerBandwidths, pb)
++				}
++			}
++		}
++	}
++
++	out := make([]*streamStats, 0, len(streamMap))
++	for _, st := range streamMap {
++		out = append(out, st)
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
++	return out
++}
++
++func printReport(streams []*streamStats) {
++	for _, st := range streams {
++		fmt.Printf("TCP stream %d\n", st.ID)
++
++		keys := make([]string, 0, len(st.Directions))
++		for key := range st.Directions {
++			keys = append(keys, key)
++		}
++		sort.Strings(keys)
++
++		for _, key := range keys {
++			ds := st.Directions[key]
++			fmt.Printf("  %s\n", key)
++			fmt.Printf("    TCP payload bytes: %d\n", ds.Bytes)
++			fmt.Printf("    Frames: %d\n", ds.Frames)
++			fmt.Printf("    Retransmissions: %d\n", ds.Retransmissions)
++			fmt.Printf("    RTMP types: %s\n", formatTypeCounts(ds.RTMPTypeCounts))
++			fmt.Printf("    Window Acknowledgement Size (type 0x05): %s\n", formatUint32List(ds.WindowAckSizes))
++			fmt.Printf("    Set Peer Bandwidth (type 0x06): %s\n", formatPeerBandwidths(ds.PeerBandwidths))
++			fmt.Printf("    Acknowledgements (type 0x03): %s\n", formatUint32List(ds.Acknowledgements))
++		}
++
++		fmt.Printf("  Inference\n")
++		for _, line := range inferStream(st) {
++			fmt.Printf("    %s\n", line)
++		}
++		fmt.Println()
++	}
++}
++
++func inferStream(st *streamStats) []string {
++	keys := make([]string, 0, len(st.Directions))
++	for key := range st.Directions {
++		keys = append(keys, key)
++	}
++	sort.Strings(keys)
++
++	var out []string
++	for _, srcKey := range keys {
++		srcStats := st.Directions[srcKey]
++		for _, dstKey := range keys {
++			if srcKey == dstKey {
++				continue
++			}
++			srcLeft, srcRight, ok := splitDirection(srcKey)
++			if !ok {
++				continue
++			}
++			dstLeft, dstRight, ok := splitDirection(dstKey)
++			if !ok {
++				continue
++			}
++			if srcLeft != dstRight || srcRight != dstLeft {
++				continue
++			}
++
++			dstStats := st.Directions[dstKey]
++			window := firstValue(dstStats.WindowAckSizes)
++			acks := len(dstStats.Acknowledgements)
++			switch {
++			case window == 0 && acks == 0:
++				out = append(out, fmt.Sprintf("%s has no visible peer window or reverse acknowledgements from %s.", srcKey, dstKey))
++			case window > 0 && srcStats.Bytes < uint64(window):
++				out = append(out, fmt.Sprintf("%s sent %d bytes, below the peer-advertised %d-byte acknowledgement window from %s.", srcKey, srcStats.Bytes, window, dstKey))
++			case window > 0 && srcStats.Bytes >= uint64(window) && acks == 0:
++				out = append(out, fmt.Sprintf("%s exceeded the peer-advertised %d-byte acknowledgement window, but %s showed no type 0x03 acknowledgements.", srcKey, window, dstKey))
++			case window > 0 && acks > 0:
++				out = append(out, fmt.Sprintf("%s exceeded or approached the peer-advertised %d-byte window and reverse acknowledgements are visible from %s.", srcKey, window, dstKey))
++			}
++		}
++	}
++
++	if len(out) == 0 {
++		return []string{"No bidirectional RTMP directions were decoded strongly enough to make a window/ack inference."}
++	}
++
++	out = dedupeStrings(out)
++	sort.Strings(out)
++	return out
++}
++
++func splitDirection(key string) (string, string, bool) {
++	parts := strings.Split(key, " -> ")
++	if len(parts) != 2 {
++		return "", "", false
++	}
++	return parts[0], parts[1], true
++}
++
++func firstValue(values []uint32) uint32 {
++	if len(values) == 0 {
++		return 0
++	}
++	return values[0]
++}
++
++func formatTypeCounts(counts map[uint8]int) string {
++	if len(counts) == 0 {
++		return "none"
++	}
++	keys := make([]int, 0, len(counts))
++	for k := range counts {
++		keys = append(keys, int(k))
++	}
++	sort.Ints(keys)
++	parts := make([]string, 0, len(keys))
++	for _, key := range keys {
++		parts = append(parts, fmt.Sprintf("0x%02x=%d", key, counts[uint8(key)]))
++	}
++	return strings.Join(parts, ", ")
++}
++
++func formatUint32List(values []uint32) string {
++	if len(values) == 0 {
++		return "none"
++	}
++	parts := make([]string, len(values))
++	for i, v := range values {
++		parts[i] = strconv.FormatUint(uint64(v), 10)
++	}
++	return strings.Join(parts, ", ")
++}
++
++func formatPeerBandwidths(values []peerBandwidth) string {
++	if len(values) == 0 {
++		return "none"
++	}
++	parts := make([]string, len(values))
++	for i, v := range values {
++		parts[i] = fmt.Sprintf("%d(type=%d)", v.Value, v.Type)
++	}
++	return strings.Join(parts, ", ")
++}
++
++func dedupeStrings(in []string) []string {
++	seen := make(map[string]struct{}, len(in))
++	out := make([]string, 0, len(in))
++	for _, item := range in {
++		if _, ok := seen[item]; ok {
++			continue
++		}
++		seen[item] = struct{}{}
++		out = append(out, item)
++	}
++	return out
++}
+diff --git a/scripts/rtmp_capture_analyzer/main_test.go b/scripts/rtmp_capture_analyzer/main_test.go
+new file mode 100644
+index 00000000..a763a135
+--- /dev/null
++++ b/scripts/rtmp_capture_analyzer/main_test.go
+@@ -0,0 +1,85 @@
++package main
++
++import (
++	"reflect"
++	"testing"
++)
++
++func TestParseTSVRow(t *testing.T) {
++	line := "42\t108.683000\t7\t192.168.68.66\t\t1935\t192.168.68.64\t\t56306\t143\t\t\t\t0x05,0x06\t\t2500000,2500000\t2"
++
++	got, err := parseTSVRow(line)
++	if err != nil {
++		t.Fatalf("parseTSVRow() error = %v", err)
++	}
++
++	if got.StreamID != 7 {
++		t.Fatalf("StreamID = %d", got.StreamID)
++	}
++	if got.SrcIP != "192.168.68.66" || got.DstIP != "192.168.68.64" {
++		t.Fatalf("unexpected IPs: %+v", got)
++	}
++	if !reflect.DeepEqual(got.TypeIDs, []uint8{5, 6}) {
++		t.Fatalf("TypeIDs = %#v", got.TypeIDs)
++	}
++	if !reflect.DeepEqual(got.WindowAckValues, []uint32{2500000, 2500000}) {
++		t.Fatalf("WindowAckValues = %#v", got.WindowAckValues)
++	}
++	if !reflect.DeepEqual(got.PeerBandwidthTypes, []uint8{2}) {
++		t.Fatalf("PeerBandwidthTypes = %#v", got.PeerBandwidthTypes)
++	}
++}
++
++func TestAggregateTracksAckAndWindowMessages(t *testing.T) {
++	rows := []row{
++		{
++			StreamID:           7,
++			SrcIP:              "192.168.68.66",
++			SrcPort:            1935,
++			DstIP:              "192.168.68.64",
++			DstPort:            56306,
++			TCPLen:             143,
++			TypeIDs:            []uint8{5, 6},
++			WindowAckValues:    []uint32{2500000, 2500000},
++			PeerBandwidthTypes: []uint8{2},
++		},
++		{
++			StreamID:          7,
++			SrcIP:             "192.168.68.64",
++			SrcPort:           56306,
++			DstIP:             "192.168.68.66",
++			DstPort:           1935,
++			TCPLen:            512,
++			TypeIDs:           []uint8{3},
++			AcknowledgeValues: []uint32{2621440},
++			Retransmission:    true,
++		},
++	}
++
++	streams := aggregate(rows)
++	if len(streams) != 1 {
++		t.Fatalf("len(streams) = %d", len(streams))
++	}
++
++	serverDir := streams[0].Directions["192.168.68.66:1935 -> 192.168.68.64:56306"]
++	if serverDir == nil {
++		t.Fatal("missing server direction")
++	}
++	if !reflect.DeepEqual(serverDir.WindowAckSizes, []uint32{2500000}) {
++		t.Fatalf("WindowAckSizes = %#v", serverDir.WindowAckSizes)
++	}
++	if !reflect.DeepEqual(serverDir.PeerBandwidths, []peerBandwidth{{Value: 2500000, Type: 2}}) {
++		t.Fatalf("PeerBandwidths = %#v", serverDir.PeerBandwidths)
++	}
++
++	clientDir := streams[0].Directions["192.168.68.64:56306 -> 192.168.68.66:1935"]
++	if clientDir == nil {
++		t.Fatal("missing client direction")
++	}
++	if !reflect.DeepEqual(clientDir.Acknowledgements, []uint32{2621440}) {
++		t.Fatalf("Acknowledgements = %#v", clientDir.Acknowledgements)
++	}
++	if clientDir.Retransmissions != 1 {
++		t.Fatalf("Retransmissions = %d", clientDir.Retransmissions)
++	}
++}

@@ -70,11 +70,13 @@
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>RID2Caltopo scans nearby ASTM Remote ID Bluetooth broadcasts to locate aircraft.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>RID2Caltopo scans Android-compatible incident configuration QR codes.</string>
+	<string>RID2Caltopo scans configuration codes, aircraft serial numbers, and CalTopo account values.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>RID2Caltopo receives drone telemetry and video streams over the local network.</string>
-    <key>NSLocationWhenInUseUsageDescription</key>
-    <string>RID2Caltopo uses location to map Remote ID aircraft observations.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>RID2Caltopo uses location to map Remote ID aircraft observations.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>RID2Caltopo uses the microphone only when the operator enables VoIP for an authorized remote viewer.</string>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIFileSharingEnabled</key>

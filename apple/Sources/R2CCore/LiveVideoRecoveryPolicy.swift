@@ -1,5 +1,24 @@
 import Foundation
 
+/// Keeps a decoder choice stable after the native path proves incompatible
+/// with the current publisher. The failure count is scoped to the current
+/// native decoder instance, not to frames decoded earlier by another backend.
+public struct LiveVideoDecoderSelectionPolicy: Sendable {
+    public private(set) var requiresHLSFallback = false
+
+    public init() {}
+
+    public mutating func reset() {
+        requiresHLSFallback = false
+    }
+
+    public mutating func nativeDecoderFailed(decodedFramesThisAttempt: UInt64) {
+        if decodedFramesThisAttempt == 0 {
+            requiresHLSFallback = true
+        }
+    }
+}
+
 /// Testable recovery state for one live video decoder.
 ///
 /// AVPlayer can remain nominally ready while a live HLS presentation stops

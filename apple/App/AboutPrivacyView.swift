@@ -47,7 +47,7 @@ struct AboutPrivacyView: View {
                 Label("Bluetooth receives nearby ASTM Remote ID broadcasts.", systemImage: "antenna.radiowaves.left.and.right")
                 Label("Location places the operator relative to aircraft on the map.", systemImage: "location")
                 Label("Local Network receives controller video and optional external Remote ID observations.", systemImage: "network")
-                Text("When enabled by the operator, CalTopo receives aircraft positions and telemetry for the selected map. Configured tracker peer coordination receives the app-install zone identifier, device zone name, operator position, confirmed drone identity, and aircraft sightings needed to coordinate ownership. Apple MapKit may contact Apple's map service to load map content.")
+                Text("When enabled by the operator, CalTopo receives aircraft positions and telemetry for the selected map. Configured tracker peer coordination receives the app-install zone identifier, device zone name, operator position, confirmed drone identity, and aircraft sightings needed to coordinate ownership. Nearby NOTAM monitoring sends the operator location and selected radius to the configured tracker, which queries FAA without exposing FAA credentials to this app. Apple MapKit may contact Apple's map service to load map content.")
                     .foregroundStyle(.secondary)
                 Text("When protected-land checks are enabled, public NPS, USFWS, USFS, and Colorado Parks and Wildlife services receive a small geographic search area around the operator location. Returned boundaries are cached locally; these requests do not include aircraft tracks or an operator identity.")
                     .foregroundStyle(.secondary)

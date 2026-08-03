@@ -18,6 +18,31 @@
 local.properties
 /keystore.properties
 
+# Local signing and service credentials
+/upload-key.jks
+/ct_credentials.json
+/app/src/main/res/raw/keystore.p12
+
+# Nested website repository and generated local test output
+/website/
+/app/androidTest/
+/gradle/gradle-daemon-jvm.properties
+
+# Rebuilt from pinned public sources and repository patches.
+/app/src/main/assets/mediamtx
+/app/src/main/assets/mediamtx-*
+/app/src/main/mediamtx_*
+/app/src/main/jniLibs/
+/app/src/main/cpp/ffmpeg/include/
+
+# Local editor and Codex working state
+*~
+\#*\#
+.#*
+.~lock.*#
+/.codex/
+/.superpowers/
+
 # Real-world capture files — too large and potentially sensitive for the repo.
 # Tuning/regression frames derived from these live in tools/anomaly_test/frames/
 app/src/test/resources/vidcap/

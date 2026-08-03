@@ -6,7 +6,10 @@ public struct TrackerArchiveUploadConfiguration: Sendable, Equatable {
     public let organization: String
 
     public init(urlPrefix: String, apiKey: String, organization: String) {
-        self.urlPrefix = urlPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.urlPrefix = TrackerCoordinationEndpoint.organizationScopedPrefix(
+            from: urlPrefix,
+            organization: organization
+        )
         self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.organization = organization.trimmingCharacters(in: .whitespacesAndNewlines)
     }

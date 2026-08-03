@@ -26,6 +26,8 @@ public struct RidObservation: Sendable, Equatable {
     public let altitudeMeters: Double?
     public let heightMeters: Double?
     public let heightReference: HeightReference?
+    /// Raw F3411 NACp horizontal-accuracy code. Codes 10...12 declare <10 m containment.
+    public let horizontalAccuracyCode: UInt8?
     public let headingDegrees: Double?
     public let speedMetersPerSecond: Double?
     public let operatorLatitude: Double?
@@ -41,6 +43,7 @@ public struct RidObservation: Sendable, Equatable {
         altitudeMeters: Double? = nil,
         heightMeters: Double? = nil,
         heightReference: HeightReference? = nil,
+        horizontalAccuracyCode: UInt8? = nil,
         headingDegrees: Double? = nil,
         speedMetersPerSecond: Double? = nil,
         operatorLatitude: Double? = nil,
@@ -55,6 +58,7 @@ public struct RidObservation: Sendable, Equatable {
         self.altitudeMeters = altitudeMeters
         self.heightMeters = heightMeters
         self.heightReference = heightReference
+        self.horizontalAccuracyCode = horizontalAccuracyCode
         self.headingDegrees = RidHeading.normalized(headingDegrees)
         self.speedMetersPerSecond = speedMetersPerSecond
         self.operatorLatitude = operatorLatitude

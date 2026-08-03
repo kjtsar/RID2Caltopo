@@ -385,7 +385,7 @@ class CtDroneSpecTest {
     }
 
     @Test
-    fun activeTrackAwayFromHome_usesExtendedSignalLossDelay() {
+    fun activeTrackAwayFromHome_doesNotExtendConfiguredIdleLimit() {
         val drone = CtDroneSpec("RID123")
         val newTrackDelayMs = 30_000L
         val firstNowMs = System.currentTimeMillis()
@@ -412,13 +412,13 @@ class CtDroneSpecTest {
         ))
 
         assertEquals(
-            newTrackDelayMs * CaltopoClient.REMOTE_LOSS_TRACK_DELAY_MULTIPLIER,
+            newTrackDelayMs,
             CaltopoClient.TrackDelayInMsecForDroneSpecForTests(drone, newTrackDelayMs)
         )
     }
 
     @Test
-    fun activeTrackFarFromTabletBeforeHome_usesExtendedSignalLossDelay() {
+    fun activeTrackFarFromTabletBeforeHome_doesNotExtendConfiguredIdleLimit() {
         val drone = CtDroneSpec("RID123")
         val newTrackDelayMs = 30_000L
         val nowMs = System.currentTimeMillis()
@@ -436,9 +436,32 @@ class CtDroneSpecTest {
 
         assertFalse(drone.hasHomeLocation())
         assertEquals(
-            newTrackDelayMs * CaltopoClient.REMOTE_LOSS_TRACK_DELAY_MULTIPLIER,
+            newTrackDelayMs,
             CaltopoClient.TrackDelayInMsecForDroneSpecForTests(drone, newTrackDelayMs)
         )
+    }
+
+    @Test
+    fun outOfRangeTrack_doesNotExtendConfiguredIdleLimit() {
+        val drone = CtDroneSpec("RID123")
+        val newTrackDelayMs = 30_000L
+
+        drone.setOutOfRange(true)
+
+        assertTrue(drone.isOutOfRange)
+        assertEquals(
+            newTrackDelayMs,
+            CaltopoClient.TrackDelayInMsecForDroneSpecForTests(drone, newTrackDelayMs)
+        )
+    }
+
+    @Test
+    fun trackAging_terminatesAtConfiguredIdleLimit() {
+        val newTrackDelayMs = 30_000L
+
+        assertFalse(CaltopoClient.HasTrackAgedOutForTests(29_999L, newTrackDelayMs))
+        assertTrue(CaltopoClient.HasTrackAgedOutForTests(30_000L, newTrackDelayMs))
+        assertTrue(CaltopoClient.HasTrackAgedOutForTests(30_001L, newTrackDelayMs))
     }
 
     @Test

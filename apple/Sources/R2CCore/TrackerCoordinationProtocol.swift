@@ -10,6 +10,7 @@ public struct TrackerCoordinationClient: Sendable, Equatable {
     public let mapID: String
     public let zoneID: String
     public let name: String
+    public let platform: String
     public let appVersion: String
     public let appVersionCode: Int
 
@@ -17,12 +18,14 @@ public struct TrackerCoordinationClient: Sendable, Equatable {
         mapID: String,
         zoneID: String,
         name: String,
+        platform: String = "",
         appVersion: String,
         appVersionCode: Int
     ) {
         self.mapID = mapID
         self.zoneID = zoneID
         self.name = name
+        self.platform = platform
         self.appVersion = appVersion
         self.appVersionCode = appVersionCode
     }
@@ -126,6 +129,23 @@ public enum TrackerCoordinationEvent: Sendable, Equatable {
 }
 
 public enum TrackerCoordinationEndpoint {
+    public static func organizationScopedPrefix(
+        from trackerURLPrefix: String,
+        organization: String
+    ) -> String {
+        let trimmed = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty
+        else { return trimmed }
+        let designator = organization
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+        guard !designator.isEmpty else { return trimmed }
+        components.path = "/\(designator)"
+        return components.url?.absoluteString ?? trimmed
+    }
+
     public static func webSocketURL(from trackerURLPrefix: String) throws -> URL {
         var value = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
         while value.hasSuffix("/") { value.removeLast() }
@@ -157,6 +177,7 @@ public enum TrackerCoordinationWire {
             "zoneId": client.zoneID,
             "guid": client.zoneID,
             "name": client.name,
+            "appPlatform": client.platform,
             "lat": finite(position.latitude),
             "lng": finite(position.longitude),
             "appVersion": client.appVersion,

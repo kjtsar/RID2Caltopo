@@ -81,7 +81,9 @@ data class ComplianceAlertCandidate(
     val mappedId: String,
     val aglFt: Double,
     val thresholdFt: Double,
-    val staleDem: Boolean
+    val staleDem: Boolean,
+    /** Wall-clock time of the position sample from which [aglFt] was derived. */
+    val telemetryTimestampMs: Long,
 )
 
 data class ComplianceAlertUiState(
@@ -103,6 +105,7 @@ object ComplianceAlertCenter {
     private const val NEAR_LIMIT_RATIO = 0.90
     private const val NEAR_ALERT_COOLDOWN_MS = 30_000L
     private const val OVER_ALERT_COOLDOWN_MS = 15_000L
+    internal const val MAX_ALTITUDE_SAMPLE_AGE_MS = 5_000L
 
     private val _uiState = MutableStateFlow<ComplianceAlertUiState?>(null)
     val uiState: StateFlow<ComplianceAlertUiState?> = _uiState.asStateFlow()
@@ -111,12 +114,16 @@ object ComplianceAlertCenter {
     private var lastAlertToneAtMs = 0L
     private var nextAlertInstanceId = 1L
 
-    fun updateCandidates(candidates: List<ComplianceAlertCandidate>) {
+    fun updateCandidates(
+        candidates: List<ComplianceAlertCandidate>,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
         val bestCandidate = candidates
             .filter {
                 isLocalAlertEligible(it.remoteId) &&
                     it.aglFt.isFinite() &&
-                    it.thresholdFt > 0.0
+                    it.thresholdFt > 0.0 &&
+                    isFreshAltitudeSample(it.telemetryTimestampMs, nowMs)
             }
             .mapNotNull { candidate ->
                 val severity = when {
@@ -139,7 +146,6 @@ object ComplianceAlertCenter {
         }
 
         val (candidate, severity) = bestCandidate
-        val nowMs = System.currentTimeMillis()
         val cooldownMs =
             if (severity == ComplianceAlertSeverity.Over) OVER_ALERT_COOLDOWN_MS else NEAR_ALERT_COOLDOWN_MS
         val shouldNotify = severity != lastSeverity || nowMs - lastAlertToneAtMs >= cooldownMs
@@ -171,6 +177,18 @@ object ComplianceAlertCenter {
     fun dismissCurrentAlert() {
         _uiState.value = null
     }
+
+    internal fun resetForTests() {
+        lastSeverity = ComplianceAlertSeverity.None
+        lastAlertToneAtMs = 0L
+        nextAlertInstanceId = 1L
+        _uiState.value = null
+    }
+
+    internal fun isFreshAltitudeSample(telemetryTimestampMs: Long, nowMs: Long): Boolean =
+        telemetryTimestampMs > 0L &&
+            nowMs >= telemetryTimestampMs &&
+            nowMs - telemetryTimestampMs <= MAX_ALTITUDE_SAMPLE_AGE_MS
 }
 
 object ProximityAlertCenter {

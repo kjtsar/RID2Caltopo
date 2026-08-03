@@ -1,0 +1,831 @@
+diff --git a/pkg/chunk/chunk0.go b/pkg/chunk/chunk0.go
+index 1186b89..c03e5f0 100644
+--- a/pkg/chunk/chunk0.go
++++ b/pkg/chunk/chunk0.go
+@@ -9,7 +9,7 @@ import (
+ // the start of a chunk stream, and whenever the stream timestamp goes
+ // backward (e.g., because of a backward seek).
+ type Chunk0 struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	Timestamp       uint32
+ 	BodyLen         uint32
+ 	Type            uint8
+@@ -18,18 +18,19 @@ type Chunk0 struct {
+ }
+ 
+ // Read reads the chunk.
++// The basic header has already been consumed by the caller; this method
++// reads only the 11-byte message header and the body.
+ func (c *Chunk0) Read(r io.Reader, maxBodyLen uint32, _ bool) error {
+-	header := make([]byte, 12)
++	header := make([]byte, 11)
+ 	_, err := io.ReadFull(r, header)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	c.ChunkStreamID = header[0] & 0x3F
+-	c.Timestamp = uint32(header[1])<<16 | uint32(header[2])<<8 | uint32(header[3])
+-	c.BodyLen = uint32(header[4])<<16 | uint32(header[5])<<8 | uint32(header[6])
+-	c.Type = header[7]
+-	c.MessageStreamID = uint32(header[8])<<24 | uint32(header[9])<<16 | uint32(header[10])<<8 | uint32(header[11])
++	c.Timestamp = uint32(header[0])<<16 | uint32(header[1])<<8 | uint32(header[2])
++	c.BodyLen = uint32(header[3])<<16 | uint32(header[4])<<8 | uint32(header[5])
++	c.Type = header[6]
++	c.MessageStreamID = uint32(header[7])<<24 | uint32(header[8])<<16 | uint32(header[9])<<8 | uint32(header[10])
+ 
+ 	if c.Timestamp >= 0xFFFFFF {
+ 		_, err = io.ReadFull(r, header[:4])
+@@ -58,7 +59,7 @@ func (c Chunk0) marshalSize() int {
+ // Marshal writes the chunk.
+ func (c Chunk0) Marshal(_ bool) ([]byte, error) {
+ 	buf := make([]byte, c.marshalSize())
+-	buf[0] = c.ChunkStreamID
++	buf[0] = byte(c.ChunkStreamID)
+ 
+ 	if c.Timestamp >= 0xFFFFFF {
+ 		buf[1] = 0xFF
+diff --git a/pkg/chunk/chunk1.go b/pkg/chunk/chunk1.go
+index 3157431..c5478b8 100644
+--- a/pkg/chunk/chunk1.go
++++ b/pkg/chunk/chunk1.go
+@@ -11,7 +11,7 @@ import (
+ // formats) SHOULD use this format for the first chunk of each new
+ // message after the first.
+ type Chunk1 struct {
+-	ChunkStreamID  byte
++	ChunkStreamID  uint16
+ 	TimestampDelta uint32
+ 	BodyLen        uint32
+ 	Type           uint8
+@@ -19,17 +19,18 @@ type Chunk1 struct {
+ }
+ 
+ // Read reads the chunk.
++// The basic header has already been consumed by the caller; this method
++// reads only the 7-byte message header and the body.
+ func (c *Chunk1) Read(r io.Reader, maxBodyLen uint32, _ bool) error {
+-	header := make([]byte, 8)
++	header := make([]byte, 7)
+ 	_, err := io.ReadFull(r, header)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	c.ChunkStreamID = header[0] & 0x3F
+-	c.TimestampDelta = uint32(header[1])<<16 | uint32(header[2])<<8 | uint32(header[3])
+-	c.BodyLen = uint32(header[4])<<16 | uint32(header[5])<<8 | uint32(header[6])
+-	c.Type = header[7]
++	c.TimestampDelta = uint32(header[0])<<16 | uint32(header[1])<<8 | uint32(header[2])
++	c.BodyLen = uint32(header[3])<<16 | uint32(header[4])<<8 | uint32(header[5])
++	c.Type = header[6]
+ 
+ 	if c.TimestampDelta >= 0xFFFFFF {
+ 		_, err = io.ReadFull(r, header[:4])
+@@ -58,7 +59,7 @@ func (c Chunk1) marshalSize() int {
+ // Marshal writes the chunk.
+ func (c Chunk1) Marshal(_ bool) ([]byte, error) {
+ 	buf := make([]byte, c.marshalSize())
+-	buf[0] = 1<<6 | c.ChunkStreamID
++	buf[0] = 1<<6 | byte(c.ChunkStreamID)
+ 
+ 	if c.TimestampDelta >= 0xFFFFFF {
+ 		buf[1] = 0xFF
+diff --git a/pkg/chunk/chunk2.go b/pkg/chunk/chunk2.go
+index 10d4883..26fb786 100644
+--- a/pkg/chunk/chunk2.go
++++ b/pkg/chunk/chunk2.go
+@@ -9,21 +9,23 @@ import (
+ // message length is included; this chunk has the same stream ID and
+ // message length as the preceding chunk.
+ type Chunk2 struct {
+-	ChunkStreamID  byte
++	ChunkStreamID  uint16
+ 	TimestampDelta uint32
+ 	Body           []byte
+ }
+ 
+ // Read reads the chunk.
++// The basic header has already been consumed by the caller; this method
++// reads only the 3-byte message header and the body.
+ func (c *Chunk2) Read(r io.Reader, bodyLen uint32, _ bool) error {
++	// Allocate 4 bytes so the same buffer can be reused for the extended timestamp.
+ 	header := make([]byte, 4)
+-	_, err := io.ReadFull(r, header)
++	_, err := io.ReadFull(r, header[:3])
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	c.ChunkStreamID = header[0] & 0x3F
+-	c.TimestampDelta = uint32(header[1])<<16 | uint32(header[2])<<8 | uint32(header[3])
++	c.TimestampDelta = uint32(header[0])<<16 | uint32(header[1])<<8 | uint32(header[2])
+ 
+ 	if c.TimestampDelta >= 0xFFFFFF {
+ 		_, err = io.ReadFull(r, header[:4])
+@@ -50,7 +52,7 @@ func (c Chunk2) marshalSize() int {
+ // Marshal writes the chunk.
+ func (c Chunk2) Marshal(_ bool) ([]byte, error) {
+ 	buf := make([]byte, c.marshalSize())
+-	buf[0] = 2<<6 | c.ChunkStreamID
++	buf[0] = 2<<6 | byte(c.ChunkStreamID)
+ 
+ 	if c.TimestampDelta >= 0xFFFFFF {
+ 		buf[1] = 0xFF
+diff --git a/pkg/chunk/chunk3.go b/pkg/chunk/chunk3.go
+index 38f3269..171db75 100644
+--- a/pkg/chunk/chunk3.go
++++ b/pkg/chunk/chunk3.go
+@@ -11,29 +11,25 @@ import (
+ // single message is split into chunks, all chunks of a message except
+ // the first one SHOULD use this type.
+ type Chunk3 struct {
+-	ChunkStreamID byte
++	ChunkStreamID uint16
+ 	Body          []byte
+ }
+ 
+ // Read reads the chunk.
++// The basic header has already been consumed by the caller; type 3 chunks
++// have no message header. If hasExtendedTimestamp is true, the 4-byte
++// extended timestamp field is consumed and discarded (timestamp state is
++// maintained by the caller).
+ func (c *Chunk3) Read(r io.Reader, bodyLen uint32, hasExtendedTimestamp bool) error {
+-	header := make([]byte, 4)
+-	_, err := io.ReadFull(r, header[:1])
+-	if err != nil {
+-		return err
+-	}
+-
+-	c.ChunkStreamID = header[0] & 0x3F
+-
+ 	if hasExtendedTimestamp {
+-		_, err = io.ReadFull(r, header[:4])
+-		if err != nil {
++		var scratch [4]byte
++		if _, err := io.ReadFull(r, scratch[:]); err != nil {
+ 			return err
+ 		}
+ 	}
+ 
+ 	c.Body = make([]byte, bodyLen)
+-	_, err = io.ReadFull(r, c.Body)
++	_, err := io.ReadFull(r, c.Body)
+ 	return err
+ }
+ 
+@@ -48,7 +44,7 @@ func (c Chunk3) marshalSize(hasExtendedTimestamp bool) int {
+ // Marshal writes the chunk.
+ func (c Chunk3) Marshal(hasExtendedTimestamp bool) ([]byte, error) {
+ 	buf := make([]byte, c.marshalSize(hasExtendedTimestamp))
+-	buf[0] = 3<<6 | c.ChunkStreamID
++	buf[0] = 3<<6 | byte(c.ChunkStreamID)
+ 
+ 	if hasExtendedTimestamp {
+ 		copy(buf[5:], c.Body)
+diff --git a/pkg/message/msg_audio.go b/pkg/message/msg_audio.go
+index 0292bd6..4687404 100644
+--- a/pkg/message/msg_audio.go
++++ b/pkg/message/msg_audio.go
+@@ -54,7 +54,7 @@ const (
+ 
+ // Audio is an audio message.
+ type Audio struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	DTS             time.Duration
+ 	MessageStreamID uint32
+ 	Codec           uint8
+@@ -102,7 +102,9 @@ func (m *Audio) unmarshal(raw *rawmessage.Message) error {
+ 				m.AACConfig = &mpeg4audio.AudioSpecificConfig{}
+ 				err := m.AACConfig.Unmarshal(raw.Body[2:])
+ 				if err != nil {
+-					return fmt.Errorf("unable to parse MPEG4 audio config: %w", err)
++					// Some publishers advertise unsupported AAC profiles. Keep the
++					// session alive and let callers ignore this audio track.
++					m.AACConfig = nil
+ 				}
+ 			}
+ 		} else {
+diff --git a/pkg/message/msg_audio_ex_coded_frames.go b/pkg/message/msg_audio_ex_coded_frames.go
+index 565e64f..ac012f0 100644
+--- a/pkg/message/msg_audio_ex_coded_frames.go
++++ b/pkg/message/msg_audio_ex_coded_frames.go
+@@ -9,7 +9,7 @@ import (
+ 
+ // AudioExCodedFrames is a CodedFrames extended message.
+ type AudioExCodedFrames struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	DTS             time.Duration
+ 	MessageStreamID uint32
+ 	FourCC          FourCC
+diff --git a/pkg/message/msg_audio_ex_multichannel_config.go b/pkg/message/msg_audio_ex_multichannel_config.go
+index db0b223..40378da 100644
+--- a/pkg/message/msg_audio_ex_multichannel_config.go
++++ b/pkg/message/msg_audio_ex_multichannel_config.go
+@@ -18,7 +18,7 @@ const (
+ 
+ // AudioExMultichannelConfig is a multichannel config extended message.
+ type AudioExMultichannelConfig struct {
+-	ChunkStreamID       byte
++	ChunkStreamID       uint16
+ 	MessageStreamID     uint32
+ 	FourCC              FourCC
+ 	AudioChannelOrder   AudioExChannelOrder
+diff --git a/pkg/message/msg_audio_ex_sequence_end.go b/pkg/message/msg_audio_ex_sequence_end.go
+index 787d84e..6a56b9e 100644
+--- a/pkg/message/msg_audio_ex_sequence_end.go
++++ b/pkg/message/msg_audio_ex_sequence_end.go
+@@ -8,7 +8,7 @@ import (
+ 
+ // AudioExSequenceEnd is a sequence end extended message.
+ type AudioExSequenceEnd struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	MessageStreamID uint32
+ 	FourCC          FourCC
+ }
+diff --git a/pkg/message/msg_audio_ex_sequence_start.go b/pkg/message/msg_audio_ex_sequence_start.go
+index 55559ac..bc558cd 100644
+--- a/pkg/message/msg_audio_ex_sequence_start.go
++++ b/pkg/message/msg_audio_ex_sequence_start.go
+@@ -9,7 +9,7 @@ import (
+ 
+ // AudioExSequenceStart is a sequence start extended message.
+ type AudioExSequenceStart struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	MessageStreamID uint32
+ 	FourCC          FourCC
+ 	OpusConfig      *OpusIDHeader
+@@ -42,7 +42,9 @@ func (m *AudioExSequenceStart) unmarshal(raw *rawmessage.Message) error {
+ 		m.AACConfig = &mpeg4audio.AudioSpecificConfig{}
+ 		err := m.AACConfig.Unmarshal(raw.Body[5:])
+ 		if err != nil {
+-			return fmt.Errorf("invalid MPEG-4 audio config: %w", err)
++			// Some publishers advertise unsupported AAC profiles. Keep the
++			// session alive and let callers ignore this audio track.
++			m.AACConfig = nil
+ 		}
+ 
+ 	default:
+diff --git a/pkg/message/msg_command_amf0.go b/pkg/message/msg_command_amf0.go
+index 06b80ed..07e0879 100644
+--- a/pkg/message/msg_command_amf0.go
++++ b/pkg/message/msg_command_amf0.go
+@@ -9,7 +9,7 @@ import (
+ 
+ // CommandAMF0 is a AMF0 command message.
+ type CommandAMF0 struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	MessageStreamID uint32
+ 	Name            string
+ 	CommandID       int
+diff --git a/pkg/message/msg_data_amf0.go b/pkg/message/msg_data_amf0.go
+index 5b42977..8871411 100644
+--- a/pkg/message/msg_data_amf0.go
++++ b/pkg/message/msg_data_amf0.go
+@@ -7,7 +7,7 @@ import (
+ 
+ // DataAMF0 is a AMF0 data message.
+ type DataAMF0 struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	MessageStreamID uint32
+ 	Payload         amf0.Data
+ }
+diff --git a/pkg/message/msg_video.go b/pkg/message/msg_video.go
+index 157ac03..df8283b 100644
+--- a/pkg/message/msg_video.go
++++ b/pkg/message/msg_video.go
+@@ -33,7 +33,7 @@ const (
+ 
+ // Video is a video message.
+ type Video struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	DTS             time.Duration
+ 	MessageStreamID uint32
+ 	Codec           uint8
+diff --git a/pkg/message/msg_video_ex_coded_frames.go b/pkg/message/msg_video_ex_coded_frames.go
+index ebef265..2060e25 100644
+--- a/pkg/message/msg_video_ex_coded_frames.go
++++ b/pkg/message/msg_video_ex_coded_frames.go
+@@ -9,7 +9,7 @@ import (
+ 
+ // VideoExCodedFrames is a CodedFrames extended message.
+ type VideoExCodedFrames struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	DTS             time.Duration
+ 	MessageStreamID uint32
+ 	FourCC          FourCC
+diff --git a/pkg/message/msg_video_ex_frames_x.go b/pkg/message/msg_video_ex_frames_x.go
+index 14b5bc8..b60639e 100644
+--- a/pkg/message/msg_video_ex_frames_x.go
++++ b/pkg/message/msg_video_ex_frames_x.go
+@@ -9,7 +9,7 @@ import (
+ 
+ // VideoExFramesX is a FramesX extended message.
+ type VideoExFramesX struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	DTS             time.Duration
+ 	MessageStreamID uint32
+ 	FourCC          FourCC
+diff --git a/pkg/message/msg_video_ex_metadata.go b/pkg/message/msg_video_ex_metadata.go
+index e277ae7..65fc27b 100644
+--- a/pkg/message/msg_video_ex_metadata.go
++++ b/pkg/message/msg_video_ex_metadata.go
+@@ -10,7 +10,7 @@ import (
+ 
+ // VideoExMetadata is a metadata extended message.
+ type VideoExMetadata struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	DTS             time.Duration
+ 	MessageStreamID uint32
+ 	FourCC          FourCC
+diff --git a/pkg/message/msg_video_ex_sequence_end.go b/pkg/message/msg_video_ex_sequence_end.go
+index cbeb78a..d8fdbf3 100644
+--- a/pkg/message/msg_video_ex_sequence_end.go
++++ b/pkg/message/msg_video_ex_sequence_end.go
+@@ -8,7 +8,7 @@ import (
+ 
+ // VideoExSequenceEnd is a sequence end extended message.
+ type VideoExSequenceEnd struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	MessageStreamID uint32
+ 	FourCC          FourCC
+ }
+diff --git a/pkg/message/msg_video_ex_sequence_start.go b/pkg/message/msg_video_ex_sequence_start.go
+index 4021e74..14efbf4 100644
+--- a/pkg/message/msg_video_ex_sequence_start.go
++++ b/pkg/message/msg_video_ex_sequence_start.go
+@@ -11,7 +11,7 @@ import (
+ 
+ // VideoExSequenceStart is a sequence start extended message.
+ type VideoExSequenceStart struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	MessageStreamID uint32
+ 	FourCC          FourCC
+ 	AV1Config       *mp4.Av1C
+diff --git a/pkg/message/reader.go b/pkg/message/reader.go
+index f0ca73e..08e9873 100644
+--- a/pkg/message/reader.go
++++ b/pkg/message/reader.go
+@@ -135,6 +135,13 @@ type Reader struct {
+ 	r *rawmessage.Reader
+ }
+ 
++// SetOnChunk installs a callback invoked for every chunk header parsed.
++// chunkType is 0–3 (RTMP basic header format field).  Pass nil to remove.
++// Intended for debug tracing only; the callback must not block.
++func (r *Reader) SetOnChunk(cb func(csid uint16, chunkType byte, bodyLen uint32, timestamp uint32)) {
++	r.r.OnChunk = cb
++}
++
+ // NewReader allocates a Reader.
+ func NewReader(
+ 	r io.Reader,
+@@ -146,6 +153,12 @@ func NewReader(
+ 	}
+ }
+ 
++// SetWindowAckSize arms the reader-side acknowledgement window used to emit
++// RTMP Acknowledge messages as inbound bytes are received.
++func (r *Reader) SetWindowAckSize(v uint32) {
++	r.r.SetWindowAckSize(v)
++}
++
+ // Read reads a Message.
+ func (r *Reader) Read() (Message, error) {
+ 	raw, err := r.r.Read()
+diff --git a/pkg/message/readwriter.go b/pkg/message/readwriter.go
+index 26805a3..1a44768 100644
+--- a/pkg/message/readwriter.go
++++ b/pkg/message/readwriter.go
+@@ -8,8 +8,10 @@ import (
+ 
+ // ReadWriter is a message reader/writer.
+ type ReadWriter struct {
+-	r *Reader
+-	w *Writer
++	r                    *Reader
++	w                    *Writer
++	onMessage            func(Message)
++	onAcknowledgeWritten func(uint32)
+ }
+ 
+ // NewReadWriter allocates a ReadWriter.
+@@ -20,16 +22,51 @@ func NewReadWriter(
+ ) *ReadWriter {
+ 	w := NewWriter(rw, bcrw.Writer, checkAcknowledge)
+ 
++	ret := &ReadWriter{
++		w: w,
++	}
++
+ 	r := NewReader(rw, bcrw.Reader, func(count uint32) error {
+-		return w.Write(&Acknowledge{
++		err := w.Write(&Acknowledge{
+ 			Value: count,
+ 		})
++		if err != nil {
++			return err
++		}
++
++		if ret.onAcknowledgeWritten != nil {
++			ret.onAcknowledgeWritten(count)
++		}
++
++		return nil
+ 	})
++	ret.r = r
++	return ret
++}
+ 
+-	return &ReadWriter{
+-		r: r,
+-		w: w,
+-	}
++// SetOnChunk installs a callback invoked for every RTMP chunk header parsed.
++// See Reader.SetOnChunk for details.  Pass nil to remove.
++func (rw *ReadWriter) SetOnChunk(cb func(csid uint16, chunkType byte, bodyLen uint32, timestamp uint32)) {
++	rw.r.SetOnChunk(cb)
++}
++
++// SetOnMessage installs a callback invoked for every decoded RTMP message.
++// Intended for debug tracing only; the callback must not block.
++func (rw *ReadWriter) SetOnMessage(cb func(Message)) {
++	rw.onMessage = cb
++}
++
++// SetOnAcknowledgeWritten installs a callback invoked whenever an automatic
++// RTMP acknowledgement is written due to the negotiated ack window.
++// Intended for debug tracing only; the callback must not block.
++func (rw *ReadWriter) SetOnAcknowledgeWritten(cb func(uint32)) {
++	rw.onAcknowledgeWritten = cb
++}
++
++// SetWindowAckSize arms the reader-side acknowledgement window used to emit
++// RTMP Acknowledge messages as inbound bytes are received.
++func (rw *ReadWriter) SetWindowAckSize(v uint32) {
++	rw.r.SetWindowAckSize(v)
+ }
+ 
+ // Read reads a message.
+@@ -39,6 +76,10 @@ func (rw *ReadWriter) Read() (Message, error) {
+ 		return nil, err
+ 	}
+ 
++	if rw.onMessage != nil {
++		rw.onMessage(msg)
++	}
++
+ 	switch tmsg := msg.(type) {
+ 	case *Acknowledge:
+ 		rw.w.SetAcknowledgeValue(tmsg.Value)
+diff --git a/pkg/rawmessage/message.go b/pkg/rawmessage/message.go
+index bae0075..7780b63 100644
+--- a/pkg/rawmessage/message.go
++++ b/pkg/rawmessage/message.go
+@@ -7,7 +7,7 @@ import (
+ 
+ // Message is a raw message.
+ type Message struct {
+-	ChunkStreamID   byte
++	ChunkStreamID   uint16
+ 	Timestamp       time.Duration
+ 	Type            uint8
+ 	MessageStreamID uint32
+diff --git a/pkg/rawmessage/reader.go b/pkg/rawmessage/reader.go
+index a743119..a01cb3d 100644
+--- a/pkg/rawmessage/reader.go
++++ b/pkg/rawmessage/reader.go
+@@ -28,6 +28,7 @@ func joinFragments(fragments [][]byte, size uint32) []byte {
+ 
+ type readerChunkStream struct {
+ 	mr                    *Reader
++	csid                  uint16 // chunk stream ID this slot was created for
+ 	curTimestamp          uint32
+ 	curTimestampAvailable bool
+ 	curType               uint8
+@@ -103,7 +104,7 @@ func (rc *readerChunkStream) readMessage(typ byte) (*Message, error) {
+ 
+ 	case 1:
+ 		if !rc.curTimestampAvailable {
+-			return nil, fmt.Errorf("received type 1 chunk without previous chunk")
++			return nil, fmt.Errorf("received type 1 chunk without previous chunk (csid=%d knownStreams=%d)", rc.csid, len(rc.mr.chunkStreams))
+ 		}
+ 
+ 		if rc.curBodyRecv != 0 {
+@@ -141,7 +142,7 @@ func (rc *readerChunkStream) readMessage(typ byte) (*Message, error) {
+ 
+ 	case 2:
+ 		if !rc.curTimestampAvailable {
+-			return nil, fmt.Errorf("received type 2 chunk without previous chunk")
++			return nil, fmt.Errorf("received type 2 chunk without previous chunk (csid=%d knownStreams=%d)", rc.csid, len(rc.mr.chunkStreams))
+ 		}
+ 
+ 		if rc.curBodyRecv != 0 {
+@@ -199,7 +200,7 @@ func (rc *readerChunkStream) readMessage(typ byte) (*Message, error) {
+ 		}
+ 
+ 		if !rc.curTimestampAvailable {
+-			return nil, fmt.Errorf("received type 3 chunk without previous chunk")
++			return nil, fmt.Errorf("received type 3 chunk without previous chunk (csid=%d knownStreams=%d)", rc.csid, len(rc.mr.chunkStreams))
+ 		}
+ 
+ 		chunkBodyLen := min(rc.curBodyLen, rc.mr.chunkSize)
+@@ -231,6 +232,11 @@ func (rc *readerChunkStream) readMessage(typ byte) (*Message, error) {
+ type Reader struct {
+ 	bcr         *bytecounter.Reader
+ 	onAckNeeded func(uint32) error
++	// OnChunk, if non-nil, is called for every chunk header parsed.
++	// chunkType is 0–3; bodyLen is the declared body size; timestamp is
++	// the absolute or delta value from the chunk header.  This callback
++	// fires before the body is read and is intended for debug tracing only.
++	OnChunk func(csid uint16, chunkType byte, bodyLen uint32, timestamp uint32)
+ 
+ 	br            *bufio.Reader
+ 	chunkSize     uint32
+@@ -241,7 +247,7 @@ type Reader struct {
+ 	c1            chunk.Chunk1
+ 	c2            chunk.Chunk2
+ 	c3            chunk.Chunk3
+-	chunkStreams  map[byte]*readerChunkStream
++	chunkStreams  map[uint16]*readerChunkStream
+ }
+ 
+ // NewReader allocates a Reader.
+@@ -255,7 +261,7 @@ func NewReader(
+ 		br:           bufio.NewReader(r),
+ 		onAckNeeded:  onAckNeeded,
+ 		chunkSize:    128,
+-		chunkStreams: make(map[byte]*readerChunkStream),
++		chunkStreams: make(map[uint16]*readerChunkStream),
+ 	}
+ }
+ 
+@@ -283,20 +289,49 @@ func (r *Reader) Read() (*Message, error) {
+ 		}
+ 
+ 		typ := byt >> 6
+-		chunkStreamID := byt & 0x3F
+-
+-		if chunkStreamID < 2 {
+-			return nil, fmt.Errorf("extended chunk stream IDs are not supported (yet)")
++		rawCSID := byt & 0x3F
++
++		// Resolve the chunk stream ID from the basic header.
++		// Per RTMP spec §5.3.1.1:
++		//   rawCSID == 0 → 2-byte form: read one more byte, CSID = byte + 64  (range 64-319)
++		//   rawCSID == 1 → 3-byte form: read two more bytes, CSID = b2*256 + b1 + 64 (range 64-65599)
++		//   rawCSID >= 2 → 1-byte form: CSID = rawCSID (range 2-63)
++		var chunkStreamID uint16
++		switch rawCSID {
++		case 0:
++			b1, err := r.br.ReadByte()
++			if err != nil {
++				return nil, err
++			}
++			chunkStreamID = uint16(b1) + 64
++		case 1:
++			var extra [2]byte
++			if _, err := io.ReadFull(r.br, extra[:]); err != nil {
++				return nil, err
++			}
++			chunkStreamID = uint16(extra[1])*256 + uint16(extra[0]) + 64
++		default:
++			chunkStreamID = uint16(rawCSID)
+ 		}
+ 
+ 		rc, ok := r.chunkStreams[chunkStreamID]
+ 		if !ok {
+-			rc = &readerChunkStream{mr: r}
++			rc = &readerChunkStream{mr: r, csid: chunkStreamID}
+ 			r.chunkStreams[chunkStreamID] = rc
+ 		}
+ 
+-		r.br.UnreadByte() //nolint:errcheck
++		// Fire the optional chunk-trace callback (debug tracing only).
++		// Body length and timestamp are not yet available at basic-header
++		// time, so we pass the stream's current values which are valid for
++		// type 2/3 continuations; for type 0/1 they will be overwritten
++		// by readMessage before the caller sees them.
++		if r.OnChunk != nil {
++			r.OnChunk(chunkStreamID, typ, rc.curBodyLen, rc.curTimestamp)
++		}
+ 
++		// The basic header has been fully consumed above; readMessage reads
++		// only the message header and body (chunk Read() methods no longer
++		// re-read the basic header byte).
+ 		msg, err := rc.readMessage(typ)
+ 		if err != nil {
+ 			if errors.Is(err, errMoreChunksNeeded) {
+diff --git a/pkg/rawmessage/writer.go b/pkg/rawmessage/writer.go
+index d06f6dc..dce77d7 100644
+--- a/pkg/rawmessage/writer.go
++++ b/pkg/rawmessage/writer.go
+@@ -157,7 +157,7 @@ type Writer struct {
+ 	chunkSize        uint32
+ 	ackWindowSize    uint32
+ 	ackValue         uint32
+-	chunkStreams     map[byte]*writerChunkStream
++	chunkStreams     map[uint16]*writerChunkStream
+ }
+ 
+ // NewWriter allocates a Writer.
+@@ -171,7 +171,7 @@ func NewWriter(
+ 		bw:               bufio.NewWriter(w),
+ 		checkAcknowledge: checkAcknowledge,
+ 		chunkSize:        128,
+-		chunkStreams:     make(map[byte]*writerChunkStream),
++		chunkStreams:     make(map[uint16]*writerChunkStream),
+ 	}
+ }
+ 
+diff --git a/reader.go b/reader.go
+index 1b7c975..bb1d5ba 100644
+--- a/reader.go
++++ b/reader.go
+@@ -226,6 +226,10 @@ func audioTrackFromExtendedMessages(
+ 		}}, nil
+ 
+ 	case message.FourCCMP4A:
++		if sequenceStart.AACConfig == nil {
++			return nil, nil
++		}
++
+ 		return &Track{Codec: &codecs.MPEG4Audio{
+ 			Config: sequenceStart.AACConfig,
+ 		}}, nil
+@@ -249,10 +253,21 @@ func sortedKeys(m map[uint8]*Track) []int {
+ 	return ret
+ }
+ 
++func hasDetectedTracks(m map[uint8]*Track) bool {
++	for _, track := range m {
++		if track != nil {
++			return true
++		}
++	}
++	return false
++}
++
+ // Reader provides functions to read incoming data.
+ type Reader struct {
+ 	Conn Conn
+ 
++	VideoTrackOnly bool
++
+ 	videoTracks map[uint8]*Track
+ 	audioTracks map[uint8]*Track
+ 	onVideoData map[uint8]func(message.Message) error
+@@ -423,6 +438,10 @@ func (r *Reader) readTracks() (map[uint8]*Track, map[uint8]*Track, error) {
+ 			}
+ 
+ 		case *message.Audio:
++			if r.VideoTrackOnly {
++				break
++			}
++
+ 			if !firstReceived {
+ 				firstReceived = true
+ 				startTime = msg.DTS
+@@ -447,18 +466,30 @@ func (r *Reader) readTracks() (map[uint8]*Track, map[uint8]*Track, error) {
+ 			}
+ 
+ 		case *message.AudioExSequenceStart:
++			if r.VideoTrackOnly {
++				break
++			}
++
+ 			err = handleAudioSequenceStart(0, msg)
+ 			if err != nil {
+ 				return nil, nil, err
+ 			}
+ 
+ 		case *message.AudioExCodedFrames:
++			if r.VideoTrackOnly {
++				break
++			}
++
+ 			err = handleAudioCodedFrames(0, msg)
+ 			if err != nil {
+ 				return nil, nil, err
+ 			}
+ 
+ 		case *message.AudioExMultitrack:
++			if r.VideoTrackOnly {
++				break
++			}
++
+ 			if _, ok := audioTracks[msg.TrackID]; !ok {
+ 				audioTracks[msg.TrackID] = nil
+ 			}
+@@ -478,6 +509,10 @@ func (r *Reader) readTracks() (map[uint8]*Track, map[uint8]*Track, error) {
+ 			}
+ 		}
+ 
++		if r.VideoTrackOnly && hasDetectedTracks(videoTracks) {
++			break
++		}
++
+ 		if (curTime - startTime) >= analyzePeriod {
+ 			break
+ 		}
+@@ -804,7 +839,7 @@ func (r *Reader) Read() error {
+ 
+ 	case *message.Audio, *message.AudioExCodedFrames:
+ 		if r.audioTracks[0] == nil {
+-			return fmt.Errorf("received a packet for audio track 0, but track is not set up")
++			return nil
+ 		}
+ 
+ 		return r.onAudioData[0](msg)
+@@ -822,7 +857,7 @@ func (r *Reader) Read() error {
+ 	case *message.AudioExMultitrack:
+ 		if wmsg, ok := msg.Wrapped.(*message.AudioExCodedFrames); ok {
+ 			if r.audioTracks[msg.TrackID] == nil {
+-				return fmt.Errorf("received a packet for audio track %d, but track is not set up", msg.TrackID)
++				return nil
+ 			}
+ 
+ 			return r.onAudioData[msg.TrackID](wmsg)
+diff --git a/server_conn.go b/server_conn.go
+index a087335..7808236 100644
+--- a/server_conn.go
++++ b/server_conn.go
+@@ -110,7 +110,7 @@ type ServerConn struct {
+ 	RW io.ReadWriter
+ 
+ 	// filled by Initialize
+-	connectChunkStreamID byte
++	connectChunkStreamID uint16
+ 	connectCommandID     int
+ 	app                  string
+ 	tcURL                string
+@@ -189,6 +189,19 @@ func (c *ServerConn) Initialize() error {
+ 	return nil
+ }
+ 
++// SetOnMessage installs a callback invoked for every decoded RTMP message.
++// Intended for debug tracing only; the callback must not block.
++func (c *ServerConn) SetOnMessage(cb func(message.Message)) {
++	c.mrw.SetOnMessage(cb)
++}
++
++// SetOnAcknowledgeWritten installs a callback invoked whenever an automatic
++// RTMP acknowledgement is written due to the negotiated ack window.
++// Intended for debug tracing only; the callback must not block.
++func (c *ServerConn) SetOnAcknowledgeWritten(cb func(uint32)) {
++	c.mrw.SetOnAcknowledgeWritten(cb)
++}
++
+ // CheckCredentials checks credentials.
+ func (c *ServerConn) CheckCredentials(expectedUser string, expectedPass string) error {
+ 	i := strings.Index(c.app, "?authmod=adobe")
+@@ -287,15 +300,21 @@ func (c *ServerConn) CheckCredentials(expectedUser string, expectedPass string)
+ 
+ // Accept accepts the connection.
+ func (c *ServerConn) Accept() error {
++	ackWindowSize := uint32(2500000)
++
+ 	err := c.mrw.Write(&message.SetWindowAckSize{
+-		Value: 2500000,
++		Value: ackWindowSize,
+ 	})
+ 	if err != nil {
+ 		return err
+ 	}
+ 
++	// The server advertises a receive window to the publisher and must also arm
++	// its own reader-side accounting so inbound bytes trigger Acknowledge frames.
++	c.mrw.SetWindowAckSize(ackWindowSize)
++
+ 	err = c.mrw.Write(&message.SetPeerBandwidth{
+-		Value: 2500000,
++		Value: ackWindowSize,
+ 		Type:  2,
+ 	})
+ 	if err != nil {
+@@ -510,6 +529,12 @@ func (c *ServerConn) Read() (message.Message, error) {
+ 	return c.mrw.Read()
+ }
+ 
++// SetOnChunk installs a debug callback invoked for every RTMP chunk header
++// parsed on this connection.  Pass nil to remove.
++func (c *ServerConn) SetOnChunk(cb func(csid uint16, chunkType byte, bodyLen uint32, timestamp uint32)) {
++	c.mrw.SetOnChunk(cb)
++}
++
+ // Write writes a message.
+ func (c *ServerConn) Write(msg message.Message) error {
+ 	return c.mrw.Write(msg)

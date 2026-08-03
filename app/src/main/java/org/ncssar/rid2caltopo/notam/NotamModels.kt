@@ -62,7 +62,7 @@ data class NotamUiState(
     val lastUpdatedText: String? = null,
     val queryLatitude: Double? = null,
     val queryLongitude: Double? = null,
-    val radiusNm: Int = 2,
+    val radiusStatuteMiles: Int = 1,
     val notices: List<NearbyNotam> = emptyList(),
     val suppressedNoticeCount: Int = 0,
     val nearestHiddenNotice: NearbyNotam? = null,

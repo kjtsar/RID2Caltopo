@@ -1,0 +1,14 @@
+diff --git a/third_party/anet/interface_android.go b/third_party/anet/interface_android.go
+--- a/third_party/anet/interface_android.go
++++ b/third_party/anet/interface_android.go
+@@ -161,10 +161,8 @@ type ipv6ZoneCache struct {
+ 	toName       map[int]string // interface index to its name
+ }
+ 
+-//go:linkname zoneCache net.zoneCache
+ var zoneCache ipv6ZoneCache
+ 
+-//go:linkname zoneCacheX golang.org/x/net/internal/socket.zoneCache
+ var zoneCacheX ipv6ZoneCache
+ 
+ // update refreshes the network interface information if the cache was last

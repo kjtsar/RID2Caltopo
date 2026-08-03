@@ -25,6 +25,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+"$SCRIPT_DIR/verify_ffmpeg_source.sh" "$FFMPEG_SRC"
 
 API="${API:-29}"
 NDK_ROOT="${NDK_ROOT:-}"

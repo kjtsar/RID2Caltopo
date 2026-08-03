@@ -85,6 +85,16 @@ public enum OperationalMapVideoLayout: String, CaseIterable, Codable, Sendable, 
             .split
         }
     }
+
+    public func fullScreenPresentation(pictureInPictureEnabled: Bool) -> Self {
+        guard pictureInPictureEnabled else { return .video }
+        switch self {
+        case .map, .mapPrimary:
+            return .mapPrimary
+        case .video, .videoPrimary, .split:
+            return .videoPrimary
+        }
+    }
 }
 
 public struct OperationalPipInsetSize: Sendable, Equatable {

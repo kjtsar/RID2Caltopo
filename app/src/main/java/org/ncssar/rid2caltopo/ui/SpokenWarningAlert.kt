@@ -22,6 +22,7 @@ enum class SpokenWarningKind(val phrase: String) {
     Altitude("Altitude"),
     Proximity("Proximity"),
     ControllerSignalStrength("Controller Signal Strength"),
+    VideoStreamRequest("Video Stream Request"),
 }
 
 data class SpokenWarningRequest(
@@ -94,6 +95,27 @@ object SpokenWarningCenter {
             sourceKey = "audio-alarm-test",
             nowMs = nowMs,
             cooldownMs = 0L
+        )
+    }
+
+    fun requestSpokenPhrase(
+        kind: SpokenWarningKind,
+        sourceKey: String,
+        phrase: String,
+        nowMs: Long = System.currentTimeMillis(),
+        cooldownMs: Long = 0L,
+        volumeFraction: Float = 1.0f,
+    ) {
+        val key = WarningKey(kind, sourceKey)
+        val lastRequestedAtMs = lastRequestedAtMsByKey[key]
+        if (lastRequestedAtMs != null && nowMs - lastRequestedAtMs < cooldownMs) return
+        lastRequestedAtMsByKey[key] = nowMs
+        _requests.value = SpokenWarningRequest(
+            requestId = nextRequestId++,
+            kind = kind,
+            phrase = phrase,
+            phrases = listOf(phrase),
+            volumeFraction = volumeFraction.coerceIn(0f, 1f),
         )
     }
 

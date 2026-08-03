@@ -12,6 +12,61 @@ enum AppleTrackerCoordinationStatus: String, Sendable {
     case degraded = "Degraded"
 }
 
+struct AppleVideoStreamViewRequest: Codable, Identifiable, Equatable, Sendable {
+    let requestId: String
+    let requesterEmail: String
+    let streamSessionId: String
+    let incidentName: String
+    let droneDesignator: String
+    let sourceWidth: Int?
+    let sourceHeight: Int?
+    let sourceFps: Double?
+    let sourceBitrateBps: Int64?
+    let sourceCodec: String?
+    let expiresAt: String
+    let consentRequired: Bool
+
+    var id: String { requestId }
+}
+
+struct AppleVideoQualityChoice: Identifiable, Equatable, Sendable {
+    let id: String
+    let label: String
+    let width: Int
+    let height: Int
+    let fps: Double
+    let bitrateBps: Int64
+    let capacity: String
+}
+
+private struct AppleManagedVideoStreamAdvertisement: Codable, Equatable {
+    let sessionId: String
+    let droneDesignator: String
+    let sourceWidth: Int
+    let sourceHeight: Int
+    let sourceFps: Double
+    let sourceBitrateBps: Int64
+    let sourceCodec: String
+}
+
+private struct AppleVideoPreflightOffer: Decodable {
+    let requestId: String
+    let sdp: String
+    let iceServers: [AppleVideoICEServer]
+}
+
+private struct AppleVideoMediaOffer: Decodable {
+    let requestId: String
+    let streamSessionId: String
+    let sdp: String
+    let iceServers: [AppleVideoICEServer]
+}
+
+private struct AppleApprovedVideoStream {
+    let request: AppleVideoStreamViewRequest
+    let quality: AppleVideoQualityChoice
+}
+
 @MainActor
 final class AppleTrackerCoordinator: ObservableObject {
     nonisolated let events: AsyncStream<TrackerCoordinationEvent>
@@ -25,6 +80,61 @@ final class AppleTrackerCoordinator: ObservableObject {
     @Published private(set) var heartbeatSequenceAcknowledged: Int64 = 0
     @Published private(set) var recommendedAppVersionCode = 0
     @Published private(set) var recommendedUpdateURL: URL?
+    @Published private(set) var pendingVideoStreamRequest: AppleVideoStreamViewRequest?
+    @Published private(set) var videoPreflightRouteKind: String?
+    @Published private(set) var videoPreflightEstimatedUplinkBps: Int64?
+    @Published private(set) var videoPreflightFailure: String?
+    @Published private(set) var selectedVideoQualityID: String?
+    @Published private(set) var activeRemoteVideoConnectionCount = 0
+    @Published private(set) var remoteVideoBytesSent: Int64 = 0
+    @Published private(set) var remoteVideoEffectiveWidth = 0
+    @Published private(set) var remoteVideoEffectiveHeight = 0
+    @Published private(set) var remoteVideoEffectiveFPS = 0.0
+    @Published private(set) var remoteVideoEffectiveBitrateBps: Int64 = 0
+    @Published private(set) var remoteVideoMicrophoneEnabled = false
+    @Published private(set) var remoteVideoMicrophoneError: String?
+    @Published private(set) var remoteVideoAudioBytesSent: Int64 = 0
+    @Published private(set) var remoteVideoAudioBytesReceived: Int64 = 0
+
+    var videoQualityChoices: [AppleVideoQualityChoice] {
+        guard let request = pendingVideoStreamRequest else { return [] }
+        return ManagedVideoQualityPolicy.options(
+            sourceWidth: request.sourceWidth ?? 0,
+            sourceHeight: request.sourceHeight ?? 0,
+            sourceFps: request.sourceFps ?? 0,
+            sourceBitrateBps: request.sourceBitrateBps ?? 0,
+            usableUplinkBps: videoPreflightEstimatedUplinkBps ?? 0
+        ).map { option in
+                let capacity = option.capacity.rawValue
+                return AppleVideoQualityChoice(
+                    id: option.id,
+                    label: String(
+                        format: "%@ • %d×%d • %.1f fps • est. %.1f Mbps • %@",
+                        option.preset,
+                        option.width,
+                        option.height,
+                        option.fps,
+                        Double(option.estimatedBitrateBps) / 1_000_000,
+                        capacity == "enough"
+                            ? "enough bandwidth"
+                            : capacity == "fallback"
+                                ? "fallback — try lowest quality"
+                                : capacity
+                    ),
+                    width: option.width,
+                    height: option.height,
+                    fps: option.fps,
+                    bitrateBps: option.estimatedBitrateBps,
+                    capacity: capacity
+                )
+            }
+    }
+
+    var selectedVideoQualityIsStartable: Bool {
+        videoQualityChoices.contains {
+            $0.id == selectedVideoQualityID && $0.capacity != "insufficient"
+        }
+    }
 
     private var usePeers = false
     private var standaloneR2CCoordinationEnabled = false
@@ -50,9 +160,45 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var observedSightings: [String: TrackerCoordinationSighting] = [:]
     private var firstSightingsSent: Set<String> = []
+    private var seenVideoStreamRequestIDs: [String] = []
     private var pendingConfirmations: [String: TrackerCoordinationIdentity] = [:]
     private var lastSightingSentAt: [String: Date] = [:]
     private var fallbackTasks: [String: Task<Void, Never>] = [:]
+    private var managedVideoIncidentName = ""
+    private var managedVideoStreams: [AppleManagedVideoStreamAdvertisement] = []
+    private var managedVideoSourcesBySessionID: [String: AppleVideoFrameSource] = [:]
+    private var managedSessionIDBySourcePath: [String: String] = [:]
+    private var lastVideoPreflightOfferByRequestID: [String: String] = [:]
+    private var approvedVideoStreamRequests: [String: AppleApprovedVideoStream] = [:]
+    private var mediaPeersByRequestID: [String: AppleManagedVideoMediaPeer] = [:]
+    private var mediaSourcesByRequestID: [String: AppleVideoFrameSource] = [:]
+    private var mediaRouteKindByRequestID: [String: String] = [:]
+    private var sourceEndGraceTasks: [String: Task<Void, Never>] = [:]
+    private var videoPreflightWatchdogTask: Task<Void, Never>?
+    private lazy var videoPreflightPeer = AppleManagedVideoPreflightPeer(
+        answerSink: { [weak self] requestID, sdp in
+            Task { @MainActor [weak self] in
+                self?.sendVideoPreflightAnswer(requestID: requestID, sdp: sdp)
+            }
+        },
+        resultSink: { [weak self] requestID, routeKind, estimatedUplinkBps in
+            Task { @MainActor [weak self] in
+                self?.recordVideoPreflightResult(
+                    requestID: requestID,
+                    routeKind: routeKind,
+                    estimatedUplinkBps: estimatedUplinkBps
+                )
+            }
+        },
+        failureSink: { [weak self] requestID, reason in
+            Task { @MainActor [weak self] in
+                self?.recordVideoPreflightFailure(
+                    requestID: requestID,
+                    reason: reason
+                )
+            }
+        }
+    )
 
     init(defaults: UserDefaults = .standard) {
         let pair = AsyncStream<TrackerCoordinationEvent>.makeStream(bufferingPolicy: .bufferingNewest(256))
@@ -80,6 +226,23 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     var localZoneID: String { zoneID }
+
+    var activeRemoteVideoRequesterSummary: String {
+        let emails = Set(mediaPeersByRequestID.keys.compactMap {
+            approvedVideoStreamRequests[$0]?.request.requesterEmail
+        }).sorted()
+        return emails.isEmpty ? "Remote viewer" : emails.joined(separator: ", ")
+    }
+
+    var activeRemoteVideoRouteSummary: String {
+        let routes = Set(mediaPeersByRequestID.keys.compactMap {
+            mediaRouteKindByRequestID[$0]
+        })
+        if routes.count == 1, let route = routes.first {
+            return route == "direct" ? "Direct" : "Routed"
+        }
+        return routes.isEmpty ? "Negotiating" : "Mixed routes"
+    }
 
     var localDeviceStatusLines: [String] {
         var lines = [statusDetail]
@@ -318,6 +481,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
         replayFirstSightings()
         flushPendingConfirmations()
+        sendManagedVideoPresence()
         startLivenessTasks(generation: generation)
         AppleLog.info("TrackerPeer", "WebSocket opened mapId='\(mapID)' zoneId='\(zoneID)'")
     }
@@ -329,6 +493,9 @@ final class AppleTrackerCoordinator: ObservableObject {
         case let .data(value): data = value
         case let .string(value): data = Data(value.utf8)
         @unknown default: return
+        }
+        if handleManagedVideoMessage(data) {
+            return
         }
         do {
             let events = try protocolState.handleIncoming(data, receivedAtMilliseconds: Self.nowMilliseconds)
@@ -369,6 +536,647 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
     }
 
+    func acknowledgeVideoStreamRequest() {
+        guard videoPreflightRouteKind != nil || videoPreflightFailure != nil else {
+            AppleLog.warning(
+                "TrackerPeer",
+                "Ignoring dismissal while video link preflight is still active"
+            )
+            return
+        }
+        clearVideoStreamRequest()
+    }
+
+    func selectVideoQuality(_ choiceID: String) {
+        guard videoQualityChoices.contains(where: { $0.id == choiceID }) else {
+            return
+        }
+        selectedVideoQualityID = choiceID
+    }
+
+    func approveVideoStreamRequest() {
+        guard
+            let request = pendingVideoStreamRequest,
+            let choice = videoQualityChoices.first(where: {
+                $0.id == selectedVideoQualityID && $0.capacity != "insufficient"
+            })
+        else { return }
+        sendVideoStreamDecision(
+            requestID: request.requestId,
+            approved: true,
+            selectedWidth: choice.width,
+            selectedHeight: choice.height,
+            selectedFPS: choice.fps,
+            selectedBitrateBps: choice.bitrateBps
+        )
+        approvedVideoStreamRequests[request.requestId] = AppleApprovedVideoStream(
+            request: request,
+            quality: choice
+        )
+        mediaRouteKindByRequestID[request.requestId] = videoPreflightRouteKind ?? "unknown"
+        clearVideoStreamRequest()
+    }
+
+    func declineVideoStreamRequest() {
+        guard let request = pendingVideoStreamRequest else { return }
+        sendVideoStreamDecision(
+            requestID: request.requestId,
+            approved: false,
+            selectedWidth: 0,
+            selectedHeight: 0,
+            selectedFPS: 0,
+            selectedBitrateBps: 0
+        )
+        clearVideoStreamRequest()
+    }
+
+    private func sendVideoStreamDecision(
+        requestID: String,
+        approved: Bool,
+        selectedWidth: Int,
+        selectedHeight: Int,
+        selectedFPS: Double,
+        selectedBitrateBps: Int64
+    ) {
+        let payload: [String: Any] = [
+            "type": "video_stream_decision",
+            "requestId": requestID,
+            "decision": approved ? "approve" : "decline",
+            "selectedWidth": selectedWidth,
+            "selectedHeight": selectedHeight,
+            "selectedFps": selectedFPS,
+            "selectedBitrateBps": selectedBitrateBps,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        send(data)
+    }
+
+    private func clearVideoStreamRequest() {
+        pendingVideoStreamRequest = nil
+        videoPreflightWatchdogTask?.cancel()
+        videoPreflightWatchdogTask = nil
+        videoPreflightPeer.cancel()
+        resetVideoPreflightState()
+    }
+
+    func updateManagedVideoStreams(
+        incidentName: String,
+        sessions: [AppleLiveStreamSession]
+    ) {
+        let live = sessions
+            .filter {
+                $0.state == .live &&
+                $0.id != "demo" &&
+                ManagedVideoPresencePolicy.hasRecentDecodedFrame(
+                    frameCount: $0.model.frameCount,
+                    decodedFrameAge: $0.model.decodedFrameAgeSeconds
+                )
+            }
+            .sorted {
+                $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending
+            }
+            .prefix(4)
+        let livePaths = Set(live.map(\.sourcePath))
+        let liveSessionIDs = Set(livePaths.compactMap { managedSessionIDBySourcePath[$0] })
+        let approvedSessionIDs = Set(approvedVideoStreamRequests.values.map {
+            $0.request.streamSessionId
+        })
+        for sessionID in approvedSessionIDs {
+            if liveSessionIDs.contains(sessionID) {
+                sourceEndGraceTasks.removeValue(forKey: sessionID)?.cancel()
+            } else {
+                scheduleSourceEndAfterRecoveryGrace(sessionID: sessionID)
+            }
+        }
+        var currentSources: [String: AppleVideoFrameSource] = [:]
+        managedVideoIncidentName = incidentName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        var updatedStreams = live.map { session in
+            let sessionID = managedSessionIDBySourcePath[session.sourcePath]
+                ?? UUID().uuidString.lowercased()
+            managedSessionIDBySourcePath[session.sourcePath] = sessionID
+            currentSources[sessionID] = session.model
+            sourceEndGraceTasks.removeValue(forKey: sessionID)?.cancel()
+            for (requestID, approval) in approvedVideoStreamRequests
+            where approval.request.streamSessionId == sessionID {
+                guard let peer = mediaPeersByRequestID[requestID] else { continue }
+                if let previousSource = mediaSourcesByRequestID[requestID],
+                   previousSource !== session.model {
+                    previousSource.setManagedVideoFrameConsumer(nil)
+                    session.model.setManagedVideoFrameConsumer(peer)
+                    mediaSourcesByRequestID[requestID] = session.model
+                    AppleLog.info(
+                        "TrackerPeer",
+                        "Reattached active media sender after decoder source replacement request=\(requestID)"
+                    )
+                }
+            }
+            return AppleManagedVideoStreamAdvertisement(
+                sessionId: sessionID,
+                droneDesignator: session.id,
+                sourceWidth: session.model.sourceWidth,
+                sourceHeight: session.model.sourceHeight,
+                sourceFps: session.model.sourceFrameRate,
+                sourceBitrateBps: 0,
+                sourceCodec: session.model.sourceWidth > 0 ? "H264" : ""
+            )
+        }
+        // Keep an actively viewed stream advertised during the same bounded
+        // decoder-recovery grace. Otherwise the tracker could cancel the
+        // preserved peer after observing a transient empty advertisement.
+        for sessionID in approvedSessionIDs.subtracting(liveSessionIDs) {
+            if let advertisement = managedVideoStreams.first(where: {
+                $0.sessionId == sessionID
+            }) {
+                updatedStreams.append(advertisement)
+            }
+            if let source = mediaSourcesByRequestID.first(where: { requestID, _ in
+                approvedVideoStreamRequests[requestID]?.request.streamSessionId == sessionID
+            })?.value {
+                currentSources[sessionID] = source
+            }
+        }
+        updatedStreams.sort {
+            $0.sessionId.localizedCaseInsensitiveCompare($1.sessionId) == .orderedAscending
+        }
+        managedVideoSourcesBySessionID = currentSources
+        let presenceChanged = managedVideoStreams != updatedStreams
+        managedVideoStreams = updatedStreams
+        if presenceChanged {
+            sendManagedVideoPresence()
+        }
+    }
+
+    private func scheduleSourceEndAfterRecoveryGrace(sessionID: String) {
+        guard sourceEndGraceTasks[sessionID] == nil else { return }
+        AppleLog.warning(
+            "TrackerPeer",
+            "Managed video source temporarily unavailable session=\(sessionID); preserving active WebRTC for decoder recovery"
+        )
+        sourceEndGraceTasks[sessionID] = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(12))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.sourceEndGraceTasks.removeValue(forKey: sessionID)
+            let endedRequestIDs = self.approvedVideoStreamRequests.compactMap {
+                requestID, approval in
+                approval.request.streamSessionId == sessionID ? requestID : nil
+            }
+            for requestID in endedRequestIDs {
+                self.terminateRemoteVideoRequest(requestID: requestID, reason: "source_ended")
+            }
+            self.managedVideoStreams.removeAll { $0.sessionId == sessionID }
+            self.managedVideoSourcesBySessionID.removeValue(forKey: sessionID)
+            self.sendManagedVideoPresence()
+        }
+    }
+
+    private func handleManagedVideoMessage(_ data: Data) -> Bool {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = object["type"] as? String
+        else {
+            return false
+        }
+        if type == "video_preflight_offer" {
+            handleVideoPreflightOffer(data)
+            return true
+        }
+        if type == "video_media_offer" {
+            handleVideoMediaOffer(data)
+            return true
+        }
+        if type == "video_stream_request_cancelled" {
+            let requestID = (object["requestId"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            lastVideoPreflightOfferByRequestID.removeValue(forKey: requestID)
+            approvedVideoStreamRequests.removeValue(forKey: requestID)
+            stopLocalMediaSession(requestID: requestID)
+            if pendingVideoStreamRequest?.requestId == requestID {
+                clearVideoStreamRequest()
+                AppleLog.info(
+                    "TrackerPeer",
+                    "Video request cancelled by requester id=\(requestID)"
+                )
+            }
+            return true
+        }
+        if type == "video_stream_advertisement_ack" {
+            let accepted = object["accepted"] as? Bool ?? false
+            let sessionIDs = object["sessionIds"] as? [String] ?? []
+            if accepted {
+                AppleLog.debug(
+                    "TrackerPeer",
+                    "Managed video presence accepted sessions=\(sessionIDs.count)"
+                )
+            } else {
+                let error = object["error"] as? String ?? "Tracker rejected presence"
+                AppleLog.warning("TrackerPeer", "Managed video presence rejected: \(error)")
+            }
+            return true
+        }
+        guard type == "video_stream_request" else { return false }
+        do {
+            let request = try JSONDecoder().decode(
+                AppleVideoStreamViewRequest.self,
+                from: data
+            )
+            guard
+                !request.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                !request.requesterEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                !request.streamSessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                AppleLog.warning("TrackerPeer", "Ignoring incomplete video stream request")
+                return true
+            }
+            if seenVideoStreamRequestIDs.contains(request.requestId) {
+                AppleLog.debug(
+                    "TrackerPeer",
+                    "Ignoring replayed video stream request \(request.requestId)"
+                )
+                return true
+            }
+            seenVideoStreamRequestIDs.append(request.requestId)
+            if seenVideoStreamRequestIDs.count > 50 {
+                seenVideoStreamRequestIDs.removeFirst(
+                    seenVideoStreamRequestIDs.count - 50
+                )
+            }
+            guard managedVideoStreams.contains(where: {
+                $0.sessionId == request.streamSessionId
+            }), managedVideoSourcesBySessionID[request.streamSessionId] != nil
+            else {
+                sendVideoStreamUnavailable(
+                    requestID: request.requestId,
+                    streamSessionID: request.streamSessionId
+                )
+                AppleLog.warning(
+                    "TrackerPeer",
+                    "Rejected video request id=\(request.requestId) error=e_nosuch_stream session=\(request.streamSessionId)"
+                )
+                return true
+            }
+            pendingVideoStreamRequest = request
+            videoPreflightPeer.cancel()
+            resetVideoPreflightState()
+            startVideoPreflightWatchdog(requestID: request.requestId)
+            AppleSpokenWarningCenter.shared.speak(
+                "Video Stream Request from, "
+                    + Self.spokenEmailAddress(request.requesterEmail)
+            )
+            AppleLog.info(
+                "TrackerPeer",
+                "Video request id=\(request.requestId) incident='\(request.incidentName)' drone='\(request.droneDesignator)'"
+            )
+        } catch {
+            AppleLog.error(
+                "TrackerPeer",
+                "Invalid video stream request: \(error.localizedDescription)"
+            )
+        }
+        return true
+    }
+
+    private func sendVideoStreamUnavailable(
+        requestID: String,
+        streamSessionID: String
+    ) {
+        let payload: [String: Any] = [
+            "type": "video_stream_unavailable",
+            "requestId": requestID,
+            "streamSessionId": streamSessionID,
+            "errorCode": "e_nosuch_stream",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        send(data)
+    }
+
+    private func handleVideoMediaOffer(_ data: Data) {
+        do {
+            let offer = try JSONDecoder().decode(AppleVideoMediaOffer.self, from: data)
+            if mediaPeersByRequestID[offer.requestId] != nil {
+                AppleLog.info(
+                    "TrackerPeer",
+                    "Ignoring replayed media offer for active request=\(offer.requestId)"
+                )
+                return
+            }
+            guard
+                let approval = approvedVideoStreamRequests[offer.requestId],
+                approval.request.streamSessionId == offer.streamSessionId,
+                let source = managedVideoSourcesBySessionID[offer.streamSessionId]
+            else {
+                AppleLog.warning(
+                    "TrackerPeer",
+                    "Ignoring media offer without matching pilot approval request=\(offer.requestId)"
+                )
+                return
+            }
+            let approvedRoute = mediaRouteKindByRequestID[offer.requestId] ?? "unknown"
+            stopLocalMediaSession(requestID: offer.requestId)
+            let peer = AppleManagedVideoMediaPeer(
+                answerSink: { [weak self] requestID, sdp in
+                    Task { @MainActor [weak self] in
+                        self?.sendVideoMediaAnswer(requestID: requestID, sdp: sdp)
+                    }
+                },
+                metricsSink: { [weak self] requestID, metrics in
+                    Task { @MainActor [weak self] in
+                        self?.recordRemoteVideoMetrics(requestID: requestID, metrics: metrics)
+                    }
+                },
+                failureSink: { [weak self] requestID, reason in
+                    Task { @MainActor [weak self] in
+                        self?.terminateRemoteVideoRequest(requestID: requestID, reason: reason)
+                    }
+                },
+                microphoneStateSink: { [weak self] requestID, enabled, error in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.mediaPeersByRequestID[requestID] != nil else { return }
+                        self.remoteVideoMicrophoneEnabled = enabled
+                        self.remoteVideoMicrophoneError = error
+                    }
+                }
+            )
+            mediaPeersByRequestID[offer.requestId] = peer
+            mediaSourcesByRequestID[offer.requestId] = source
+            mediaRouteKindByRequestID[offer.requestId] = approvedRoute
+            source.setManagedVideoFrameConsumer(peer)
+            peer.start(
+                requestID: offer.requestId,
+                offerSDP: offer.sdp,
+                iceServers: offer.iceServers,
+                width: approval.quality.width,
+                height: approval.quality.height,
+                fps: approval.quality.fps,
+                bitrateBps: approval.quality.bitrateBps
+            )
+            AppleLog.info(
+                "TrackerPeer",
+                "App-owned media sender starting request=\(offer.requestId) "
+                    + "quality=\(approval.quality.width)x\(approval.quality.height) "
+                    + "fps=\(approval.quality.fps) bitrate=\(approval.quality.bitrateBps)"
+            )
+        } catch {
+            AppleLog.error("TrackerPeer", "Invalid video media offer: \(error.localizedDescription)")
+        }
+    }
+
+    private func sendVideoMediaAnswer(requestID: String, sdp: String) {
+        let payload: [String: Any] = [
+            "type": "video_media_answer",
+            "requestId": requestID,
+            "sdp": sdp,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        send(data)
+    }
+
+    private func stopLocalMediaSession(requestID: String) {
+        let peer = mediaPeersByRequestID.removeValue(forKey: requestID)
+        let source = mediaSourcesByRequestID.removeValue(forKey: requestID)
+        source?.setManagedVideoFrameConsumer(nil)
+        peer?.close()
+        mediaRouteKindByRequestID.removeValue(forKey: requestID)
+        activeRemoteVideoConnectionCount = mediaPeersByRequestID.count
+        if mediaPeersByRequestID.isEmpty {
+            remoteVideoMicrophoneEnabled = false
+            remoteVideoMicrophoneError = nil
+            remoteVideoAudioBytesSent = 0
+            remoteVideoAudioBytesReceived = 0
+            remoteVideoBytesSent = 0
+            remoteVideoEffectiveWidth = 0
+            remoteVideoEffectiveHeight = 0
+            remoteVideoEffectiveFPS = 0
+            remoteVideoEffectiveBitrateBps = 0
+        }
+    }
+
+    func terminateAllRemoteVideoStreams() {
+        for requestID in Array(mediaPeersByRequestID.keys) {
+            terminateRemoteVideoRequest(requestID: requestID, reason: "operator_terminated")
+        }
+    }
+
+    func shutdown() async {
+        terminateAllRemoteVideoStreams()
+        for task in sourceEndGraceTasks.values { task.cancel() }
+        sourceEndGraceTasks.removeAll()
+        managedVideoStreams = []
+        managedVideoSourcesBySessionID.removeAll()
+        managedSessionIDBySourcePath.removeAll()
+        sendManagedVideoPresence()
+        if connected {
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        stopTransport()
+        status = .unconfigured
+        statusDetail = "Application session closed"
+    }
+
+    func toggleRemoteVideoMicrophone() {
+        guard !mediaPeersByRequestID.isEmpty else { return }
+        let enabled = !remoteVideoMicrophoneEnabled
+        remoteVideoMicrophoneError = nil
+        for peer in mediaPeersByRequestID.values {
+            peer.setMicrophoneEnabled(enabled)
+        }
+    }
+
+    private func terminateRemoteVideoRequest(requestID: String, reason: String) {
+        stopLocalMediaSession(requestID: requestID)
+        approvedVideoStreamRequests.removeValue(forKey: requestID)
+        let payload: [String: Any] = [
+            "type": "video_stream_terminated",
+            "requestId": requestID,
+            "reason": reason,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        send(data)
+        AppleLog.info("TrackerPeer", "Remote video terminated request=\(requestID) reason=\(reason)")
+    }
+
+    private func recordRemoteVideoMetrics(
+        requestID: String,
+        metrics: AppleManagedVideoMediaMetrics
+    ) {
+        guard mediaPeersByRequestID[requestID] != nil else { return }
+        activeRemoteVideoConnectionCount = metrics.connected ? mediaPeersByRequestID.count : 0
+        remoteVideoBytesSent = metrics.bytesSent
+        remoteVideoEffectiveWidth = metrics.width
+        remoteVideoEffectiveHeight = metrics.height
+        remoteVideoEffectiveFPS = metrics.framesPerSecond
+        remoteVideoEffectiveBitrateBps = metrics.bitrateBps
+        remoteVideoAudioBytesSent = metrics.audioBytesSent
+        remoteVideoAudioBytesReceived = metrics.audioBytesReceived
+        mediaRouteKindByRequestID[requestID] = metrics.routeKind
+    }
+
+    private func handleVideoPreflightOffer(_ data: Data) {
+        do {
+            let offer = try JSONDecoder().decode(
+                AppleVideoPreflightOffer.self,
+                from: data
+            )
+            guard
+                !offer.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                !offer.sdp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                AppleLog.warning("TrackerPeer", "Ignoring incomplete video preflight offer")
+                return
+            }
+            if lastVideoPreflightOfferByRequestID[offer.requestId] == offer.sdp {
+                AppleLog.debug(
+                    "TrackerPeer",
+                    "Ignoring replayed video preflight offer request=\(offer.requestId)"
+                )
+                return
+            }
+            lastVideoPreflightOfferByRequestID[offer.requestId] = offer.sdp
+            if lastVideoPreflightOfferByRequestID.count > 32,
+               let oldestRequestID = lastVideoPreflightOfferByRequestID.keys.first {
+                lastVideoPreflightOfferByRequestID.removeValue(forKey: oldestRequestID)
+            }
+            if let pendingVideoStreamRequest,
+               pendingVideoStreamRequest.requestId == offer.requestId {
+                guard videoPreflightFailure == nil else {
+                    AppleLog.warning(
+                        "TrackerPeer",
+                        "Ignoring late video preflight offer request=\(offer.requestId)"
+                    )
+                    return
+                }
+                resetVideoPreflightState()
+            } else {
+                AppleLog.warning(
+                    "TrackerPeer",
+                    "Ignoring video preflight offer without matching request="
+                        + offer.requestId
+                )
+                return
+            }
+            videoPreflightPeer.start(
+                requestID: offer.requestId,
+                offerSDP: offer.sdp,
+                iceServers: offer.iceServers
+            )
+            AppleLog.info(
+                "TrackerPeer",
+                "Starting consent-safe video link preflight request=\(offer.requestId)"
+            )
+        } catch {
+            AppleLog.error(
+                "TrackerPeer",
+                "Invalid video preflight offer: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func sendVideoPreflightAnswer(requestID: String, sdp: String) {
+        let payload: [String: Any] = [
+            "type": "video_preflight_answer",
+            "requestId": requestID,
+            "sdp": sdp,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        send(data)
+    }
+
+    private func recordVideoPreflightResult(
+        requestID: String,
+        routeKind: String,
+        estimatedUplinkBps: Int64
+    ) {
+        videoPreflightWatchdogTask?.cancel()
+        videoPreflightWatchdogTask = nil
+        if pendingVideoStreamRequest?.requestId == requestID {
+            videoPreflightRouteKind = routeKind
+            videoPreflightEstimatedUplinkBps = estimatedUplinkBps
+            videoPreflightFailure = nil
+            selectedVideoQualityID = videoQualityChoices.first(where: {
+                $0.capacity != "insufficient"
+            })?.id
+        }
+        let payload: [String: Any] = [
+            "type": "video_preflight_result",
+            "requestId": requestID,
+            "routeKind": routeKind,
+            "estimatedUplinkBps": estimatedUplinkBps,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        send(data)
+        AppleLog.info(
+            "TrackerPeer",
+            "Video preflight request=\(requestID) route=\(routeKind) usableBps=\(estimatedUplinkBps)"
+        )
+    }
+
+    private func recordVideoPreflightFailure(requestID: String, reason: String) {
+        videoPreflightWatchdogTask?.cancel()
+        videoPreflightWatchdogTask = nil
+        if pendingVideoStreamRequest?.requestId == requestID {
+            videoPreflightFailure = reason
+            videoPreflightRouteKind = nil
+            videoPreflightEstimatedUplinkBps = nil
+            selectedVideoQualityID = nil
+        }
+        AppleLog.warning(
+            "TrackerPeer",
+            "Video preflight failed request=\(requestID): \(reason)"
+        )
+    }
+
+    private func resetVideoPreflightState() {
+        videoPreflightRouteKind = nil
+        videoPreflightEstimatedUplinkBps = nil
+        videoPreflightFailure = nil
+        selectedVideoQualityID = nil
+    }
+
+    private func startVideoPreflightWatchdog(requestID: String) {
+        videoPreflightWatchdogTask?.cancel()
+        videoPreflightWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(12))
+            guard
+                !Task.isCancelled,
+                let self,
+                self.pendingVideoStreamRequest?.requestId == requestID,
+                self.videoPreflightRouteKind == nil,
+                self.videoPreflightFailure == nil
+            else { return }
+            self.videoPreflightPeer.cancel()
+            self.recordVideoPreflightFailure(
+                requestID: requestID,
+                reason: "Link measurement did not start or complete within 12 seconds."
+            )
+        }
+    }
+
+    static func spokenEmailAddress(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).map { character in
+            switch character {
+            case "@": return "at"
+            case ".": return "dot"
+            case "-": return "dash"
+            case "_": return "underscore"
+            case "+": return "plus"
+            default: return String(character).uppercased()
+            }
+        }.joined(separator: " ")
+    }
+
     private func startLivenessTasks(generation: UUID) {
         heartbeatTask?.cancel()
         watchdogTask?.cancel()
@@ -384,6 +1192,7 @@ final class AppleTrackerCoordinator: ObservableObject {
                 ) {
                     self.send(data)
                 }
+                self.sendManagedVideoPresence()
             }
         }
         watchdogTask = Task { [weak self] in
@@ -499,6 +1308,40 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
     }
 
+    private func sendManagedVideoPresence() {
+        guard
+            connected,
+            !managedVideoIncidentName.isEmpty
+        else {
+            return
+        }
+        let payload: [String: Any] = [
+            "type": "video_stream_advertisement",
+            "incidentName": managedVideoIncidentName,
+            "deviceName": AppleDeviceIdentity.displayName,
+            "timeZone": TimeZone.current.identifier,
+            "streams": managedVideoStreams.map {
+                let source = managedVideoSourcesBySessionID[$0.sessionId]
+                let width = source?.sourceWidth ?? $0.sourceWidth
+                let height = source?.sourceHeight ?? $0.sourceHeight
+                let frameRate = source?.sourceFrameRate ?? $0.sourceFps
+                return [
+                    "sessionId": $0.sessionId,
+                    "droneDesignator": $0.droneDesignator,
+                    "sourceWidth": width,
+                    "sourceHeight": height,
+                    "sourceFps": frameRate,
+                    "sourceBitrateBps": $0.sourceBitrateBps,
+                    "sourceCodec": width > 0 ? "H264" : $0.sourceCodec,
+                ] as [String: Any]
+            },
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        send(data)
+    }
+
     private func publish(_ event: TrackerCoordinationEvent) {
         switch event {
         case let .ownershipChanged(remoteID, ownerZoneID, localOwner, alertEligible):
@@ -524,12 +1367,19 @@ final class AppleTrackerCoordinator: ObservableObject {
     private func stopTransport() {
         reconnectTask?.cancel()
         reconnectTask = nil
+        for requestID in Array(mediaPeersByRequestID.keys) {
+            stopLocalMediaSession(requestID: requestID)
+        }
+        approvedVideoStreamRequests.removeAll()
+        for task in sourceEndGraceTasks.values { task.cancel() }
+        sourceEndGraceTasks.removeAll()
         stopSocketOnly()
         peers = []
         resetAcknowledgements()
     }
 
     private func stopSocketOnly() {
+        videoPreflightPeer.cancel()
         generation = UUID()
         connected = false
         helloAcknowledged = false
@@ -592,6 +1442,7 @@ final class AppleTrackerCoordinator: ObservableObject {
             mapID: mapID,
             zoneID: zoneID,
             name: zoneName,
+            platform: "ios",
             appVersion: "\(version)(\(build))",
             appVersionCode: build
         )

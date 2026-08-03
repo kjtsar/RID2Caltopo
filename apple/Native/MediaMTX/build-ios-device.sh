@@ -3,7 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_DIR="${MEDIAMTX_SOURCE_DIR:-$HOME/Projects/mediamtx-1.16.2}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+SOURCE_DIR="${MEDIAMTX_SOURCE_DIR:-}"
+if [[ -z "$SOURCE_DIR" ]]; then
+    SOURCE_DIR="$("$REPO_ROOT/tools/prepare_mediamtx_source.sh")"
+fi
 SDK_NAME="${R2C_APPLE_SDK:-iphoneos}"
 if [[ "$SDK_NAME" == "iphonesimulator" ]]; then
     VARIANT="simulator"

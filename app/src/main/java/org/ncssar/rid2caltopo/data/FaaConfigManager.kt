@@ -214,7 +214,7 @@ object FaaConfigManager {
         executor.execute {
             val result = try {
                 val plaintext = buildPlaintextFromCurrent()
-                    ?: throw IllegalStateException("Load ct_faa_credentials before publishing FAA config.")
+                    ?: throw IllegalStateException("No legacy FAA credential configuration is available to publish.")
                 val encrypted = encryptedPayloadForPlaintext(plaintext)
                 val label = plaintext.optString("source_label", "RID2Caltopo FAA NOTAM credentials")
                 val fileId = GoogleDriveConfigSync.uploadFaaConfigFile(appContext, account, encrypted, label)
@@ -287,7 +287,6 @@ object FaaConfigManager {
         CaltopoClient.SetNotamClientId(clientId)
         CaltopoClient.SetNotamClientSecret(clientSecret)
         CaltopoClient.SetNotamScope(json.optString("notam_scope"))
-        CaltopoClient.SetNotamEnabled(true)
         CaltopoClient.SetNotamAutoRefresh(true)
     }
 
@@ -308,12 +307,10 @@ object FaaConfigManager {
     }
 
     private fun validateCurrentCredentials() {
-        try {
-            NotamAuthManager.clearCachedToken()
-            NotamAuthManager.getBearerToken()
-        } catch (e: NotamAuthManager.NotamAuthException.Authorization) {
-            markAuthorizationFailure(e.message ?: "FAA credentials were rejected.")
-            throw e
+        if (!NotamAuthManager.isConfigured()) {
+            throw NotamAuthManager.NotamAuthException.Service(
+                "FAA NOTAM proxy access requires an r2c-tracker organization QR code."
+            )
         }
     }
 }

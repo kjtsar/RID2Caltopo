@@ -1,7 +1,8 @@
 import Foundation
 
 public struct RidTrackPolicy: Sendable, Equatable {
-    /// Matches Android's 293.3 ft/s waypoint-jump ceiling (about 200 mph).
+    /// Matches Android's 293.33 ft/s telemetry sanity ceiling (200 mph). This is
+    /// intentionally above the 100 mph operating limit to tolerate GPS error between points.
     public var maximumSpeedMetersPerSecond: Double
     /// Matches Android's minimum accepted waypoint spacing (2 ft by default).
     public var minimumDistanceMeters: Double
@@ -12,7 +13,7 @@ public struct RidTrackPolicy: Sendable, Equatable {
     public var maximumPointsPerTrack: Int
 
     public init(
-        maximumSpeedMetersPerSecond: Double = 89.39784,
+        maximumSpeedMetersPerSecond: Double = 89.408,
         minimumDistanceMeters: Double = 0.6096,
         duplicateKeepaliveInterval: TimeInterval = 3,
         activeTimeout: TimeInterval = 30,
@@ -55,13 +56,18 @@ public struct RidAircraftTrack: Sendable, Equatable, Identifiable {
     public let aircraftID: String
     public fileprivate(set) var points: [RidTrackPoint]
     public fileprivate(set) var lastObservation: RidObservation
+    public fileprivate(set) var lastAircraftMessageAt: Date
     public fileprivate(set) var lastSignalAt: Date
     public fileprivate(set) var lastSignalStrengthDbm: Int?
+    public fileprivate(set) var lastSignalSource: RidObservation.Source
+    public fileprivate(set) var lastDirectSignalStrengthDbm: Int?
+    public fileprivate(set) var lastDirectSignalSource: RidObservation.Source?
+    public fileprivate(set) var lastDroneToBridgeSignalStrengthDbm: Int?
     public fileprivate(set) var distanceMeters: Double
     public fileprivate(set) var acceptedCountBySource: [RidObservation.Source: Int]
 
     public func isActive(at date: Date, timeout: TimeInterval = 30) -> Bool {
-        date.timeIntervalSince(lastSignalAt) <= timeout
+        date.timeIntervalSince(lastAircraftMessageAt) <= timeout
     }
 }
 
@@ -110,7 +116,10 @@ public actor RidTrackStore {
                 return .rejectedHorizontalAccuracy(code: code, track: nil)
             }
             track.lastSignalAt = max(track.lastSignalAt, observation.receivedAt)
+            track.lastAircraftMessageAt = max(track.lastAircraftMessageAt, observation.receivedAt)
             track.lastSignalStrengthDbm = observation.signalStrengthDbm
+            track.lastSignalSource = observation.source
+            updateRSSIMeasurements(&track, from: observation)
             tracksByAircraftID[aircraftID] = track
             return .rejectedHorizontalAccuracy(code: code, track: track)
         }
@@ -120,8 +129,15 @@ public actor RidTrackStore {
                 aircraftID: aircraftID,
                 points: [point],
                 lastObservation: observation,
+                lastAircraftMessageAt: observation.receivedAt,
                 lastSignalAt: observation.receivedAt,
                 lastSignalStrengthDbm: observation.signalStrengthDbm,
+                lastSignalSource: observation.source,
+                lastDirectSignalStrengthDbm: observation.droneScoutRelay == nil
+                    ? observation.signalStrengthDbm : nil,
+                lastDirectSignalSource: observation.droneScoutRelay == nil
+                    ? observation.source : nil,
+                lastDroneToBridgeSignalStrengthDbm: observation.droneScoutRelay?.droneToBridgeRssiDbm,
                 distanceMeters: 0,
                 acceptedCountBySource: [observation.source: 1]
             )
@@ -130,7 +146,10 @@ public actor RidTrackStore {
         }
 
         track.lastSignalAt = max(track.lastSignalAt, observation.receivedAt)
+        track.lastAircraftMessageAt = max(track.lastAircraftMessageAt, observation.receivedAt)
         track.lastSignalStrengthDbm = observation.signalStrengthDbm
+        track.lastSignalSource = observation.source
+        updateRSSIMeasurements(&track, from: observation)
         guard let previous = track.points.last else {
             tracksByAircraftID.removeValue(forKey: aircraftID)
             return ingest(observation)
@@ -171,11 +190,38 @@ public actor RidTrackStore {
         return .accepted(track)
     }
 
+    private func updateRSSIMeasurements(
+        _ track: inout RidAircraftTrack,
+        from observation: RidObservation
+    ) {
+        if let relay = observation.droneScoutRelay {
+            track.lastDroneToBridgeSignalStrengthDbm = relay.droneToBridgeRssiDbm
+        } else if observation.source != .trackerRelay {
+            track.lastDirectSignalStrengthDbm = observation.signalStrengthDbm
+            track.lastDirectSignalSource = observation.source
+        }
+    }
+
     public func snapshot() -> [RidAircraftTrack] {
         tracksByAircraftID.values.sorted {
-            if $0.lastSignalAt != $1.lastSignalAt { return $0.lastSignalAt > $1.lastSignalAt }
+            if $0.lastAircraftMessageAt != $1.lastAircraftMessageAt {
+                return $0.lastAircraftMessageAt > $1.lastAircraftMessageAt
+            }
             return $0.aircraftID < $1.aircraftID
         }
+    }
+
+    /// Refresh flight lifecycle presence without changing the last known position or the
+    /// location-only signal clock used by stale-location alerts.
+    @discardableResult
+    public func noteAircraftMessage(_ rawMessage: RidAircraftMessage) -> Bool {
+        let aircraftID = Self.canonicalAircraftID(rawMessage.aircraftID)
+        guard !aircraftID.isEmpty, var track = tracksByAircraftID[aircraftID] else {
+            return false
+        }
+        track.lastAircraftMessageAt = max(track.lastAircraftMessageAt, rawMessage.receivedAt)
+        tracksByAircraftID[aircraftID] = track
+        return true
     }
 
     public func activeSnapshot(at date: Date = Date()) -> [RidAircraftTrack] {
@@ -249,7 +295,8 @@ private extension RidObservation {
             speedMetersPerSecond: speedMetersPerSecond,
             operatorLatitude: operatorLatitude,
             operatorLongitude: operatorLongitude,
-            signalStrengthDbm: signalStrengthDbm
+            signalStrengthDbm: signalStrengthDbm,
+            droneScoutRelay: droneScoutRelay
         )
     }
 }

@@ -32,7 +32,7 @@ class FaaConfigManagerTest {
     }
 
     @Test
-    fun orgBundle_excludesPlaintextFaaSecretAndIncludesRemoteBootstrap() {
+    fun r2C2OrgBundleExcludesLegacyFaaCredentialsAndBootstrap() {
         CaltopoClient.ResetPersistedClientState()
         FaaConfigManager.importPlaintextConfig(samplePlaintext())
         CaltopoClient.StoreFaaRemoteConfig(
@@ -51,8 +51,8 @@ class FaaConfigManagerTest {
 
         assertFalse(serialized.contains("client-secret"))
         assertFalse(serialized.contains("notam_client_secret"))
-        assertTrue(serialized.contains(FaaConfigManager.TYPE_REMOTE))
-        assertTrue(serialized.contains("R2CFAA1:"))
+        assertFalse(serialized.contains(FaaConfigManager.TYPE_REMOTE))
+        assertFalse(serialized.contains("R2CFAA1:"))
     }
 
     @Test

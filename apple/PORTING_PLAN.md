@@ -63,7 +63,7 @@ compatibility listener and Android forwarding path have been removed.
   Confirmations improve aircraft labels and diagnostics, propagate through
   tracker peer coordination, and are required before this device may alert.
 - Android configuration interoperability now covers all three QR token families:
-  organization (`R2C1`), FAA (`R2CFAA1`), and mutual aid (`R2CMA1`). The shared
+  organization (`R2C2`), FAA (`R2CFAA1`), and mutual aid (`R2CMA1`). The shared
   core decodes Android's shuffled alphabet and XOR envelope and parses its
   encrypted credential bundles. The app supports camera scan, pasted token, and
   custom-URL handoff; secrets go to Keychain and imported RID mappings persist.

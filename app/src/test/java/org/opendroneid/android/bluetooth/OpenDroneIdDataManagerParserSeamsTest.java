@@ -27,6 +27,16 @@ public class OpenDroneIdDataManagerParserSeamsTest {
     }
 
     @Test
+    public void optionalMotionTelemetry_rejectsRemoteIdSentinels() {
+        assertNull(OpenDroneIdDataManager.validRidDirectionDegrees(361.0));
+        assertEquals(214.0, OpenDroneIdDataManager.validRidDirectionDegrees(214.0), 0.0);
+        assertNull(OpenDroneIdDataManager.validRidHorizontalSpeedKnots(255.0));
+        assertEquals(19.4384449, OpenDroneIdDataManager.validRidHorizontalSpeedKnots(10.0), 0.000001);
+        assertNull(OpenDroneIdDataManager.validRidVerticalRateFpm(63.0));
+        assertEquals(-393.700788, OpenDroneIdDataManager.validRidVerticalRateFpm(-2.0), 0.000001);
+    }
+
+    @Test
     public void locationParser_preservesHorizontalAccuracyCode() throws Exception {
         byte[] payload = new byte[Constants.MAX_MESSAGE_SIZE];
         payload[0] = 0x12; // LOCATION, protocol version 2
@@ -42,6 +52,56 @@ public class OpenDroneIdDataManagerParserSeamsTest {
         assertEquals(10, normalized.getHorizontalAccuracyCode());
         assertEquals(LocationData.HorizontalAccuracyEnum.meters_10,
                 normalized.getHorizontalAccuracy());
+    }
+
+    @Test
+    public void bluetoothServiceDataParser_usesUuidRelativePayloadOffset() {
+        byte[] serviceData = new byte[Constants.MAX_MESSAGE_SIZE + 2];
+        serviceData[0] = 0x0D; // Open Drone ID application code
+        serviceData[1] = 7;    // message counter
+        serviceData[2] = 0x02; // BASIC_ID, protocol version 2
+        serviceData[3] = 0x12; // serial number, multirotor
+        byte[] idBytes = "DRONESCOUTBRIDGE".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(idBytes, 0, serviceData, 4, idBytes.length);
+
+        OpenDroneIdParser.Message<?> message =
+                OpenDroneIdDataManager.parseBluetoothServiceData(serviceData, 1234L, null);
+
+        assertNotNull(message);
+        assertEquals(OpenDroneIdParser.Type.BASIC_ID, message.header.type);
+        assertEquals(7, message.msgCounter);
+        assertEquals("DRONESCOUTBRIDGE",
+                new String(
+                        ((OpenDroneIdParser.BasicId) message.payload).uasId,
+                        StandardCharsets.US_ASCII).trim());
+    }
+
+    @Test
+    public void bluetoothRelayPing_matchesRawIdentityRegardlessOfIdType() {
+        byte[] serviceData = new byte[Constants.MAX_MESSAGE_SIZE + 2];
+        serviceData[0] = 0x0D;
+        serviceData[1] = 9;
+        serviceData[2] = 0x02;
+        serviceData[3] = 0x02; // ID type None, multirotor.
+        byte[] idBytes = "DRONESCOUTBRIDGE".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(idBytes, 0, serviceData, 4, idBytes.length);
+
+        assertEquals(
+                "DRONESCOUTBRIDGE\0\0\0\0",
+                OpenDroneIdDataManager.bluetoothRelayPingIdentity(serviceData, 1234L, null));
+    }
+
+    @Test
+    public void bluetoothRelayPing_rejectsOrdinaryRawIdentity() {
+        byte[] serviceData = new byte[Constants.MAX_MESSAGE_SIZE + 2];
+        serviceData[0] = 0x0D;
+        serviceData[1] = 10;
+        serviceData[2] = 0x02;
+        serviceData[3] = 0x12;
+        byte[] idBytes = "1581F6Z9C24BH0036EJL".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(idBytes, 0, serviceData, 4, idBytes.length);
+
+        assertNull(OpenDroneIdDataManager.bluetoothRelayPingIdentity(serviceData, 1234L, null));
     }
 
     @Test

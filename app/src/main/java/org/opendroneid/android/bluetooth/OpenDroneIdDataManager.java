@@ -8,6 +8,8 @@ package org.opendroneid.android.bluetooth;
 
 import android.bluetooth.le.ScanResult;
 
+import androidx.annotation.Nullable;
+
 import org.ncssar.rid2caltopo.data.CtDroneSpec;
 import org.opendroneid.android.Constants;
 import org.opendroneid.android.data.AircraftObject;
@@ -22,6 +24,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient;
 
 import java.util.Arrays;
 import java.util.Locale;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -56,6 +59,8 @@ public class OpenDroneIdDataManager {
     private final AtomicLong droppedRidIngestPackets = new AtomicLong(0L);
     private final AtomicLong slowRidIngestPacketsLogged = new AtomicLong(0L);
     private final AtomicLong failedRidIngestPacketsLogged = new AtomicLong(0L);
+    private final AtomicLong receivedBluetoothPackets = new AtomicLong(0L);
+    private final AtomicLong lowLevelBridgePings = new AtomicLong(0L);
 
     // Tracks the last-logged altitude-source key per drone to suppress duplicate log spam.
     // Logged once on first contact and again whenever the key changes (altSource, isAtoType, fallback).
@@ -147,6 +152,29 @@ public class OpenDroneIdDataManager {
         return horizontalAccuracyCode >= 10 && horizontalAccuracyCode <= 12;
     }
 
+    @Nullable
+    static Double validRidDirectionDegrees(double directionDegrees) {
+        return Double.isFinite(directionDegrees)
+                && directionDegrees >= 0.0
+                && directionDegrees <= 360.0
+                ? directionDegrees
+                : null;
+    }
+
+    @Nullable
+    static Double validRidHorizontalSpeedKnots(double speedMetersPerSecond) {
+        return Double.isFinite(speedMetersPerSecond) && speedMetersPerSecond != 255.0
+                ? speedMetersPerSecond * 1.94384449
+                : null;
+    }
+
+    @Nullable
+    static Double validRidVerticalRateFpm(double speedMetersPerSecond) {
+        return Double.isFinite(speedMetersPerSecond) && speedMetersPerSecond != 63.0
+                ? speedMetersPerSecond * 196.850394
+                : null;
+    }
+
     static SelectedTrackAltitude selectTrackAltitudeMeters(
             double ridHeightMeters,
             double altitudeMslMeters,
@@ -172,32 +200,103 @@ public class OpenDroneIdDataManager {
         return new SelectedTrackAltitude(Math.round(selectedTrackAltitudeMeters), nextReference);
     }
 
-    void receiveDataBluetooth(byte[] data, ScanResult result, CtDroneSpec.TransportTypeEnum transportType) {
+    void receiveDataBluetooth(byte[] serviceData, ScanResult result, CtDroneSpec.TransportTypeEnum transportType) {
         String macAddress = result.getDevice().getAddress();
         long timestampNanos = result.getTimestampNanos();
         int rssi = result.getRssi();
-        byte[] packet = Arrays.copyOf(data, data.length);
+        byte[] packet = Arrays.copyOf(serviceData, serviceData.length);
         android.location.Location location = receiverLocation;
+        long bluetoothPacketCount = receivedBluetoothPackets.incrementAndGet();
+        String bridgePingIdentity = bluetoothRelayPingIdentity(packet, timestampNanos, location);
+        boolean bridgePingAlreadyNoted = bridgePingIdentity != null;
+        if (bridgePingAlreadyNoted) {
+            long pingCount = lowLevelBridgePings.incrementAndGet();
+            DroneScoutBridgeMonitor.noteCandidate(bridgePingIdentity, rssi);
+            DroneScoutBridgeSignal bridgeSignal = DroneScoutBridgeMonitor.INSTANCE
+                    .getSignal().getValue();
+            CaltopoClient.CTInfo(
+                    "DroneScoutBridge",
+                    String.format(Locale.US,
+                            "Bridge event=%d classification=relay-ping source=bluetooth-callback " +
+                                    "bluetoothPacket=%d relayPing=%d transmitter=%s " +
+                                    "aircraft=%s bridgeRssiDbm=%d bytes=%d",
+                            bridgeSignal != null ? bridgeSignal.getEventCount() : -1,
+                            bluetoothPacketCount,
+                            pingCount,
+                            macAddress,
+                            bridgePingIdentity,
+                            rssi,
+                            packet.length));
+        }
 
         enqueueRidPacket(
                 String.format(Locale.US,
                         "processBluetoothPacket(mac=%s,rssi=%d,transport=%s,bytes=%d,timestampNanos=%d)",
                         macAddress, rssi, transportType, packet.length, timestampNanos),
                 () -> processBluetoothPacket(
-                        packet, timestampNanos, macAddress, rssi, transportType, location));
+                        packet, timestampNanos, macAddress, rssi, transportType, location,
+                        bridgePingAlreadyNoted));
     }
 
     private void processBluetoothPacket(byte[] data, long timestampNanos, String macAddress, int rssi,
                                         CtDroneSpec.TransportTypeEnum transportType,
-                                        android.location.Location location) {
+                                        android.location.Location location,
+                                        boolean bridgePingAlreadyNoted) {
         String macAddressCleaned = macAddress.replace(":", "");
         long macAddressLong = Long.parseLong(macAddressCleaned,16);
-        OpenDroneIdParser.Message<?> message =
-                OpenDroneIdParser.parseData(data, 6, timestampNanos, location);
+        OpenDroneIdParser.Message<?> message = parseBluetoothServiceData(
+                data, timestampNanos, location);
         if (message == null)
             return;
         receiveData(timestampNanos, macAddress, macAddressLong, rssi,
-                    message, transportType);
+                    message, transportType, bridgePingAlreadyNoted);
+    }
+
+    static OpenDroneIdParser.Message<?> parseBluetoothServiceData(
+            byte[] serviceData,
+            long timestampNanos,
+            android.location.Location receiverLocation) {
+        // Android's ScanRecord#getServiceData strips the AD length/type and 16-bit UUID.
+        // The remaining bytes are application code, message counter, then the ODID message.
+        return OpenDroneIdParser.parseData(serviceData, 2, timestampNanos, receiverLocation);
+    }
+
+    @Nullable
+    static String bluetoothRelayPingIdentity(
+            byte[] serviceData,
+            long timestampNanos,
+            android.location.Location receiverLocation) {
+        OpenDroneIdParser.Message<?> message = parseBluetoothServiceData(
+                serviceData, timestampNanos, receiverLocation);
+        return relayPingIdentity(message, receiverLocation);
+    }
+
+    @Nullable
+    private static String relayPingIdentity(
+            OpenDroneIdParser.Message<?> message,
+            android.location.Location receiverLocation) {
+        if (message == null || message.payload == null) return null;
+        if (message.header.type == OpenDroneIdParser.Type.BASIC_ID) {
+            OpenDroneIdParser.BasicId basicId = (OpenDroneIdParser.BasicId) message.payload;
+            String identity = new String(basicId.uasId, StandardCharsets.US_ASCII);
+            return DroneScoutBridgeMonitor.isRelayPingIdentity(identity) ? identity : null;
+        }
+        if (message.header.type != OpenDroneIdParser.Type.MESSAGE_PACK) return null;
+        OpenDroneIdParser.MessagePack pack = (OpenDroneIdParser.MessagePack) message.payload;
+        if (pack.messageSize != Constants.MAX_MESSAGE_SIZE ||
+                pack.messagesInPack <= 0 ||
+                pack.messagesInPack > Constants.MAX_MESSAGES_IN_PACK) {
+            return null;
+        }
+        for (int i = 0; i < pack.messagesInPack; i++) {
+            int offset = i * pack.messageSize;
+            byte[] data = Arrays.copyOfRange(pack.messages, offset, offset + pack.messageSize);
+            OpenDroneIdParser.Message<?> subMessage = OpenDroneIdParser.parseMessage(
+                    data, 0, message.timestamp, receiverLocation, message.msgCounter);
+            String identity = relayPingIdentity(subMessage, receiverLocation);
+            if (identity != null) return identity;
+        }
+        return null;
     }
 
     void receiveDataNaN(byte[] data, int peerHash, long timeNano, CtDroneSpec.TransportTypeEnum transportType) {
@@ -296,7 +395,8 @@ public class OpenDroneIdDataManager {
         return altitudeInMeters;
     }
 
-    void updateCaltopo(AircraftObject ac, CtDroneSpec.TransportTypeEnum transportType) {
+    void updateCaltopo(AircraftObject ac, CtDroneSpec.TransportTypeEnum transportType,
+                       @Nullable DroneScoutRelayMetadata relayMetadata) {
         Identification acId = ac.getIdentification1();
 
         // Some drones (e.g. DS154) broadcast TWO BASIC_ID messages in the same message pack:
@@ -332,6 +432,11 @@ public class OpenDroneIdDataManager {
 
         CaltopoClient client = CaltopoClient.ClientForRemoteId(idStr);
         CtDroneSpec droneSpec = client.getDroneSpec();
+        if (relayMetadata != null) {
+            droneSpec.updateDroneToBridgeRssi(
+                    relayMetadata.getDroneToBridgeRssiDbm(),
+                    relayMetadata.getReceptionMode());
+        }
 
         long nowWallMsec = System.currentTimeMillis();
         long timestampInMilliseconds = ridTimestampTenthsToUtcMsec(location.getLocationTimestamp(), nowWallMsec);
@@ -386,9 +491,11 @@ public class OpenDroneIdDataManager {
         // Let the droneSpec be final arbiter of what constitutes a reasonable waypoint.
         if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, nowWallMsec, airborne, transportType)) return;
 
-        // Update signal strength only for accepted waypoints so that the displayed RSSI is
-        // always consistent with the transport counts (both reflect valid position updates only).
-        droneSpec.updateLastRssi(ac.getConnection().rssi, transportType);
+        // A relayed packet's callback RSSI is bridge-to-device, not drone-to-device. Preserve
+        // the direct per-transport RSSI until another genuinely direct packet updates it.
+        if (relayMetadata == null) {
+            droneSpec.updateLastRssi(ac.getConnection().rssi, transportType);
+        }
 
         // Only update altitude context for waypoints that passed all validity checks.
         droneSpec.updateAltitudeContext(
@@ -400,15 +507,9 @@ public class OpenDroneIdDataManager {
         double speedVerticalMps = location.getSpeedVertical();
         double speedGroundMps = location.getSpeedHorizontal();
         double directionDeg = location.getDirection();
-        Double aircraftAltitudeRateFpm = (speedVerticalMps != 63.0)
-                ? speedVerticalMps * 196.850394
-                : null;
-        Double aircraftGsKnots = (speedGroundMps != 255.0)
-                ? speedGroundMps * 1.94384449
-                : null;
-        Double aircraftTrackDeg = (directionDeg >= 0.0 && directionDeg <= 360.0)
-                ? directionDeg
-                : null;
+        Double aircraftAltitudeRateFpm = validRidVerticalRateFpm(speedVerticalMps);
+        Double aircraftGsKnots = validRidHorizontalSpeedKnots(speedGroundMps);
+        Double aircraftTrackDeg = validRidDirectionDegrees(directionDeg);
         // ASTM RID does not provide true nose heading, so use direction as a heading proxy.
         if (aircraftAltitudeRateFpm != null || aircraftGsKnots != null || aircraftTrackDeg != null) {
             CtDroneSpec.PositionTelemetry telemetry = new CtDroneSpec.PositionTelemetry(
@@ -433,6 +534,13 @@ public class OpenDroneIdDataManager {
     @SuppressWarnings("unchecked")
     void receiveData(long timeNano, String macAddress, long macAddressLong, int rssi,
                      OpenDroneIdParser.Message<?> message, CtDroneSpec.TransportTypeEnum transportType) {
+        receiveData(timeNano, macAddress, macAddressLong, rssi, message, transportType, false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void receiveData(long timeNano, String macAddress, long macAddressLong, int rssi,
+                     OpenDroneIdParser.Message<?> message, CtDroneSpec.TransportTypeEnum transportType,
+                     boolean bridgePingAlreadyNoted) {
 
         // Handle connection
         boolean newAircraft = false;
@@ -473,9 +581,88 @@ public class OpenDroneIdDataManager {
             locationUpdated = handleMessages(ac, message);
         }
 
-        if (locationUpdated) {
-            updateCaltopo(ac, transportType);
+        DroneScoutRelayMetadata relayMetadata = droneScoutRelayMetadata(ac);
+        if (relayMetadata != null) {
+            long bridgeEventCount = DroneScoutBridgeMonitor.noteRelayedPacket(rssi);
+            CaltopoClient.CTDebug(
+                    "DroneScoutBridge",
+                    String.format(Locale.US,
+                            "Bridge event=%d classification=relayed-aircraft transmitter=%s " +
+                                    "messageCounter=%d messageType=%s locationUpdated=%s " +
+                                    "aircraft=%s bridgeRssiDbm=%d " +
+                                    "droneToBridgeRssiDbm=%d mode=%s",
+                            bridgeEventCount,
+                            macAddress,
+                            message.msgCounter,
+                            message.header.type,
+                            locationUpdated,
+                            preferredAircraftIdentity(ac),
+                            rssi,
+                            relayMetadata.getDroneToBridgeRssiDbm(),
+                            relayMetadata.getReceptionMode()));
         }
+        boolean isDroneScoutBridgePing = bridgePingAlreadyNoted || noteDroneScoutBridgePing(
+                ac, rssi, macAddress, message.msgCounter);
+
+        if (!isDroneScoutBridgePing) {
+            noteActiveAircraftMessage(ac, currentTime);
+        }
+
+        if (locationUpdated && !isDroneScoutBridgePing) {
+            updateCaltopo(ac, transportType, relayMetadata);
+        }
+    }
+
+    private void noteActiveAircraftMessage(AircraftObject ac, long nowWallMsec) {
+        String rawIdentity = preferredAircraftIdentity(ac);
+        if (rawIdentity == null) return;
+        String remoteId = rawIdentity.replaceAll("[^A-Z0-9]", "");
+        if (remoteId.isEmpty() || "UNKNOWN".equals(remoteId)) return;
+        CaltopoClient.NoteActiveAircraftMessageReceived(remoteId, nowWallMsec);
+    }
+
+    @Nullable
+    private DroneScoutRelayMetadata droneScoutRelayMetadata(AircraftObject ac) {
+        SelfIdData selfID = ac.getSelfID();
+        if (selfID == null) return null;
+        return DroneScoutRelayMetadata.parse(selfID.getOperationDescriptionAsString());
+    }
+
+    private boolean noteDroneScoutBridgePing(
+            AircraftObject ac, int rssi, String transmitter, int messageCounter) {
+        Identification primary = ac.getIdentification1();
+        Identification secondary = ac.getIdentification2();
+        String primaryIdentity = primary != null ? primary.getUasIdAsString() : null;
+        String secondaryIdentity = secondary != null ? secondary.getUasIdAsString() : null;
+        boolean primaryMatches = DroneScoutBridgeMonitor.isRelayPingIdentity(primaryIdentity);
+        boolean secondaryMatches = DroneScoutBridgeMonitor.isRelayPingIdentity(secondaryIdentity);
+        if (!primaryMatches && !secondaryMatches) return false;
+
+        DroneScoutBridgeMonitor.noteCandidate(
+                primaryMatches ? primaryIdentity : secondaryIdentity,
+                rssi);
+        DroneScoutBridgeSignal bridgeSignal = DroneScoutBridgeMonitor.INSTANCE
+                .getSignal().getValue();
+        CaltopoClient.CTInfo(
+                "DroneScoutBridge",
+                String.format(Locale.US,
+                        "Bridge event=%d classification=relay-ping transmitter=%s " +
+                                "messageCounter=%d aircraft=%s bridgeRssiDbm=%d",
+                        bridgeSignal != null ? bridgeSignal.getEventCount() : -1,
+                        transmitter,
+                        messageCounter,
+                        primaryMatches ? primaryIdentity : secondaryIdentity,
+                        rssi));
+        return true;
+    }
+
+    private String preferredAircraftIdentity(AircraftObject ac) {
+        Identification primary = ac.getIdentification1();
+        Identification secondary = ac.getIdentification2();
+        if (secondary != null && secondary.getIdType() == Identification.IdTypeEnum.Serial_Number) {
+            return secondary.getUasIdAsString();
+        }
+        return primary != null ? primary.getUasIdAsString() : "unknown";
     }
 
     @SuppressWarnings("unchecked")

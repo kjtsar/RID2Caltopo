@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.VideoStreamViewRequest
 
@@ -66,5 +67,12 @@ class ManagedVideoQualityPolicyTest {
         assertEquals(640 to 360, startable.single().let { it.width to it.height })
         assertEquals(5.0, startable.single().fps, 0.0)
         assertTrue(startable.single().bitrateBps <= 200_000)
+    }
+
+    @Test
+    fun `approval remains nonmodal until preflight finishes`() {
+        assertFalse(shouldPresentVideoApproval(null, null))
+        assertTrue(shouldPresentVideoApproval("routed", null))
+        assertTrue(shouldPresentVideoApproval(null, "measurement failed"))
     }
 }

@@ -109,6 +109,42 @@ class CtDroneSpecTest {
     }
 
     @Test
+    fun checkNewWaypoint_allowsGpsToleranceAboveOperatingLimitAndRejectsOverTwoHundredMph() {
+        val drone = CtDroneSpec("RID123")
+        val startMs = 10_000L
+        val feetPerLatitudeDegree = 364_813.0
+        val startLatitude = 39.0
+
+        assertTrue(drone.checkNewWaypoint(
+            startLatitude,
+            -121.0,
+            100.0,
+            startMs,
+            startMs,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+        assertTrue(drone.checkNewWaypoint(
+            startLatitude + 150.0 / feetPerLatitudeDegree,
+            -121.0,
+            100.0,
+            startMs + 1_000L,
+            startMs + 1_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+        assertFalse(drone.checkNewWaypoint(
+            startLatitude + 450.0 / feetPerLatitudeDegree,
+            -121.0,
+            100.0,
+            startMs + 2_000L,
+            startMs + 2_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+    }
+
+    @Test
     fun signalIdleTime_tracksReceivedRidPacketBeforeWaypointAcceptance() {
         val drone = CtDroneSpec("RID123")
         val nowMs = 12_345L
@@ -155,6 +191,25 @@ class CtDroneSpecTest {
         drone.notePeerTelemetryReceived(10_000L)
 
         assertEquals(9_500L, drone.idleTimeInMsec(10_500L))
+        assertEquals(9_500L, drone.signalIdleTimeInMsec(10_500L))
+        assertEquals(500L, drone.trackTelemetryIdleTimeInMsec(10_500L))
+    }
+
+    @Test
+    fun trackTelemetryIdleTime_usesNonLocationAircraftMessagesWithoutClearingLocationStaleness() {
+        val drone = CtDroneSpec("RID123")
+
+        drone.checkNewWaypoint(
+            39.0,
+            -121.0,
+            100.0,
+            1_000L,
+            1_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        drone.noteAircraftMessageReceived(10_000L)
+
         assertEquals(9_500L, drone.signalIdleTimeInMsec(10_500L))
         assertEquals(500L, drone.trackTelemetryIdleTimeInMsec(10_500L))
     }

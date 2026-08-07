@@ -182,7 +182,7 @@ internal fun MapPaneMutualAidDialogs(
                         onShowPackageDialogChange(false)
                         onStartShare()
                     }
-                ) { Text("Start Sharing") }
+                ) { Text("Prepare MA Package") }
             },
             dismissButton = {
                 TextButton(onClick = { onShowPackageDialogChange(false) }) {

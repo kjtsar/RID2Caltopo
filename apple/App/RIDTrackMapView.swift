@@ -121,6 +121,7 @@ private final class AppleMapArtifactModel: ObservableObject {
     private var configurationFingerprint = ""
     private var configuredMapID = ""
     private var visibilityInitialized = false
+    private var folderVisibilityOverrides: [String: Bool] = [:]
     private var lastPollAtByMapID: [String: Date] = [:]
 
     private static let minimumPollInterval: TimeInterval = 30
@@ -138,11 +139,15 @@ private final class AppleMapArtifactModel: ObservableObject {
             String(configuration.credentialSecret.hashValue),
         ].joined(separator: "|")
         guard fingerprint != configurationFingerprint else { return }
+        let mapSessionChanged = configuredMapID != configuration.mapID
         configurationFingerprint = fingerprint
         configuredMapID = configuration.mapID
         refreshTask?.cancel()
         hiddenFolderIDs = []
         hiddenItemIDs = []
+        if mapSessionChanged {
+            folderVisibilityOverrides = [:]
+        }
         visibilityInitialized = false
         guard !configuration.domainAndPort.isEmpty,
               !configuration.mapID.isEmpty,
@@ -188,8 +193,9 @@ private final class AppleMapArtifactModel: ObservableObject {
     func toggleFolder(_ folder: CaltopoArtifactFolder) {
         if isFolderEffectivelyVisible(folder) {
             hiddenFolderIDs.insert(folder.id)
+            folderVisibilityOverrides[folder.id] = false
         } else {
-            unhideFolderAndAncestors(folder.id)
+            unhideFolderAndAncestors(folder.id, recordOperatorOverride: true)
         }
         persistVisibility()
     }
@@ -199,7 +205,7 @@ private final class AppleMapArtifactModel: ObservableObject {
             hiddenItemIDs.insert(item.id)
         } else {
             hiddenItemIDs.remove(item.id)
-            unhideFolderAndAncestors(item.folderID)
+            unhideFolderAndAncestors(item.folderID, recordOperatorOverride: true)
         }
         persistVisibility()
     }
@@ -208,7 +214,9 @@ private final class AppleMapArtifactModel: ObservableObject {
         let ids = Set(items.map(\.id))
         if visible {
             hiddenItemIDs.subtract(ids)
-            if let folderID = items.first?.folderID { unhideFolderAndAncestors(folderID) }
+            if let folderID = items.first?.folderID {
+                unhideFolderAndAncestors(folderID, recordOperatorOverride: true)
+            }
         }
         else { hiddenItemIDs.formUnion(ids) }
         persistVisibility()
@@ -231,11 +239,14 @@ private final class AppleMapArtifactModel: ObservableObject {
         return isFolderEffectivelyVisible(folder)
     }
 
-    private func unhideFolderAndAncestors(_ folderID: String) {
+    private func unhideFolderAndAncestors(_ folderID: String, recordOperatorOverride: Bool = false) {
         var currentID: String? = folderID
         var visited: Set<String> = []
         while let id = currentID, visited.insert(id).inserted {
             hiddenFolderIDs.remove(id)
+            if recordOperatorOverride {
+                folderVisibilityOverrides[id] = true
+            }
             currentID = snapshot.folders.first { $0.id == id }?.parentID
         }
     }
@@ -267,7 +278,11 @@ private final class AppleMapArtifactModel: ObservableObject {
             // Match Android: folders hidden by CalTopo (notably the dated
             // completed-track archive) stay hidden after reconnects, while
             // local hides of otherwise-visible folders are preserved.
-            hiddenFolderIDs.formUnion(serverHiddenFolders)
+            hiddenFolderIDs = CaltopoArtifactVisibilityPolicy.hiddenFolderIDs(
+                localHidden: hiddenFolderIDs,
+                defaultHidden: serverHiddenFolders,
+                operatorVisibilityOverrides: folderVisibilityOverrides
+            )
             if hiddenFolderIDs != visibilityBeforeRefresh {
                 persistVisibility()
             }
@@ -303,6 +318,11 @@ private final class AppleMapArtifactModel: ObservableObject {
             visibilityInitialized = true
             persistVisibility()
         }
+        hiddenFolderIDs = CaltopoArtifactVisibilityPolicy.hiddenFolderIDs(
+            localHidden: hiddenFolderIDs,
+            defaultHidden: [],
+            operatorVisibilityOverrides: folderVisibilityOverrides
+        )
     }
 
     private func persistVisibility() {
@@ -540,6 +560,7 @@ struct RIDTrackMapView: View {
                 selection: selection,
                 track: model.tracks.first { $0.aircraftID == selection.remoteID },
                 altitudeDisplay: model.altitudeDisplayByAircraftID[selection.remoteID],
+                followFocusedDrone: $followFocusedDrone,
                 onCalibrateAltitude: { model.manualCalibrateAltitude(remoteID: selection.remoteID) },
                 store: pilotDisplay
             )
@@ -551,6 +572,7 @@ struct RIDTrackMapView: View {
                 tracks: model.tracks,
                 altitudeDisplay: model.altitudeDisplayByAircraftID,
                 identityStore: identityStore,
+                coordinateDisplayFormat: coordinateDisplayFormat,
                 onSubmit: { draft, jpeg, publish in
                     do {
                         try clueStore.save(draft, jpegData: jpeg, publishToCaltopo: publish)
@@ -569,6 +591,7 @@ struct RIDTrackMapView: View {
             ClueDetailView(
                 clue: clue,
                 store: clueStore,
+                coordinateDisplayFormat: coordinateDisplayFormat,
                 onClose: { selectedClueID = nil }
             )
         }
@@ -877,6 +900,11 @@ struct RIDTrackMapView: View {
                         pilotCallsign: identity?.pilotCallsign ?? ""
                     )
                 },
+                onOperatorViewportGesture: {
+                    guard focusedAircraftID != nil else { return }
+                    focusedAircraftID = nil
+                    AppleLog.info("MapViewport", "Operator gesture released focused drone")
+                },
                 onLongPressTile: { zoom, x, y in
                     Task {
                         if let selection = await offlineMaps.cachedTileSelection(
@@ -947,6 +975,8 @@ struct RIDTrackMapView: View {
                 .frame(width: 42, height: 42)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         }
+        // SwiftUI otherwise reverses the visual order when this menu opens upward.
+        .menuOrder(.fixed)
         .accessibilityLabel("Map settings")
     }
 
@@ -1278,7 +1308,7 @@ struct RIDTrackMapView: View {
                         else { showNotams = true }
                     }
                 }
-                if landRestrictions.enabled {
+                if landRestrictions.state.visible {
                     operationalStatusChip(
                         OperationalStatusChipText.land(
                             severity: landRestrictions.state.severity,
@@ -1551,6 +1581,7 @@ private struct ClueSubmissionView: View {
     let tracks: [RidAircraftTrack]
     let altitudeDisplay: [String: OperationalAircraftAltitudeDisplay]
     @ObservedObject var identityStore: AppleDroneConfirmationStore
+    let coordinateDisplayFormat: OperationalCoordinateDisplayFormat
     let onSubmit: (AppleClueDraft, Data, Bool) -> Void
     let onCancel: () -> Void
 
@@ -1571,6 +1602,7 @@ private struct ClueSubmissionView: View {
         tracks: [RidAircraftTrack],
         altitudeDisplay: [String: OperationalAircraftAltitudeDisplay],
         identityStore: AppleDroneConfirmationStore,
+        coordinateDisplayFormat: OperationalCoordinateDisplayFormat,
         onSubmit: @escaping (AppleClueDraft, Data, Bool) -> Void,
         onCancel: @escaping () -> Void
     ) {
@@ -1579,6 +1611,7 @@ private struct ClueSubmissionView: View {
         self.tracks = tracks
         self.altitudeDisplay = altitudeDisplay
         self.identityStore = identityStore
+        self.coordinateDisplayFormat = coordinateDisplayFormat
         self.onSubmit = onSubmit
         self.onCancel = onCancel
         _selectedAircraftID = State(initialValue: pending.defaultAircraftID)
@@ -1805,22 +1838,27 @@ private struct ClueSubmissionView: View {
         }
         submissionFeedback = nil
         let clueAltitude = projection.altitudeMeters.map { String(format: "%.0f'", $0 * 3.28084) } ?? "N/A"
-        let usng = OperationalCoordinateFormatter.format(
+        let primaryPosition = OperationalCoordinateFormatter.format(
             latitude: projection.latitude,
             longitude: projection.longitude,
-            as: .usng
+            as: coordinateDisplayFormat
         ).replacingOccurrences(of: "loc:", with: "")
-        let summary = """
-        Projected clue location:
-          Position: \(String(format: "%.6f, %.6f", projection.latitude, projection.longitude)) alt \(clueAltitude)
-          USNG: \(usng)
-          Heading used for clue: \(headingMeasurement(heading.degrees))
-          Heading source: \(heading.sourceLabel ?? "N/A")
-          Gimbal angle at capture: \(String(format: "%.1f°", gimbalAngle))
-          AGL: \(measurement(display?.aglFeet, suffix: display?.aglStale == true ? "? ft" : " ft"))
-          ATO: \(measurement(display?.atoFeet, suffix: " ft"))
-          Distance to clue: \(measurement(clueDistanceFeet, suffix: " ft"))
-        """
+        var summaryLines = [
+            "Projected clue location:",
+            "  Position (\(coordinateDisplayFormat.label)): \(primaryPosition) alt \(clueAltitude)"
+        ]
+        if coordinateDisplayFormat != .decimal {
+            summaryLines.append(String(format: "  Decimal: %.6f, %.6f", projection.latitude, projection.longitude))
+        }
+        summaryLines += [
+            "  Heading used for clue: \(headingMeasurement(heading.degrees))",
+            "  Heading source: \(heading.sourceLabel ?? "N/A")",
+            "  Gimbal angle at capture: \(String(format: "%.1f°", gimbalAngle))",
+            "  AGL: \(measurement(display?.aglFeet, suffix: display?.aglStale == true ? "? ft" : " ft"))",
+            "  ATO: \(measurement(display?.atoFeet, suffix: " ft"))",
+            "  Distance to clue: \(measurement(clueDistanceFeet, suffix: " ft"))"
+        ]
+        let summary = summaryLines.joined(separator: "\n")
         let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalDescription = trimmedDescription.isEmpty ? summary : trimmedDescription + "\n\n" + summary
         onSubmit(AppleClueDraft(
@@ -1843,7 +1881,12 @@ private struct ClueSubmissionView: View {
     }
 
     private func coordinate(_ latitude: Double, _ longitude: Double) -> String {
-        String(format: "%.5f, %.5f", latitude, longitude)
+        let value = OperationalCoordinateFormatter.format(
+            latitude: latitude,
+            longitude: longitude,
+            as: coordinateDisplayFormat
+        ).replacingOccurrences(of: "loc:", with: "")
+        return "\(value) (\(coordinateDisplayFormat.label))"
     }
 
     private func measurement(_ value: Double?, suffix: String) -> String {
@@ -1891,6 +1934,7 @@ private struct ClueProjectionInput: Hashable {
 private struct ClueDetailView: View {
     let clue: OperationalClueRecord
     @ObservedObject var store: AppleClueStore
+    let coordinateDisplayFormat: OperationalCoordinateDisplayFormat
     let onClose: () -> Void
 
     var body: some View {
@@ -1911,7 +1955,14 @@ private struct ClueDetailView: View {
                 Section(clue.title) {
                     LabeledContent("Aircraft", value: clue.designator)
                     LabeledContent("Captured", value: clue.capturedAt.formatted(date: .abbreviated, time: .standard))
-                    LabeledContent("Location", value: String(format: "%.5f, %.5f", clue.clueLatitude, clue.clueLongitude))
+                    LabeledContent(
+                        "Location",
+                        value: OperationalCoordinateFormatter.format(
+                            latitude: clue.clueLatitude,
+                            longitude: clue.clueLongitude,
+                            as: coordinateDisplayFormat
+                        ).replacingOccurrences(of: "loc:", with: "") + " (\(coordinateDisplayFormat.label))"
+                    )
                     LabeledContent("CalTopo", value: clue.uploadState.rawValue)
                     if let error = clue.lastUploadError { Text(error).foregroundStyle(.red) }
                     Text(clue.clueDescription)
@@ -2119,6 +2170,7 @@ private struct PilotDisplaySettingsView: View {
     let selection: PilotDisplaySelection
     let track: RidAircraftTrack?
     let altitudeDisplay: OperationalAircraftAltitudeDisplay?
+    @Binding var followFocusedDrone: Bool
     let onCalibrateAltitude: () -> Void
     @ObservedObject var store: ApplePilotDisplayStore
     @Environment(\.dismiss) private var dismiss
@@ -2154,6 +2206,9 @@ private struct PilotDisplaySettingsView: View {
                         Button("Calibrate ATO + AGL at 50 ft", action: onCalibrateAltitude)
                             .disabled(observation.altitudeMeters == nil)
                     }
+                }
+                Section("Map") {
+                    Toggle("Follow focused drone", isOn: $followFocusedDrone)
                 }
                 if !selection.pilotCallsign.isEmpty {
                     Section("Pilot Display: \(selection.pilotCallsign)") {
@@ -2258,6 +2313,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     @Binding var operatorAdjustedViewport: Bool
     let onSelectClue: (UUID) -> Void
     let onSelectAircraft: (String) -> Void
+    let onOperatorViewportGesture: () -> Void
     let onLongPressTile: (Int, Int, Int) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -2267,6 +2323,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             operatorAdjustedViewport: $operatorAdjustedViewport,
             onSelectClue: onSelectClue,
             onSelectAircraft: onSelectAircraft,
+            onOperatorViewportGesture: onOperatorViewportGesture,
             onLongPressTile: onLongPressTile
         )
     }
@@ -2309,6 +2366,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     func updateUIView(_ map: MKMapView, context: Context) {
         context.coordinator.onSelectAircraft = onSelectAircraft
         context.coordinator.onSelectClue = onSelectClue
+        context.coordinator.onOperatorViewportGesture = onOperatorViewportGesture
         context.coordinator.onLongPressTile = onLongPressTile
         map.showsUserLocation = false
         context.coordinator.updateOperatorLocation(
@@ -2401,13 +2459,13 @@ private struct OperationalMKMapView: UIViewRepresentable {
         private var initialViewportSource: InitialViewportSource
         private var updating = false
         private var currentInset = false
-        private var currentFollowFocusedDrone = false
         private var currentFocusedAircraftID: String?
         private let pendingVisibleMapRect: MKMapRect?
         private var restoredViewportBounds = false
         private var regionChangeWasUserGesture = false
         var onSelectClue: (UUID) -> Void
         var onSelectAircraft: (String) -> Void
+        var onOperatorViewportGesture: () -> Void
         var onLongPressTile: (Int, Int, Int) -> Void
 
         init(
@@ -2416,6 +2474,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             operatorAdjustedViewport: Binding<Bool>,
             onSelectClue: @escaping (UUID) -> Void,
             onSelectAircraft: @escaping (String) -> Void,
+            onOperatorViewportGesture: @escaping () -> Void,
             onLongPressTile: @escaping (Int, Int, Int) -> Void
         ) {
             _viewport = viewport
@@ -2427,6 +2486,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             initialViewportSource = pendingVisibleMapRect == nil ? .none : .preservedTransition
             self.onSelectClue = onSelectClue
             self.onSelectAircraft = onSelectAircraft
+            self.onOperatorViewportGesture = onOperatorViewportGesture
             self.onLongPressTile = onLongPressTile
         }
 
@@ -2463,7 +2523,12 @@ private struct OperationalMKMapView: UIViewRepresentable {
             offlineOnly: Bool,
             revision: Int
         ) {
-            let fingerprint = "\(baseLayer.rawValue)|\(contours)|\(offlineOnly)|\(revision)"
+            let fingerprint = OperationalMapTileLayerState.fingerprint(
+                baseLayer: baseLayer,
+                contours: contours,
+                offlineOnly: offlineOnly,
+                revision: revision
+            )
             guard fingerprint != tileFingerprint else { return }
             tileFingerprint = fingerprint
             map.removeOverlays(map.overlays.filter { $0 is CachedMapTileOverlay })
@@ -2475,6 +2540,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             }
         }
 
+        @MainActor
         func updateOperatorLocation(
             on map: MKMapView,
             coordinate: CLLocationCoordinate2D?,
@@ -2617,7 +2683,6 @@ private struct OperationalMKMapView: UIViewRepresentable {
         ) {
             updating = true
             currentInset = inset
-            currentFollowFocusedDrone = followFocusedDrone
             currentFocusedAircraftID = focusedAircraftID
             defer { updating = false }
             let nextStaticState = StaticMapRenderState(
@@ -2774,10 +2839,11 @@ private struct OperationalMKMapView: UIViewRepresentable {
                         level: .aboveLabels
                     )
                 }
-                if let latest = track.points.last,
+                if !track.points.isEmpty,
                    let aircraftCoordinate = renderCoordinates[track.aircraftID] {
+                    let travelBearingDegrees = OperationalMapGeometry.travelBearingDegrees(points: track.points)
                     if display.preference.bearingEnabled,
-                       let end = bearingEndpoint(on: map, from: aircraftCoordinate, headingDegrees: latest.headingDegrees) {
+                       let end = bearingEndpoint(on: map, from: aircraftCoordinate, headingDegrees: travelBearingDegrees) {
                         map.addOverlay(
                             StyledPolyline(
                                 coordinates: [aircraftCoordinate, end],
@@ -2793,7 +2859,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
                         remoteID: track.aircraftID,
                         coordinate: aircraftCoordinate,
                         title: display.title,
-                        heading: latest.headingDegrees ?? 0,
+                        heading: travelBearingDegrees,
                         color: iconColor,
                         inset: inset,
                         labelSide: index.isMultiple(of: 2) ? -1 : 1,
@@ -2978,7 +3044,8 @@ private struct OperationalMKMapView: UIViewRepresentable {
         }
 
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
-            guard !updating, hasActiveUserGesture(in: mapView) else { return }
+            guard !updating, hasActiveViewportGesture(in: mapView) else { return }
+            releaseFocusedAircraftForOperatorGesture()
             regionChangeWasUserGesture = true
             persistViewport(from: mapView)
         }
@@ -3062,22 +3129,37 @@ private struct OperationalMKMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionWillChangeAnimated animated: Bool) {
-            let userGesture = hasActiveUserGesture(in: mapView)
+            let userGesture = hasActiveViewportGesture(in: mapView)
             regionChangeWasUserGesture = userGesture
-            guard !(currentFollowFocusedDrone && currentFocusedAircraftID != nil),
-                  userGesture
-            else { return }
+            guard userGesture else { return }
+            releaseFocusedAircraftForOperatorGesture()
             operatorAdjustedViewport = true
             viewportMemory.hasOperationalViewport = true
         }
 
-        private func hasActiveUserGesture(in view: UIView) -> Bool {
-            if view.gestureRecognizers?.contains(where: {
-                $0.state == .began || $0.state == .changed
+        private func releaseFocusedAircraftForOperatorGesture() {
+            guard OperationalMapFocusPolicy.shouldReleaseFocus(
+                hasFocusedAircraft: currentFocusedAircraftID != nil,
+                isOperatorGesture: true
+            ) else { return }
+            currentFocusedAircraftID = nil
+            onOperatorViewportGesture()
+        }
+
+        private func hasActiveViewportGesture(in view: UIView) -> Bool {
+            if view.gestureRecognizers?.contains(where: { gesture in
+                switch gesture {
+                case is UIPanGestureRecognizer, is UIPinchGestureRecognizer:
+                    return gesture.state == .began || gesture.state == .changed
+                case let tap as UITapGestureRecognizer:
+                    return tap.numberOfTapsRequired >= 2 && gesture.state == .ended
+                default:
+                    return false
+                }
             }) == true {
                 return true
             }
-            return view.subviews.contains(where: hasActiveUserGesture)
+            return view.subviews.contains(where: hasActiveViewportGesture)
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -3232,21 +3314,20 @@ private final class AircraftAnnotationView: MKAnnotationView {
 
     func configure(_ aircraft: AircraftAnnotation) {
         annotation = aircraft
-        let iconSize: CGFloat = aircraft.inset ? 22 : 30
+        let iconSize: CGFloat = aircraft.inset ? 34 : 50
         let iconX = (bounds.width - iconSize) / 2
         let iconY = (bounds.height - iconSize) / 2
         iconView.frame = CGRect(x: iconX, y: iconY, width: iconSize, height: iconSize)
-        iconView.backgroundColor = aircraft.color
-        iconView.layer.cornerRadius = iconSize / 2
-        iconView.layer.borderColor = UIColor.systemYellow.cgColor
-        iconView.layer.borderWidth = aircraft.focused ? 3 : 0
-        iconView.tintColor = .white
-        let pointSize = aircraft.inset ? 12.0 : 17.0
-        iconView.image = UIImage(
-            systemName: "airplane",
-            withConfiguration: UIImage.SymbolConfiguration(pointSize: pointSize, weight: .bold)
+        iconView.backgroundColor = .clear
+        iconView.layer.cornerRadius = 0
+        iconView.layer.borderWidth = 0
+        iconView.image = AircraftMarkerRenderer.image(
+            size: iconSize,
+            color: aircraft.color,
+            headingDegrees: aircraft.heading,
+            focused: aircraft.focused
         )
-        iconView.transform = CGAffineTransform(rotationAngle: CGFloat((aircraft.heading - 90) * .pi / 180))
+        iconView.transform = .identity
         nameLabel.isHidden = aircraft.inset
         statusLabel.isHidden = aircraft.inset
         leaderLayer.isHidden = aircraft.inset
@@ -3287,6 +3368,153 @@ private final class AircraftAnnotationView: MKAnnotationView {
         iconView.frame.insetBy(dx: -10, dy: -10).contains(point)
             || (!nameLabel.isHidden && nameLabel.frame.contains(point))
             || (!statusLabel.isHidden && statusLabel.frame.contains(point))
+    }
+}
+
+/// Renders the marker as one immutable bitmap, matching Android's osmdroid
+/// marker strategy. This avoids transform/clipping artifacts when MapKit reuses
+/// annotation views and leaves the symmetric drone icon useful even when no
+/// confident course can be derived yet.
+private enum AircraftMarkerRenderer {
+    static func image(
+        size: CGFloat,
+        color: UIColor,
+        headingDegrees: Double?,
+        focused: Bool
+    ) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: format)
+        return renderer.image { rendererContext in
+            let context = rendererContext.cgContext
+            let center = CGPoint(x: size / 2, y: size / 2)
+            let scale = size / 50
+            let circleRadius = 14 * scale
+
+            if let headingDegrees, headingDegrees.isFinite {
+                drawCoursePointer(
+                    context: context,
+                    center: center,
+                    startRadius: circleRadius + 1 * scale,
+                    tipRadius: 23 * scale,
+                    headingDegrees: headingDegrees,
+                    scale: scale
+                )
+            }
+
+            context.setFillColor(UIColor.white.withAlphaComponent(0.92).cgColor)
+            context.setStrokeColor(UIColor.black.withAlphaComponent(0.65).cgColor)
+            context.setLineWidth(1.5 * scale)
+            context.addArc(center: center, radius: circleRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: false)
+            context.drawPath(using: .fillStroke)
+
+            if focused {
+                context.setStrokeColor(UIColor.systemYellow.cgColor)
+                context.setLineWidth(3 * scale)
+                context.addArc(
+                    center: center,
+                    radius: circleRadius + 1.5 * scale,
+                    startAngle: 0,
+                    endAngle: 2 * .pi,
+                    clockwise: false
+                )
+                context.strokePath()
+            }
+
+            drawDrone(context: context, center: center, color: color, scale: scale)
+        }
+    }
+
+    private static func drawCoursePointer(
+        context: CGContext,
+        center: CGPoint,
+        startRadius: CGFloat,
+        tipRadius: CGFloat,
+        headingDegrees: Double,
+        scale: CGFloat
+    ) {
+        let radians = CGFloat(headingDegrees * .pi / 180)
+        let direction = CGVector(dx: sin(radians), dy: -cos(radians))
+        let start = CGPoint(
+            x: center.x + direction.dx * startRadius,
+            y: center.y + direction.dy * startRadius
+        )
+        let tip = CGPoint(
+            x: center.x + direction.dx * tipRadius,
+            y: center.y + direction.dy * tipRadius
+        )
+        let perpendicular = CGVector(dx: -direction.dy, dy: direction.dx)
+        let arrowLength = 4 * scale
+        let arrowWidth = 3 * scale
+        let left = CGPoint(
+            x: tip.x - direction.dx * arrowLength + perpendicular.dx * arrowWidth,
+            y: tip.y - direction.dy * arrowLength + perpendicular.dy * arrowWidth
+        )
+        let right = CGPoint(
+            x: tip.x - direction.dx * arrowLength - perpendicular.dx * arrowWidth,
+            y: tip.y - direction.dy * arrowLength - perpendicular.dy * arrowWidth
+        )
+
+        for (strokeColor, lineWidth) in [
+            (UIColor.black.withAlphaComponent(0.7), 4 * scale),
+            (UIColor(red: 1, green: 0.97, blue: 0.88, alpha: 1), 2 * scale)
+        ] {
+            context.setStrokeColor(strokeColor.cgColor)
+            context.setLineWidth(lineWidth)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            context.beginPath()
+            context.move(to: start)
+            context.addLine(to: tip)
+            context.move(to: left)
+            context.addLine(to: tip)
+            context.addLine(to: right)
+            context.strokePath()
+        }
+    }
+
+    private static func drawDrone(
+        context: CGContext,
+        center: CGPoint,
+        color: UIColor,
+        scale: CGFloat
+    ) {
+        context.setStrokeColor(color.cgColor)
+        context.setFillColor(color.cgColor)
+        context.setLineWidth(2.2 * scale)
+        context.setLineCap(.round)
+
+        let arm = 7 * scale
+        context.beginPath()
+        context.move(to: CGPoint(x: center.x - arm, y: center.y - arm))
+        context.addLine(to: CGPoint(x: center.x + arm, y: center.y + arm))
+        context.move(to: CGPoint(x: center.x + arm, y: center.y - arm))
+        context.addLine(to: CGPoint(x: center.x - arm, y: center.y + arm))
+        context.strokePath()
+
+        let rotorOffset = 8 * scale
+        let rotorRadius = 2.8 * scale
+        for xSign: CGFloat in [-1, 1] {
+            for ySign: CGFloat in [-1, 1] {
+                context.addArc(
+                    center: CGPoint(
+                        x: center.x + xSign * rotorOffset,
+                        y: center.y + ySign * rotorOffset
+                    ),
+                    radius: rotorRadius,
+                    startAngle: 0,
+                    endAngle: 2 * .pi,
+                    clockwise: false
+                )
+                context.strokePath()
+            }
+        }
+
+        context.addArc(center: center, radius: 4 * scale, startAngle: 0, endAngle: 2 * .pi, clockwise: false)
+        context.fillPath()
+        context.setFillColor(UIColor.systemCyan.cgColor)
+        context.addArc(center: center, radius: 1.3 * scale, startAngle: 0, endAngle: 2 * .pi, clockwise: false)
+        context.fillPath()
     }
 }
 
@@ -3526,7 +3754,7 @@ private final class AircraftAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
     let remoteID: String
     dynamic let coordinate: CLLocationCoordinate2D
     let title: String?
-    let heading: Double
+    let heading: Double?
     let color: UIColor
     let inset: Bool
     let labelSide: Int
@@ -3539,7 +3767,7 @@ private final class AircraftAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
         remoteID: String,
         coordinate: CLLocationCoordinate2D,
         title: String,
-        heading: Double,
+        heading: Double?,
         color: UIColor,
         inset: Bool,
         labelSide: Int,
@@ -3571,6 +3799,7 @@ private final class OperatorDeviceAnnotation: NSObject, MKAnnotation, MapLayerAn
     let inset: Bool
     var statusLines: [String]
 
+    @MainActor
     init(coordinate: CLLocationCoordinate2D, inset: Bool, statusLines: [String]) {
         self.coordinate = coordinate
         self.inset = inset

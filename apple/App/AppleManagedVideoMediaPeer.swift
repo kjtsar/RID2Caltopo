@@ -1,6 +1,7 @@
 import CoreVideo
 import AVFoundation
 import Foundation
+import R2CCore
 @preconcurrency import WebRTC
 
 struct AppleManagedVideoMediaMetrics: Sendable {
@@ -175,7 +176,9 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
 
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
-        configuration.iceTransportPolicy = .relay
+        // The browser is already relay-only. Allow the tablet to contribute
+        // host or server-reflexive candidates and avoid double TURN allocation.
+        configuration.iceTransportPolicy = .all
         configuration.iceServers = iceServers.map {
             RTCIceServer(
                 urlStrings: $0.urls,
@@ -209,14 +212,18 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         }
         self.sender = sender
         let parameters = sender.parameters
-        let minimumBitrateBps = max(100_000, selectedBitrateBps * 60 / 100)
+        let bitratePolicy = ManagedVideoQualityPolicy.senderBitrates(
+            targetBps: selectedBitrateBps
+        )
+        let minimumBitrateBps = bitratePolicy.minimumBps
+        let startupBitrateBps = bitratePolicy.startupBps
         let encodings = parameters.encodings.isEmpty
             ? [RTCRtpEncodingParameters()]
             : parameters.encodings
         for encoding in encodings {
             encoding.isActive = true
             encoding.minBitrateBps = NSNumber(value: minimumBitrateBps)
-            encoding.maxBitrateBps = NSNumber(value: selectedBitrateBps)
+            encoding.maxBitrateBps = NSNumber(value: bitratePolicy.maximumBps)
             encoding.maxFramerate = NSNumber(value: selectedFPS)
             encoding.scaleResolutionDownBy = NSNumber(value: 1.0)
         }
@@ -227,13 +234,13 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         sender.parameters = parameters
         let bweApplied = peer.setBweMinBitrateBps(
             NSNumber(value: minimumBitrateBps),
-            currentBitrateBps: NSNumber(value: selectedBitrateBps),
-            maxBitrateBps: NSNumber(value: selectedBitrateBps)
+            currentBitrateBps: NSNumber(value: startupBitrateBps),
+            maxBitrateBps: NSNumber(value: bitratePolicy.maximumBps)
         )
         AppleLog.info(
             "VideoMedia",
             "request=\(requestID) sender target=\(selectedWidth)x\(selectedHeight)@\(selectedFPS) "
-                + "bitrate min/current/max=\(minimumBitrateBps)/\(selectedBitrateBps)/\(selectedBitrateBps) "
+                + "bitrate min/current/max=\(minimumBitrateBps)/\(startupBitrateBps)/\(selectedBitrateBps) "
                 + "degradation=maintain-resolution scale=1.0 bweApplied=\(bweApplied)"
         )
 
@@ -352,10 +359,10 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         }
     }
 
-    private func maybeSendAnswerOnQueue() {
+    private func maybeSendAnswerOnQueue(allowPartialGathering: Bool = false) {
         guard !answerSent,
               let peer,
-              peer.iceGatheringState == .complete,
+              allowPartialGathering || peer.iceGatheringState == .complete,
               let answer = peer.localDescription,
               !answer.sdp.isEmpty
         else { return }
@@ -548,7 +555,17 @@ extension AppleManagedVideoMediaPeer: RTCPeerConnectionDelegate {
         queue.async { [weak self] in self?.maybeSendAnswerOnQueue() }
     }
 
-    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
+    func peerConnection(
+        _ peerConnection: RTCPeerConnection,
+        didGenerate candidate: RTCIceCandidate
+    ) {
+        guard candidate.sdp.contains(" typ srflx ")
+            || candidate.sdp.contains(" typ relay ")
+        else { return }
+        queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+            self?.maybeSendAnswerOnQueue(allowPartialGathering: true)
+        }
+    }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
 }

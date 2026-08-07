@@ -406,7 +406,11 @@ final class AppleVideoFrameSource: ObservableObject {
         decoderSelectionPolicy.reset()
         startWatchdog()
         installPreferredDecoder(hlsURL: url)
-        AppleLog.info("Video", "Decoder session requested url=\(url.absoluteString) path=\(currentPath ?? "unknown")")
+        AppleLog.info(
+            "Video",
+            "Decoder session requested url=\(url.absoluteString) path=\(currentPath ?? "unknown") " +
+                "networkSnapshotId=\(AppleNetworkDiagnosticCenter.shared.currentSnapshotID)"
+        )
     }
 
     private func installPreferredDecoder(hlsURL: URL) {
@@ -495,7 +499,11 @@ final class AppleVideoFrameSource: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, generation == self.playerGeneration else { return }
-                AppleLog.warning("Video", "AVPlayer reported playback stalled path=\(self.currentPath ?? "unknown"); awaiting decoded-frame watchdog")
+                AppleLog.warning(
+                    "Video",
+                    "AVPlayer reported playback stalled path=\(self.currentPath ?? "unknown"); " +
+                        "awaiting decoded-frame watchdog networkSnapshotId=\(AppleNetworkDiagnosticCenter.shared.currentSnapshotID)"
+                )
             }
         }
         let failedToEnd = NotificationCenter.default.addObserver(
@@ -934,7 +942,11 @@ final class AppleVideoFrameSource: ObservableObject {
         let message = String(decoding: detail.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
         let nativeDecodedFrames = R2CFFmpegSessionDecodedFrameCount(ffmpegSession)
         decoderSelectionPolicy.nativeDecoderFailed(decodedFramesThisAttempt: nativeDecodedFrames)
-        AppleLog.warning("Video", "Native decoder failed path=\(currentPath ?? "unknown") detail=\(message)")
+        AppleLog.warning(
+            "Video",
+            "Native decoder failed path=\(currentPath ?? "unknown") detail=\(message) " +
+                "networkSnapshotId=\(AppleNetworkDiagnosticCenter.shared.currentSnapshotID)"
+        )
         if decoderSelectionPolicy.requiresHLSFallback, let currentURL {
             tearDownNativeDecoder()
             installPlayer(url: currentURL, beginsRecoveryAttempt: false)
@@ -1002,7 +1014,8 @@ final class AppleVideoFrameSource: ObservableObject {
         } ?? "accessLog=none"
         AppleLog.warning(
             "Video",
-            "\(prefix) reason=\(trigger.diagnosticDescription) frames=\(frameCount) frameAge=\(decodedFrameAgeSeconds.map { String(format: "%.1fs", $0) } ?? "none") media=\(mediaPublisherStatus) \(errorDetail) \(accessDetail)"
+            "\(prefix) reason=\(trigger.diagnosticDescription) frames=\(frameCount) frameAge=\(decodedFrameAgeSeconds.map { String(format: "%.1fs", $0) } ?? "none") media=\(mediaPublisherStatus) \(errorDetail) \(accessDetail) " +
+                "networkSnapshotId=\(AppleNetworkDiagnosticCenter.shared.currentSnapshotID)"
         )
     }
 

@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -96,6 +97,12 @@ import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.video.anomaly.targetColorFamilySummary
 import org.ncssar.rid2caltopo.ui.StreamPlayerView
 import kotlin.math.roundToInt
+
+internal fun shouldShowStreamClueCaptureButton(
+    showTileControls: Boolean,
+    isLocalPlayback: Boolean,
+    streamState: StreamState,
+): Boolean = showTileControls && !isLocalPlayback && streamState == StreamState.LIVE
 
 
 @Composable
@@ -319,6 +326,24 @@ fun StreamTile(
             clueBitmap
         )
         return true
+    }
+
+    fun requestClueCapture(reason: String) {
+        if (!tileInteractionsEnabled || isLocalPlayback) return
+        if (!currentIsFocused) {
+            viewModel.ensureFocus(streamDesignator)
+        }
+        if (!viewModel.hasPairedTelemetry(streamDesignator)) {
+            CaltopoClient.ShowToast("Long-press to pair with a drone before submitting clue.")
+            return
+        }
+        if (captureClueSnapshot(reason)) {
+            pendingClueCaptureRequestId = 0L
+            handledClueCaptureRequestId = 0L
+        } else {
+            pendingClueCaptureRequestId += 1L
+            CaltopoClient.ShowToast("Preparing video frame for clue...")
+        }
     }
 
     LaunchedEffect(pendingClueCaptureRequestId, renderedFrameCount, clueCaptureTargetRef.value) {
@@ -563,28 +588,30 @@ fun StreamTile(
                                     openTelemetryPairingControl()
                                 },
                                 onDoubleTap = {
-                                    if (isLocalPlayback) return@detectTapGestures
-                                    if (!currentIsFocused) {
-                                        viewModel.ensureFocus(streamDesignator)
-                                    }
-                                    if (!viewModel.hasPairedTelemetry(streamDesignator)) {
-                                        CaltopoClient.ShowToast("Long-press to pair with a drone before submitting clue.")
-                                        return@detectTapGestures
-                                    }
-
-                                    if (captureClueSnapshot("immediate")) {
-                                        pendingClueCaptureRequestId = 0L
-                                        handledClueCaptureRequestId = 0L
-                                    } else {
-                                        pendingClueCaptureRequestId += 1L
-                                        CaltopoClient.ShowToast("Preparing video frame for clue...")
-                                    }
+                                    requestClueCapture("double-tap")
                                 }
                             )
                         }
                     }
                 )
         )
+        if (shouldShowStreamClueCaptureButton(showTileControls, isLocalPlayback, streamState)) {
+            IconButton(
+                onClick = { requestClueCapture("camera-button") },
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 6.dp)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.88f))
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.CameraAlt,
+                    contentDescription = "Capture clue snapshot",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+        }
         if (showOverlayControls) {
             Box(
                 modifier = Modifier

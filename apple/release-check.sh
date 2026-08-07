@@ -6,8 +6,11 @@ repo_root="${script_dir:h}"
 rebuild_native=true
 archive_path=""
 bundle_id="org.ncssar.RID2CaltopoApple"
-build_number="1"
-marketing_version="1.0"
+version_major="$(sed -nE 's/^[[:space:]]*def versionMajor = ([0-9]+)$/\1/p' "$repo_root/app/build.gradle" | head -1)"
+version_minor="$(sed -nE 's/^[[:space:]]*def versionMinor = ([0-9]+)$/\1/p' "$repo_root/app/build.gradle" | head -1)"
+version_patch="$(sed -nE 's/^[[:space:]]*def versionPatch = ([0-9]+)$/\1/p' "$repo_root/app/build.gradle" | head -1)"
+build_number="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)$/\1/p' "$repo_root/app/build.gradle" | head -1)"
+marketing_version="${version_major}.${version_minor}.${version_patch}"
 force_land_catalog_refresh=false
 
 usage() {
@@ -18,8 +21,8 @@ Options:
   --skip-native-rebuild   Verify existing XCFrameworks instead of rebuilding
   --archive-path PATH     Keep the verified unsigned archive at PATH
   --bundle-id ID         Override CFBundleIdentifier for the archive
-  --build-number NUMBER  Override CFBundleVersion for the archive
-  --marketing-version V Override CFBundleShortVersionString (default: 1.0)
+  --build-number NUMBER  Override CFBundleVersion for the archive (default: Android versionCode)
+  --marketing-version V Override CFBundleShortVersionString (default: Android versionName)
   --force-land-catalog-refresh
                          Ignore the weekly protected-land catalog check cache
   --help                  Show this help

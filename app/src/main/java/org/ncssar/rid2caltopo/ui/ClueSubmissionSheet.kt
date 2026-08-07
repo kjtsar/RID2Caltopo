@@ -50,12 +50,15 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.TextButton
+import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
+import org.ncssar.rid2caltopo.video.CoordinateFormatter
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ClueSubmissionSheet(
     pendingClue: PendingClue,
+    coordinateDisplayFormat: CoordinateDisplayFormat,
     onTitleChanged: (String) -> Unit,
     onDescriptionChanged: (String) -> Unit,
     onGimbalAngleChanged: (Double) -> Unit,
@@ -79,6 +82,7 @@ fun ClueSubmissionSheet(
     ) {
         ClueSheetContent(
             clue = pendingClue,
+            coordinateDisplayFormat = coordinateDisplayFormat,
             onTitleChange = onTitleChanged,
             onDescriptionChange = onDescriptionChanged,
             onGimbalAngleChange = onGimbalAngleChanged,
@@ -93,6 +97,7 @@ fun ClueSubmissionSheet(
 @Composable
 fun ClueSheetContent (
     clue : PendingClue,
+    coordinateDisplayFormat: CoordinateDisplayFormat,
     onTitleChange: (String) -> Unit,
     onDescriptionChange: (String) -> Unit,
     onGimbalAngleChange: (Double) -> Unit,
@@ -194,9 +199,10 @@ fun ClueSheetContent (
             Text(
                 text = String.format(
                     Locale.US,
-                    "Clue location: %.5f, %.5f, alt %.0f ft",
-                    clue.lat,
-                    clue.lng,
+                    "Clue location (%s): %s, alt %.0f ft",
+                    coordinateDisplayFormat.label,
+                    CoordinateFormatter.format(clue.lat, clue.lng, coordinateDisplayFormat)
+                        .removePrefix("loc:"),
                     clue.alt * 3.28084
                 ),
                 style = MaterialTheme.typography.bodySmall
@@ -205,9 +211,10 @@ fun ClueSheetContent (
             Text(
                 text = String.format(
                     Locale.US,
-                    "Drone location: %.5f, %.5f, alt %.0f ft",
-                    clue.droneLat,
-                    clue.droneLng,
+                    "Drone location (%s): %s, alt %.0f ft",
+                    coordinateDisplayFormat.label,
+                    CoordinateFormatter.format(clue.droneLat, clue.droneLng, coordinateDisplayFormat)
+                        .removePrefix("loc:"),
                     clue.droneAlt * 3.28084
                 ),
                 style = MaterialTheme.typography.bodySmall

@@ -7,6 +7,10 @@ final class RIDTrackViewModel: ObservableObject {
     @Published private(set) var tracks: [RidAircraftTrack] = []
     @Published private(set) var acceptedObservationCount = 0
     @Published private(set) var filteredObservationCount = 0
+    @Published private(set) var duplicatePositionFilterCount = 0
+    @Published private(set) var minimumDistanceFilterCount = 0
+    @Published private(set) var implausibleSpeedFilterCount = 0
+    @Published private(set) var horizontalAccuracyFilterCount = 0
     @Published private(set) var invalidObservationCount = 0
     @Published private(set) var archivedTrackCount = 0
     @Published private(set) var archiveStatus = "No archived tracks"
@@ -15,6 +19,7 @@ final class RIDTrackViewModel: ObservableObject {
     @Published private(set) var caltopoStatus = "Publishing disabled"
     @Published private(set) var caltopoRTTMilliseconds: Int64?
     @Published private(set) var altitudeDisplayByAircraftID: [String: OperationalAircraftAltitudeDisplay] = [:]
+    @Published private(set) var lastValidRIDUpdateAt: Date?
 
     private let store = RidTrackStore()
     private let archiveStore = AppleTrackArchiveStore()
@@ -26,12 +31,14 @@ final class RIDTrackViewModel: ObservableObject {
     private var terrainResolvedKeyByAircraftID: [String: String] = [:]
     private var lastHorizontalAccuracyCodeByAircraftID: [String: UInt8] = [:]
     private var observationTasks: [String: Task<Void, Never>] = [:]
+    private var aircraftMessageTasks: [String: Task<Void, Never>] = [:]
     private var agingTask: Task<Void, Never>?
     private var demoTask: Task<Void, Never>?
     private var caltopoEventTask: Task<Void, Never>?
     private var coordinationEventTask: Task<Void, Never>?
     private var peerCoordinator: AppleTrackerCoordinator?
     private var identityProvider: ((String) -> RidAircraftIdentity?)?
+    private var publicationSuppressionProvider: ((String) -> Bool)?
     private var peerConfirmationConsumer: ((TrackerCoordinationIdentity) -> Void)?
     private var peerConfirmationClearer: ((String) -> Void)?
     private var pendingPublication: [String: [RidAircraftTrack]] = [:]
@@ -97,41 +104,69 @@ final class RIDTrackViewModel: ObservableObject {
         }
     }
 
+    func bindAircraftMessages(
+        to messages: AsyncStream<RidAircraftMessage>,
+        sourceID: String
+    ) {
+        guard aircraftMessageTasks[sourceID] == nil else { return }
+        aircraftMessageTasks[sourceID] = Task { [weak self] in
+            for await message in messages {
+                guard !Task.isCancelled, let self else { return }
+                if await self.store.noteAircraftMessage(message) {
+                    self.tracks = await self.store.snapshot()
+                }
+            }
+        }
+    }
+
     func ingest(_ observation: RidObservation) async {
         switch await store.ingest(observation) {
         case let .accepted(track):
             acceptedObservationCount += 1
+            lastValidRIDUpdateAt = max(lastValidRIDUpdateAt ?? observation.receivedAt, observation.receivedAt)
             if let code = observation.horizontalAccuracyCode {
                 lastHorizontalAccuracyCodeByAircraftID[track.aircraftID] = code
             }
             logAcceptedObservation(track)
             updateAltitude(for: track)
-            peerCoordinator?.observe(track: track, identity: identityProvider?(track.aircraftID))
-            if peerCoordinator?.publicationAllowed(remoteID: track.aircraftID) != false {
-                flushPendingPublication(remoteID: track.aircraftID)
-                publish(track)
+            if publicationSuppressionProvider?(track.aircraftID) == true {
+                pendingPublication.removeValue(forKey: track.aircraftID)
             } else {
-                var queued = pendingPublication[track.aircraftID, default: []]
-                queued.append(track)
-                if queued.count > 500 { queued.removeFirst(queued.count - 500) }
-                pendingPublication[track.aircraftID] = queued
+                peerCoordinator?.observe(track: track, identity: identityProvider?(track.aircraftID))
+                if peerCoordinator?.publicationAllowed(remoteID: track.aircraftID) != false {
+                    flushPendingPublication(remoteID: track.aircraftID)
+                    publish(track)
+                } else {
+                    var queued = pendingPublication[track.aircraftID, default: []]
+                    queued.append(track)
+                    if queued.count > 500 { queued.removeFirst(queued.count - 500) }
+                    pendingPublication[track.aircraftID] = queued
+                }
             }
         case let .signalOnly(track, reason):
             filteredObservationCount += 1
-            if case let .implausibleSpeed(metersPerSecond) = reason {
+            switch reason {
+            case .duplicatePosition:
+                duplicatePositionFilterCount += 1
+            case .belowMinimumDistance:
+                minimumDistanceFilterCount += 1
+            case let .implausibleSpeed(metersPerSecond):
+                implausibleSpeedFilterCount += 1
                 AppleLog.warning(
                     "RemoteID",
                     String(
-                        format: "rid_filter remoteId=%@ reason=implausible_speed speedMps=%.1f transport=%@ rssi=%@",
+                        format: "rid_filter remoteId=%@ reason=implausible_speed speedMph=%.1f transport=%@ rssi=%@",
                         track.aircraftID,
-                        metersPerSecond,
+                        metersPerSecond * 2.236936,
                         observation.source.rawValue,
                         observation.signalStrengthDbm.map(String.init) ?? "unknown"
                     )
                 )
             }
+            logFilterSummaryIfNeeded()
         case let .rejectedHorizontalAccuracy(code, track):
             filteredObservationCount += 1
+            horizontalAccuracyFilterCount += 1
             let remoteID = track?.aircraftID ?? RidTrackStore.canonicalAircraftID(observation.aircraftId)
             if lastHorizontalAccuracyCodeByAircraftID[remoteID] != code {
                 AppleLog.warning(
@@ -140,6 +175,7 @@ final class RIDTrackViewModel: ObservableObject {
                 )
             }
             lastHorizontalAccuracyCodeByAircraftID[remoteID] = code
+            logFilterSummaryIfNeeded()
         case .rejectedInvalidObservation:
             filteredObservationCount += 1
             invalidObservationCount += 1
@@ -147,8 +183,19 @@ final class RIDTrackViewModel: ObservableObject {
                 "RemoteID",
                 "rid_reject remoteId=\(observation.aircraftId) reason=invalid_observation transport=\(observation.source.rawValue)"
             )
+            logFilterSummaryIfNeeded()
         }
         tracks = await store.snapshot()
+    }
+
+    private func logFilterSummaryIfNeeded() {
+        guard filteredObservationCount.isMultiple(of: 25) else { return }
+        AppleLog.info(
+            "RemoteID",
+            "rid_filter_summary total=\(filteredObservationCount) duplicate=\(duplicatePositionFilterCount) " +
+                "underMinimumDistance=\(minimumDistanceFilterCount) implausibleSpeed=\(implausibleSpeedFilterCount) " +
+                "horizontalAccuracy=\(horizontalAccuracyFilterCount) invalid=\(invalidObservationCount)"
+        )
     }
 
     func configureTrackPolicy(minimumDistanceFeet: Int, activeTimeoutSeconds: Int) {
@@ -164,6 +211,22 @@ final class RIDTrackViewModel: ObservableObject {
         _ provider: @escaping (String, Date, Date) -> [AppleTrackArchiveClue]
     ) {
         clueArchiveProvider = provider
+    }
+
+    func configurePublicationSuppression(_ provider: @escaping (String) -> Bool) {
+        publicationSuppressionProvider = provider
+    }
+
+    func suppressCaltopoPublication(remoteID: String) {
+        guard !remoteID.isEmpty else { return }
+        pendingPublication.removeValue(forKey: remoteID)
+        ownershipActivationTasks.removeValue(forKey: remoteID)?.cancel()
+        let publication = publicationChains.removeValue(forKey: remoteID)
+        publication?.cancel()
+        Task { [caltopoPublisher] in
+            _ = await publication?.value
+            await caltopoPublisher.discard(remoteID: remoteID)
+        }
     }
 
     func manualCalibrateAltitude(remoteID: String) {
@@ -246,7 +309,7 @@ final class RIDTrackViewModel: ObservableObject {
         AppleLog.info(
             "RemoteID",
             String(
-                format: "rid_rx remoteId=%@ waypoint=%d wall=%lld lat=%.6f lng=%.6f altM=%@ transport=%@ rssi=%@ distanceM=%.1f",
+                format: "rid_rx remoteId=%@ waypoint=%d wall=%lld lat=%.6f lng=%.6f altM=%@ transport=%@ rssi=%@ distanceFt=%.1f totalDistanceFt=%.1f",
                 track.aircraftID,
                 track.points.count,
                 receivedMilliseconds,
@@ -255,9 +318,19 @@ final class RIDTrackViewModel: ObservableObject {
                 altitude,
                 observation.source.rawValue,
                 rssi,
-                track.distanceMeters
+                track.points.count > 1 ? Self.distanceFeet(from: track.points[track.points.count - 2], to: track.points[track.points.count - 1]) : 0,
+                track.distanceMeters * 3.28084
             )
         )
+    }
+
+    private static func distanceFeet(from: RidTrackPoint, to: RidTrackPoint) -> Double {
+        (RidGeometry.relativePosition(
+            fromLatitude: from.latitude,
+            longitude: from.longitude,
+            toLatitude: to.latitude,
+            longitude: to.longitude
+        )?.distanceMeters ?? 0) * 3.28084
     }
 
     func configureCaltopo(
@@ -349,7 +422,8 @@ final class RIDTrackViewModel: ObservableObject {
                 switch event {
                 case let .ownershipChanged(remoteID, _, localOwner, alertEligible):
                     self.ownershipActivationTasks.removeValue(forKey: remoteID)?.cancel()
-                    if localOwner, alertEligible {
+                    if localOwner, alertEligible,
+                       self.publicationSuppressionProvider?(remoteID) != true {
                         self.ownershipActivationTasks[remoteID] = Task { [weak self, coordinator] in
                             try? await Task.sleep(for: .seconds(2))
                             guard !Task.isCancelled, let self,
@@ -472,6 +546,30 @@ final class RIDTrackViewModel: ObservableObject {
         }
     }
 
+    func shutdown() async {
+        demoTask?.cancel()
+        demoTask = nil
+        agingTask?.cancel()
+        agingTask = nil
+        observationTasks.values.forEach { $0.cancel() }
+        observationTasks.removeAll()
+        aircraftMessageTasks.values.forEach { $0.cancel() }
+        aircraftMessageTasks.removeAll()
+        caltopoEventTask?.cancel()
+        caltopoEventTask = nil
+        coordinationEventTask?.cancel()
+        coordinationEventTask = nil
+        terrainTasks.values.forEach { $0.cancel() }
+        terrainTasks.removeAll()
+        ownershipActivationTasks.values.forEach { $0.cancel() }
+        ownershipActivationTasks.removeAll()
+
+        for track in await store.snapshot() {
+            await archive(track)
+            await finishPublication(remoteID: track.aircraftID)
+        }
+    }
+
     func resubmitRecentTracks(days: Int) async -> String {
         trackerArchiveStatus = "Resubmitting recent tracks…"
         let summary = await archiveStore.resubmitRecent(days: days)
@@ -575,11 +673,16 @@ final class RIDTrackViewModel: ObservableObject {
     }
 
     private func flushPendingPublication(remoteID: String) {
+        guard publicationSuppressionProvider?(remoteID) != true else {
+            pendingPublication.removeValue(forKey: remoteID)
+            return
+        }
         let queued = pendingPublication.removeValue(forKey: remoteID) ?? []
         for track in queued { publish(track) }
     }
 
     private func publishRelay(_ relay: TrackerRelaySighting) {
+        guard publicationSuppressionProvider?(relay.remoteID) != true else { return }
         guard peerCoordinator?.publicationAllowed(remoteID: relay.remoteID) == true else { return }
         let observation = RidObservation(
             source: .trackerRelay,

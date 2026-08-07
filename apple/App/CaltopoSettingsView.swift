@@ -22,18 +22,14 @@ struct CaltopoSettingsView: View {
     @AppStorage("video.captureStreams") private var captureStreams = false
     @AppStorage(AppleDeviceIdentity.storedNameKey) private var deviceName = AppleDeviceIdentity.displayName
     @State private var showingTeamMaps = false
+    @State private var showingImportConfig = false
+    @State private var importConfigNotice: ConfigImportNotice?
 
     var body: some View {
         Form {
             Section("Administration") {
-                NavigationLink {
-                    ConfigImportView(
-                        initialToken: "",
-                        importer: importer,
-                        caltopoSettings: settings,
-                        orgSettings: orgSettings,
-                        identityStore: identityStore
-                    )
+                Button {
+                    showingImportConfig = true
                 } label: {
                     Label("Import Config", systemImage: "qrcode.viewfinder")
                 }
@@ -234,7 +230,7 @@ struct CaltopoSettingsView: View {
                     ),
                     in: 0 ... 1_440
                 )
-                Text("Track filtering, loss timing, bridge distance, and proximity spacing use the same operator-adjustable controls as Android. The idle value is retained for configuration parity; iOS does not permit an app to terminate itself, so the system remains responsible for suspending an idle app.")
+                Text("Track filtering, loss timing, bridge distance, proximity spacing, and maximum app idle time use the same operator-adjustable controls as Android. Set Max App Idle Time to 0 to disable automatic closing.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading) {
@@ -291,8 +287,9 @@ struct CaltopoSettingsView: View {
                 Toggle("Refresh protected lands automatically", isOn: $landRestrictions.autoRefresh)
                     .disabled(!landRestrictions.enabled)
                 Stepper(
-                    "Boundary query radius: \(landRestrictions.radiusNM) NM",
-                    value: $landRestrictions.radiusNM,
+                    "Boundary query radius: \(landRestrictions.radiusStatuteMiles) statute " +
+                        (landRestrictions.radiusStatuteMiles == 1 ? "mile" : "miles"),
+                    value: $landRestrictions.radiusStatuteMiles,
                     in: 1 ... 50
                 )
                 .disabled(!landRestrictions.enabled)
@@ -348,6 +345,28 @@ struct CaltopoSettingsView: View {
                 onSave(settings.selectMap(map))
                 showingTeamMaps = false
             }
+        }
+        .sheet(isPresented: $showingImportConfig) {
+            NavigationStack {
+                ConfigImportView(
+                    initialToken: "",
+                    importer: importer,
+                    caltopoSettings: settings,
+                    orgSettings: orgSettings,
+                    identityStore: identityStore
+                ) { notice in
+                    importConfigNotice = notice
+                }
+            }
+            .presentationDetents([.height(440), .large])
+            .presentationDragIndicator(.visible)
+        }
+        .alert(item: $importConfigNotice) { notice in
+            Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("OK"))
+            )
         }
     }
 }
@@ -487,6 +506,12 @@ private final class AppleDeveloperToolsManager: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         do {
+            guard organization.trackerAPIKey.hasPrefix("r2c_dev_"),
+                  AppleTrackerEnrollmentClient.enrollmentOrganization(
+                      organization.trackerEnrollmentURL
+                  )?.caseInsensitiveCompare(organization.organizationName) == .orderedSame else {
+                throw AppleTrackerEnrollmentClient.EnrollmentError.invalidURL
+            }
             let ridMap: [String: Any] = [
                 "type": "ct_ridmap",
                 "file_version": "1.0",
@@ -512,9 +537,7 @@ private final class AppleDeveloperToolsManager: ObservableObject {
                 "track_folder": organization.trackFolder,
                 "incident": organization.incident,
                 "op_period": organization.operationalPeriod,
-                "tracker_api_key": organization.trackerAPIKey,
-                "tracker_url_pfx": organization.trackerURLPrefix,
-                "tracker_url_prefix": organization.trackerURLPrefix,
+                "tracker_enrollment_url": organization.trackerEnrollmentURL,
                 "use_peers": organization.usePeers,
                 "predictive_head_enabled": organization.predictiveHeadEnabled,
                 "proximity_alert_spacing_feet": organization.proximityAlertSpacingFeet,
@@ -528,34 +551,16 @@ private final class AppleDeveloperToolsManager: ObservableObject {
                 options: [.sortedKeys]
             )
             let credentialText = String(decoding: credentialData, as: UTF8.self)
-            var configs: [[String: Any]] = [
+            let configs: [[String: Any]] = [
                 ridMap,
                 [
                     "type": "ct_credentials_enc",
                     "enc": OrgConfigTokenCodec.encryptPayload(credentialText),
                 ],
             ]
-            if let faa = organization.faaConfiguration {
-                let faaObject: [String: Any] = [
-                    "type": "ct_faa_credentials",
-                    "source_label": faa.sourceLabel,
-                    "notam_api_base_url": faa.apiBaseURL,
-                    "notam_token_url": faa.tokenURL,
-                    "notam_client_id": faa.clientID,
-                    "notam_client_secret": faa.clientSecret,
-                    "notam_scope": faa.scope,
-                ]
-                let faaData = try JSONSerialization.data(withJSONObject: faaObject, options: [.sortedKeys])
-                configs.append([
-                    "type": "ct_faa_credentials_enc",
-                    "enc": OrgConfigTokenCodec.encryptPayload(
-                        String(decoding: faaData, as: UTF8.self)
-                    ),
-                ])
-            }
             let bundle: [String: Any] = [
                 "format": "rid2caltopo_org_config",
-                "version": 1,
+                "version": 2,
                 "org_name": organization.organizationName,
                 "generated": ISO8601DateFormatter().string(from: Date()),
                 "configs": configs,

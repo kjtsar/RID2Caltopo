@@ -76,6 +76,14 @@ data class LandRestrictionUiState(
     val sourceErrors: List<String> = emptyList()
 )
 
+internal fun disabledLandRestrictionUiState(): LandRestrictionUiState =
+    LandRestrictionUiState(
+        visible = true,
+        enabled = false,
+        chipLabel = "Land rules off",
+        statusLine = "Protected-land checks are disabled."
+    )
+
 object LandRestrictionPolicy {
     fun severity(
         areas: List<LandRestrictionArea>,

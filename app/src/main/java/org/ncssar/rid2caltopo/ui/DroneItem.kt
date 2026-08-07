@@ -55,7 +55,11 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec
  * @param rssi Signal strength in dBm; 0 means "not available".
  */
 @Composable
-fun SignalStrengthBars(rssi: Int, modifier: Modifier = Modifier) {
+fun SignalStrengthBars(
+    rssi: Int,
+    modifier: Modifier = Modifier,
+    colorByStrength: Boolean = false,
+) {
     val filledBars = when {
         rssi == 0       -> 0
         rssi >= -60     -> 4
@@ -64,8 +68,20 @@ fun SignalStrengthBars(rssi: Int, modifier: Modifier = Modifier) {
         rssi >= -90     -> 1
         else            -> 0
     }
-    val filledColor   = Color(0xFF4CAF50)   // Material green
-    val emptyColor    = Color(0x554CAF50)   // same green, faded
+    val filledColor = if (colorByStrength) {
+        when (filledBars) {
+            1 -> Color(0xFFF44336) // red
+            2 -> Color(0xFFFFC107) // amber/yellow
+            else -> Color(0xFF4CAF50) // green
+        }
+    } else {
+        Color(0xFF4CAF50)
+    }
+    val emptyColor = if (colorByStrength) {
+        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)
+    } else {
+        Color(0x554CAF50)
+    }
 
     // 4 bars, each slightly taller than the previous (staircase).
     // Heights: 25%, 45%, 65%, 85% of the available vertical space.
@@ -158,6 +174,17 @@ fun DroneItem(drone: CtDroneSpec,
                     fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = droneRssiStatisticsText(
+                        directRssiDbm = drone.lastRssi,
+                        droneToBridgeRssiDbm = drone.lastDroneToBridgeRssi,
+                    ),
+                    textAlign = TextAlign.Center,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             // BT4 count
@@ -315,4 +342,12 @@ fun DroneItem(drone: CtDroneSpec,
             ) {}
         }
     }
+}
+
+internal fun droneRssiStatisticsText(
+    directRssiDbm: Int,
+    droneToBridgeRssiDbm: Int,
+): String {
+    fun value(rssiDbm: Int) = if (rssiDbm == 0) "—" else "$rssiDbm"
+    return "D→Device ${value(directRssiDbm)} • D→Bridge ${value(droneToBridgeRssiDbm)} dBm"
 }

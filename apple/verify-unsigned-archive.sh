@@ -40,7 +40,7 @@ echo "$families" | grep -q "1"
 echo "$families" | grep -q "2"
 
 schemes=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes' "$info")
-echo "$schemes" | grep -q "r2c1"
+echo "$schemes" | grep -q "r2c2"
 echo "$schemes" | grep -q "r2cfaa1"
 echo "$schemes" | grep -q "r2cma1"
 

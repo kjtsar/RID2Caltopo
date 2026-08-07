@@ -124,6 +124,27 @@ class NotamPolicyTest {
     }
 
     @Test
+    fun pendingProxyPlaceholderIsNotCountedAsNearbyNotam() {
+        val placeholder = NearbyNotam(
+            id = "pending_credentials",
+            title = "FAA NOTAM proxy pending",
+            summary = "Waiting for configuration",
+            distanceNm = null,
+            severity = NotamChipSeverity.Neutral
+        )
+
+        assertEquals(
+            "NOTAMs pending",
+            NotamPolicy.chipLabel(
+                notices = listOf(placeholder),
+                configured = false,
+                loading = false,
+                hasError = false
+            )
+        )
+    }
+
+    @Test
     fun hiddenAirspaceDoesNotOverrideDisabledNotamStatus() {
         assertFalse(
             shouldUseAirspaceStatus(

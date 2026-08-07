@@ -682,45 +682,44 @@ struct AppleMapCacheManagementView: View {
     let onReloadMap: () -> Void
     let onExportMutualAid: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var badHashExport: URL?
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Display") {
-                    Toggle("Follow Focused Drone", isOn: $followFocusedDrone)
-                    Toggle("Offline Tiles Only", isOn: $offlineOnly)
+                // Keep these controls in the same order as Android's Map Management menu.
+                Section("Map Management") {
+                    Toggle(
+                        followFocusedDrone ? "Follow Focused Drone: On" : "Follow Focused Drone: Off",
+                        isOn: $followFocusedDrone
+                    )
                     Button("Reload Map") { onReloadMap() }
                         .disabled(!canReloadMap)
-                }
-                Section("Cache") {
-                    LabeledContent("Cached files", value: manager.cacheStats.files.formatted())
-                    LabeledContent("Cache size", value: AppleMapOfflineManager.formatBytes(manager.cacheStats.bytes))
-                    Stepper("Maximum size: \(manager.maximumCacheGB, specifier: "%.1f") GB", value: $manager.maximumCacheGB, in: 0.1 ... 64, step: 0.1)
-                    Stepper("Maximum tile age: \(manager.maximumTileAgeDays) days", value: $manager.maximumTileAgeDays, in: 1 ... 3_650)
-                    Button("Run Cache Maintenance") { manager.runMaintenance() }
-                }
-                Section("Bad Tiles") {
-                    Toggle("Auto Remove Bad Tiles", isOn: $manager.autoRemoveBadTiles)
-                    LabeledContent("Quarantined hashes", value: manager.badTileCount.formatted())
-                    Button("Clear Bad Tile Flags") { manager.clearBadTileFlags() }
-                    if let export = badHashExport {
-                        ShareLink(item: export) { Label("Export Bad Tile Hashes", systemImage: "square.and.arrow.up") }
-                    } else {
-                        Button("Prepare Bad Tile Hash Export") { badHashExport = manager.exportBadTileHashes() }
+                    NavigationLink("Bad Tiles…") {
+                        AppleBadTileManagementView(manager: manager)
                     }
-                    Text("Cached error pages and invalid image responses are rejected and their hashes are quarantined.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    Text("To remove a specific cached bad tile, long-press it on the MapPane and confirm whether matching hashes should also be quarantined.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                Section {
+                    Stepper(
+                        "Max Cache Size: \(manager.maximumCacheGB, specifier: "%.1f") GB",
+                        value: $manager.maximumCacheGB,
+                        in: 0.1 ... 64,
+                        step: 0.1
+                    )
+                    Stepper(
+                        "Maximum Tile Age: \(manager.maximumTileAgeDays) days",
+                        value: $manager.maximumTileAgeDays,
+                        in: 1 ... 3_650
+                    )
                     Button("Export MA Package…", systemImage: "shippingbox") {
                         dismiss()
                         onExportMutualAid()
                     }
                 }
-                Section { Text(manager.status).font(.footnote).foregroundStyle(.secondary) }
+                Section("Additional Cache Controls") {
+                    Toggle("Offline Tiles Only", isOn: $offlineOnly)
+                    LabeledContent("Cached files", value: manager.cacheStats.files.formatted())
+                    LabeledContent("Cache size", value: AppleMapOfflineManager.formatBytes(manager.cacheStats.bytes))
+                    Button("Run Cache Maintenance") { manager.runMaintenance() }
+                    Text(manager.status).font(.footnote).foregroundStyle(.secondary)
+                }
             }
             .navigationTitle("Map Management")
             .toolbar {
@@ -730,5 +729,55 @@ struct AppleMapCacheManagementView: View {
             }
             .onAppear { manager.refreshStats() }
         }
+    }
+}
+
+private struct AppleBadTileManagementView: View {
+    @ObservedObject var manager: AppleMapOfflineManager
+    @State private var badHashExport: URL?
+
+    var body: some View {
+        Form {
+            // Keep these controls in the same order as Android's Bad Tiles menu.
+            Section("Bad Tiles") {
+                NavigationLink("How To") {
+                    AppleBadTileHowToView()
+                }
+                Toggle(
+                    manager.autoRemoveBadTiles ? "Auto Remove Bad Tiles: On" : "Auto Remove Bad Tiles: Off",
+                    isOn: $manager.autoRemoveBadTiles
+                )
+                Button("Clear Bad Tile Flags (\(manager.badTileCount))") {
+                    manager.clearBadTileFlags()
+                }
+                if let export = badHashExport {
+                    ShareLink(item: export) {
+                        Label("Export Bad Tile Hashes", systemImage: "square.and.arrow.up")
+                    }
+                } else {
+                    Button("Export Bad Tile Hashes") {
+                        badHashExport = manager.exportBadTileHashes()
+                    }
+                }
+            }
+        }
+        .navigationTitle("Bad Tiles")
+    }
+}
+
+private struct AppleBadTileHowToView: View {
+    var body: some View {
+        Form {
+            Section {
+                Text("Use this when map tiles show a cached error page such as OpenStreetMap's ‘Access blocked’ tile.")
+                Text("1. Turn on Auto Remove Bad Tiles if you want quarantined tiles removed automatically when encountered.")
+                Text("2. Long-press a bad tile on the map.")
+                Text("3. In the Remove Bad Tile dialog, leave ‘Also quarantine same-hash tiles’ checked and press Remove.")
+                Text("4. The selected tile is removed from cache, and matching bad tiles can be suppressed across the map.")
+                Text("Clear Bad Tile Flags removes the quarantine list only. It does not remove tiles already cached.")
+                Text("Export Bad Tile Hashes saves the quarantined hashes for troubleshooting or sharing.")
+            }
+        }
+        .navigationTitle("Bad Tiles How To")
     }
 }

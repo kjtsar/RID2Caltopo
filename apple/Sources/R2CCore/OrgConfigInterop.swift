@@ -34,6 +34,7 @@ public struct OrgConfigCredentials: Sendable, Equatable {
     public let operationalPeriod: String
     public let trackerAPIKey: String
     public let trackerURLPrefix: String
+    public let trackerFAAProxyURL: String
     public let usePeers: Bool?
     public let predictiveHeadEnabled: Bool
     public let proximityAlertSpacingFeet: Int
@@ -44,6 +45,7 @@ public struct OrgConfigBundle: Sendable, Equatable {
     public let version: Int
     public let mappings: [OrgConfigRIDMapping]
     public let credentials: OrgConfigCredentials?
+    public let trackerEnrollmentURL: String
     public let faaConfig: FaaSharedConfig?
     public let mutualAidTemplate: MutualAidTemplateCredentials?
     public let ignoredConfigTypes: [String]
@@ -129,7 +131,7 @@ public struct MutualAidSharedProfile: Sendable, Equatable {
 
 public enum AndroidConfigTokenCodec {
     private static let definitions: [(kind: AndroidConfigTokenKind, prefix: String, scheme: String)] = [
-        (.organization, "R2C1:", "r2c1"),
+        (.organization, "R2C2:", "r2c2"),
         (.faa, "R2CFAA1:", "r2cfaa1"),
         (.mutualAid, "R2CMA1:", "r2cma1"),
     ]
@@ -277,8 +279,8 @@ public enum AndroidConfigTokenCodec {
 }
 
 public enum OrgConfigTokenCodec {
-    public static let magicPrefix = "R2C1:"
-    public static let qrScheme = "r2c1"
+    public static let magicPrefix = "R2C2:"
+    public static let qrScheme = "r2c2"
     private static let xorKey = Array("RID2CaltopoQR".utf8)
     private static let standardAlphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
     private static let customAlphabet = Array("r2cNOPQRSTUVWXYZABCDEFGHIJKLMnopqstuvwxyzabdefghijklm013456789+/=")
@@ -347,11 +349,12 @@ public enum OrgConfigTokenCodec {
               !configObjects.isEmpty
         else { throw OrgConfigInteropError.invalidBundle }
         let version = number(root["version"])?.intValue ?? 1
-        guard version == 1 else { throw OrgConfigInteropError.unsupportedBundleVersion(version) }
+        guard version == 2 else { throw OrgConfigInteropError.unsupportedBundleVersion(version) }
 
         var mappings: [OrgConfigRIDMapping] = []
         var credentials: OrgConfigCredentials?
-        var faaConfig: FaaSharedConfig?
+        var trackerEnrollmentURL = ""
+        let faaConfig: FaaSharedConfig? = nil
         var mutualAidTemplate: MutualAidTemplateCredentials?
         var ignored: [String] = []
 
@@ -384,6 +387,18 @@ public enum OrgConfigTokenCodec {
                     )
                 })
             case "ct_credentials":
+                let forbiddenTrackerValues = [
+                    string(config["tracker_api_key"]),
+                    string(config["tracker_url_pfx"]),
+                    string(config["tracker_url_prefix"]),
+                    string(config["tracker_faa_proxy_url"]),
+                    string(config["notam_client_id"]),
+                    string(config["notam_client_secret"]),
+                ]
+                guard forbiddenTrackerValues.allSatisfy(\.isEmpty) else {
+                    throw OrgConfigInteropError.invalidBundle
+                }
+                trackerEnrollmentURL = string(config["tracker_enrollment_url"])
                 credentials = OrgConfigCredentials(
                     organizationName: string(config["org_name"]).isEmpty
                         ? string(root["org_name"])
@@ -399,36 +414,13 @@ public enum OrgConfigTokenCodec {
                     trackerURLPrefix: string(config["tracker_url_pfx"]).isEmpty
                         ? string(config["tracker_url_prefix"])
                         : string(config["tracker_url_pfx"]),
+                    trackerFAAProxyURL: string(config["tracker_faa_proxy_url"]),
                     usePeers: number(config["use_peers"]).map { $0.boolValue },
                     predictiveHeadEnabled: number(config["predictive_head_enabled"])?.boolValue ?? true,
                     proximityAlertSpacingFeet: number(config["proximity_alert_spacing_feet"])?.intValue ?? 40
                 )
-            case "ct_faa_remote_config":
-                if let payload = config["faa_payload_enc"] as? String,
-                   let payloadData = payload.data(using: .utf8) {
-                    faaConfig = try AndroidConfigTokenCodec.parseFaaBundle(payloadData)
-                } else {
-                    ignored.append(type)
-                }
-            case "ct_faa_credentials_enc":
-                let encodedConfig = try JSONSerialization.data(withJSONObject: config)
-                faaConfig = try AndroidConfigTokenCodec.parseFaaBundle(encodedConfig)
-            case "ct_faa_credentials":
-                let clientID = string(config["notam_client_id"])
-                let clientSecret = string(config["notam_client_secret"])
-                guard !clientID.isEmpty, !clientSecret.isEmpty else {
-                    throw OrgConfigInteropError.invalidBundle
-                }
-                faaConfig = FaaSharedConfig(
-                    sourceLabel: string(config["source_label"]).isEmpty
-                        ? string(config["label"])
-                        : string(config["source_label"]),
-                    apiBaseURL: string(config["notam_api_base_url"]),
-                    tokenURL: string(config["notam_token_url"]),
-                    clientID: clientID,
-                    clientSecret: clientSecret,
-                    scope: string(config["notam_scope"])
-                )
+            case let value where value.hasPrefix("ct_faa_"):
+                throw OrgConfigInteropError.invalidBundle
             case "ct_mutual_aid_credentials":
                 mutualAidTemplate = MutualAidTemplateCredentials(
                     teamID: string(config["team_id"]),
@@ -452,6 +444,7 @@ public enum OrgConfigTokenCodec {
             version: version,
             mappings: mappings,
             credentials: credentials,
+            trackerEnrollmentURL: trackerEnrollmentURL,
             faaConfig: faaConfig,
             mutualAidTemplate: mutualAidTemplate,
             ignoredConfigTypes: ignored

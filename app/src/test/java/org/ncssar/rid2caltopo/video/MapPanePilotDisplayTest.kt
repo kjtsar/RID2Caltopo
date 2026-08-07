@@ -112,6 +112,56 @@ class MapPanePilotDisplayTest {
     }
 
     @Test
+    fun travelBearing_requiresClearDisplacementAndSurvivesStationaryKeepalives() {
+        val origin = LocalTrackPoint("TEST", 39.0, -121.0, 100.0, 1_000L, 1_000L)
+        val jitter = LocalTrackPoint("TEST", 39.00001, -121.0, 100.0, 2_000L, 2_000L)
+        assertNull(travelBearingDegrees(listOf(origin, jitter)))
+
+        val north = LocalTrackPoint("TEST", 39.00012, -121.0, 100.0, 5_000L, 5_000L)
+        val movingBearing = travelBearingDegrees(listOf(origin, jitter, north))
+        assertEquals(0.0, movingBearing!!, 0.1)
+
+        val stationaryKeepalive = north.copy(timestampMsec = 8_000L, receivedAtMsec = 8_000L)
+        val stoppedBearing = travelBearingDegrees(listOf(origin, jitter, north, stationaryKeepalive))
+        assertEquals(0.0, stoppedBearing!!, 0.1)
+    }
+
+    @Test
+    fun travelBearing_followsLatestVisibleMovementImmediately() {
+        val points = listOf(
+            trackPoint(0, 39.00000, -121.00000),
+            trackPoint(2, 39.00005, -121.00000),
+            trackPoint(4, 39.00010, -121.00000),
+            trackPoint(6, 39.00015, -121.00000),
+            trackPoint(7, 39.00015, -120.99982)
+        )
+
+        val bearing = travelBearingDegrees(points)!!
+        assertEquals(90.0, bearing, 0.2)
+    }
+
+    @Test
+    fun travelBearing_worksWithTwoSparsePointsAndTurnsWithoutHistoryLag() {
+        val firstMovement = listOf(
+            trackPoint(0, 39.00000, -121.00000),
+            trackPoint(30, 39.00000, -120.99997)
+        )
+        assertEquals(90.0, travelBearingDegrees(firstMovement)!!, 0.2)
+
+        val northTurn = firstMovement + trackPoint(60, 39.00003, -120.99997)
+        assertEquals(0.0, travelBearingDegrees(northTurn)!!, 0.2)
+    }
+
+    private fun trackPoint(seconds: Long, lat: Double, lng: Double) = LocalTrackPoint(
+        mappedId = "TEST",
+        lat = lat,
+        lng = lng,
+        altitudeM = 100.0,
+        timestampMsec = seconds * 1_000,
+        receivedAtMsec = seconds * 1_000
+    )
+
+    @Test
     fun pilotDisplayPreferencesByMappedId_fansOutToCurrentAndAliasedTracks() {
         val alphaPreference = PilotDisplayPreference(
             activeTrackColor = "#43A047",

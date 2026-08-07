@@ -35,7 +35,8 @@ class SpokenWarningCenterTest {
                 SpokenWarningKind.DroneTelemetry,
                 SpokenWarningKind.Altitude,
                 SpokenWarningKind.Proximity,
-                SpokenWarningKind.ControllerSignalStrength
+                SpokenWarningKind.ControllerSignalStrength,
+                SpokenWarningKind.BridgeNotDetected
             ),
             sourceKey = "audio-alarm-test",
             nowMs = 1_000L,
@@ -45,7 +46,13 @@ class SpokenWarningCenterTest {
         val request = SpokenWarningCenter.requests.value
         assertEquals("Drone Telemetry", request?.phrase)
         assertEquals(
-            listOf("Drone Telemetry", "Altitude", "Proximity", "Controller Signal Strength"),
+            listOf(
+                "Drone Telemetry",
+                "Altitude",
+                "Proximity",
+                "Controller Signal Strength",
+                "Bridge Not Detected",
+            ),
             request?.phrases
         )
     }

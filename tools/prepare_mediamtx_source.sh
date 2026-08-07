@@ -15,10 +15,14 @@ media_patch="$patch_dir/0001-rid2caltopo-mediamtx-v1.16.2.patch"
 anet_patch="$patch_dir/0002-anet-v0.0.5-android.patch"
 gortmplib_patch="$patch_dir/0003-gortmplib-v0.3.0-rid2caltopo.patch"
 media_tools_patch="$patch_dir/0004-rid2caltopo-mediamtx-tests-tools.patch"
+session_name_patch="$patch_dir/0005-rid2caltopo-nonempty-rtsp-session-name.patch"
+regression_fixes_patch="$patch_dir/0006-rid2caltopo-regression-fixes.patch"
 media_patch_sha="$(shasum -a 256 "$media_patch" | awk '{print $1}')"
 anet_patch_sha="$(shasum -a 256 "$anet_patch" | awk '{print $1}')"
 gortmplib_patch_sha="$(shasum -a 256 "$gortmplib_patch" | awk '{print $1}')"
 media_tools_patch_sha="$(shasum -a 256 "$media_tools_patch" | awk '{print $1}')"
+session_name_patch_sha="$(shasum -a 256 "$session_name_patch" | awk '{print $1}')"
+regression_fixes_patch_sha="$(shasum -a 256 "$regression_fixes_patch" | awk '{print $1}')"
 
 if [[ -d "$destination" ]]; then
     [[ -f "$marker" ]] || {
@@ -30,6 +34,8 @@ if [[ -d "$destination" ]]; then
     grep -qx "anet_patch_sha256=$anet_patch_sha" "$marker"
     grep -qx "gortmplib_patch_sha256=$gortmplib_patch_sha" "$marker"
     grep -qx "media_tools_patch_sha256=$media_tools_patch_sha" "$marker"
+    grep -qx "session_name_patch_sha256=$session_name_patch_sha" "$marker"
+    grep -qx "regression_fixes_patch_sha256=$regression_fixes_patch_sha" "$marker"
     printf '%s\n' "$destination"
     exit 0
 fi
@@ -64,22 +70,27 @@ git clone --quiet --depth 1 --branch "$GORTMPLIB_TAG" \
     exit 1
 }
 
-mkdir -p "$media_source/third_party/anet" "$media_source/third_party/gortmplib"
+mkdir -p "$media_source/third_party/anet"
 git -C "$anet_source" archive HEAD | tar -x -C "$media_source/third_party/anet"
-git -C "$gortmplib_source" archive HEAD | tar -x -C "$media_source/third_party/gortmplib"
 
 git -C "$media_source" apply --check "$media_patch"
 git -C "$media_source" apply "$media_patch"
 git -C "$media_source" apply --check "$anet_patch"
 git -C "$media_source" apply "$anet_patch"
-git -C "$media_source" apply --check --directory=third_party/gortmplib "$gortmplib_patch"
-git -C "$media_source" apply --directory=third_party/gortmplib "$gortmplib_patch"
 git -C "$media_source" apply --check "$media_tools_patch"
 git -C "$media_source" apply "$media_tools_patch"
 (
     cd "$media_source"
-    go mod edit -replace=github.com/bluenviron/gortmplib=./third_party/gortmplib
+    GOCACHE="$repo_root/.build/go-cache" \
+    GOMODCACHE="$repo_root/.build/go-mod-cache" \
+    go mod vendor
 )
+git -C "$media_source" apply --check --directory=vendor/github.com/bluenviron/gortmplib "$gortmplib_patch"
+git -C "$media_source" apply --directory=vendor/github.com/bluenviron/gortmplib "$gortmplib_patch"
+git -C "$media_source" apply --check "$session_name_patch"
+git -C "$media_source" apply "$session_name_patch"
+git -C "$media_source" apply --check "$regression_fixes_patch"
+git -C "$media_source" apply "$regression_fixes_patch"
 
 cat >"$media_source/.rid2caltopo-patched-source" <<EOF
 mediamtx_commit=$MEDIAMTX_COMMIT
@@ -89,6 +100,8 @@ media_patch_sha256=$media_patch_sha
 anet_patch_sha256=$anet_patch_sha
 gortmplib_patch_sha256=$gortmplib_patch_sha
 media_tools_patch_sha256=$media_tools_patch_sha
+session_name_patch_sha256=$session_name_patch_sha
+regression_fixes_patch_sha256=$regression_fixes_patch_sha
 EOF
 
 mv "$media_source" "$destination"

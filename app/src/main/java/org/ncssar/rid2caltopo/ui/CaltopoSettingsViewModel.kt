@@ -400,14 +400,19 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     }
 
     private fun buildNotamStatus(): String {
-        val proxyConfigured = NotamAuthManager.isConfigured()
+        val credentialSource = NotamAuthManager.credentialSource()
         val enabled = CaltopoClient.GetNotamEnabled()
         val radius = CaltopoClient.GetNotamRadiusNm()
         val radiusUnit = if (radius == 1) "statute mile" else "statute miles"
         return when {
             !enabled -> "Disabled"
-            proxyConfigured -> "Enabled, FAA proxy configured, $radius $radiusUnit radius"
-            else -> "Enabled, FAA proxy not configured; import the r2c-tracker organization QR, $radius $radiusUnit radius"
+            credentialSource == NotamAuthManager.CredentialSource.MANAGED_DEVICE_ENROLLMENT ->
+                "Enabled, managed device enrollment present, $radius $radiusUnit radius"
+            credentialSource == NotamAuthManager.CredentialSource.ORGANIZATION_CONFIG_CREDENTIAL ->
+                "Enabled with an organization-config tracker credential; FAA proxy authorization " +
+                    "must succeed or the QR is stale or needs device enrollment, $radius $radiusUnit radius"
+            else ->
+                "Enabled, FAA proxy not enrolled; scan a Drone-team enrollment QR, $radius $radiusUnit radius"
         }
     }
 }

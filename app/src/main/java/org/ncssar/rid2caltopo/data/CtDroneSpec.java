@@ -90,8 +90,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final String TAG = "CtDroneSpec";
     static final String ICON_LATENCY_TAG = "RidIconLatency";
     static final float FT_TO_METERS = 0.3048f;
-    /** Maximum plausible drone speed in ft/sec (~200 mph). Waypoints implying greater speed are rejected. */
-    private static final float MAX_WAYPOINT_SPEED_FPS = 293.3f;
+    /**
+     * Telemetry sanity ceiling in ft/sec (200 mph). The operating limit is 100 mph,
+     * but the rejection threshold intentionally allows GPS error between consecutive
+     * waypoints so valid reports near that limit are not discarded.
+     */
+    private static final float MAX_WAYPOINT_SPEED_FPS = 293.3333f;
     private static final long MIN_SIGNAL_INTERVAL_LEARN_MS = 1000L;
     private static final String EMPTY_STRING = "";
     private static final String RID_FILTER_REGEX = "[^A-Z0-9]";
@@ -111,6 +115,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String model; /* This is the concise text description of the drone. */
     public volatile transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good waypoint was received */
     private volatile transient long mostRecentSignalMsecTimestamp; /* wall-clock time when the most recent received RID position packet was seen */
+    private volatile transient long mostRecentAircraftMessageMsecTimestamp; /* wall-clock time when any RID message for this aircraft was seen */
     private volatile transient long mostRecentMeshTelemetryMsecTimestamp; /* wall-clock time when the most recent peer-relayed position was seen */
     private volatile transient long learnedSignalIntervalMs; /* smoothed wall-clock interval between RID position packets */
     private volatile transient int learnedSignalIntervalSamples;
@@ -145,6 +150,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      * Updated by {@link #updateLastRssi} on every accepted packet from an RF transport.
      */
     private transient int[] lastRssiByTransport = new int[TransportTypeEnum.values().length];
+    private volatile transient int lastDroneToBridgeRssiDbm;
+    @Nullable private volatile transient String lastDroneScoutReceptionMode;
 
     private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
@@ -196,6 +203,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         localArchiveOnly = false;
         outOfRange = false;
         mostRecentSignalMsecTimestamp = 0;
+        mostRecentAircraftMessageMsecTimestamp = 0;
         mostRecentMeshTelemetryMsecTimestamp = 0;
         learnedSignalIntervalMs = 0;
         learnedSignalIntervalSamples = 0;
@@ -242,6 +250,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         lastAltSource             = null;
         int rssiLen = TransportTypeEnum.values().length;
         for (int i = 0; i < rssiLen; i++) lastRssiByTransport[i] = 0;
+        lastDroneToBridgeRssiDbm = 0;
+        lastDroneScoutReceptionMode = null;
         okToLog = true;
         localArchiveOnly = false;
         airborne = Boolean.FALSE;
@@ -249,6 +259,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         takeoffLat = 0.0F;
         takeoffLng = 0.0F;
         mostRecentSignalMsecTimestamp = 0;
+        mostRecentAircraftMessageMsecTimestamp = 0;
         mostRecentMeshTelemetryMsecTimestamp = 0;
         learnedSignalIntervalMs = 0;
         learnedSignalIntervalSamples = 0;
@@ -436,6 +447,19 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (null == lastRssiByTransport) return 0;
         return lastRssiByTransport[transport.ordinal()];
     }
+
+    /** Records the RSSI measured by DroneScout Bridge while receiving this aircraft. */
+    public void updateDroneToBridgeRssi(int rssiDbm, @Nullable String receptionMode) {
+        if (rssiDbm >= 0 || rssiDbm < -127) return;
+        lastDroneToBridgeRssiDbm = rssiDbm;
+        lastDroneScoutReceptionMode = receptionMode;
+    }
+
+    /** Returns the latest drone-to-bridge RSSI, or 0 if no relayed Self ID was received. */
+    public int getLastDroneToBridgeRssi() { return lastDroneToBridgeRssiDbm; }
+
+    @Nullable
+    public String getLastDroneScoutReceptionMode() { return lastDroneScoutReceptionMode; }
 
     /**
      * Returns the transport type that currently has the strongest (highest dBm) RSSI.
@@ -661,10 +685,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     }
 
     /** checkNewWaypoint()
-     * FIXME: Need to include check of change in distance over change in time to see if waypoint
-     *        updates are even close to sane.   Assume maximum DD/DT of 100mph or 45m/sec.  The
-     *        big question is what to do when we get an update that exceeds that parameter.  Do
-     *        we throw it out, smooth it to something realistic what?
+     * Reject coordinate jumps whose apparent point-to-point speed exceeds 200 mph. This is
+     * deliberately higher than the 100 mph operating limit to tolerate GPS inaccuracy; the
+     * filter is a telemetry sanity check, not an operational-limit validator.
      *
      * @param lat new lattitude
      * @param lng new longitude
@@ -858,6 +881,15 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             }
         }
         mostRecentSignalMsecTimestamp = nowWallMsec;
+        noteAircraftMessageReceived(nowWallMsec);
+    }
+
+    /** Record any RID message that can be associated with this active aircraft. Location
+     * freshness remains position-only, but flight lifecycle aging uses this broader timestamp. */
+    public void noteAircraftMessageReceived(long nowWallMsec) {
+        mostRecentAircraftMessageMsecTimestamp = Math.max(
+                mostRecentAircraftMessageMsecTimestamp,
+                nowWallMsec);
     }
 
     /** notePeerTelemetryReceived()
@@ -900,6 +932,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      */
     public long trackTelemetryIdleTimeInMsec(long currentTimeInMsec) {
         long referenceTimestamp = Math.max(mostRecentMsecTimestamp, mostRecentSignalMsecTimestamp);
+        referenceTimestamp = Math.max(referenceTimestamp, mostRecentAircraftMessageMsecTimestamp);
         referenceTimestamp = Math.max(referenceTimestamp, mostRecentMeshTelemetryMsecTimestamp);
         return currentTimeInMsec - referenceTimestamp;
     }

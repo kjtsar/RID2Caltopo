@@ -642,7 +642,28 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
         severity: .caution,
         detailedLabel: "Land rules: 17 nearby"
     ) == "Land rules nearby")
+    #expect(OperationalStatusChipText.land(
+        severity: .neutral,
+        detailedLabel: "Land rules off"
+    ) == "Land rules off")
     #expect(detailedAirspace.contains("Gowen Field"))
+}
+
+@Test func operationalContourToggleChangesTileLayerFingerprintWithoutViewportChange() {
+    let withoutContours = OperationalMapTileLayerState.fingerprint(
+        baseLayer: .openStreetMap,
+        contours: false,
+        offlineOnly: false,
+        revision: 7
+    )
+    let withContours = OperationalMapTileLayerState.fingerprint(
+        baseLayer: .openStreetMap,
+        contours: true,
+        offlineOnly: false,
+        revision: 7
+    )
+
+    #expect(withoutContours != withContours)
 }
 
 @Test func operationalFacilityMapPreservesAndroidClearAndFailureStates() throws {
@@ -722,6 +743,32 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(areas[0].agency.rulesURL.host == "www.nps.gov")
     #expect(OperationalLandRestriction.severity(areas, hasError: false) == .danger)
     #expect(OperationalLandRestriction.chipLabel(areas, loading: false, hasError: false) == "Land rules: RESTRICTED")
+}
+
+@Test func operationalLandRestrictionQueryRadiusUsesStatuteMiles() throws {
+    let source = OperationalLandSource(
+        id: "test-park",
+        queryEndpoint: URL(string: "https://example.gov/query")!,
+        agency: .nationalParkService,
+        rule: .launchLandOperateRestricted,
+        nameFields: ["UNIT_NAME"],
+        identifierFields: ["UNIT_CODE"]
+    )
+    let url = try #require(OperationalLandRestriction.queryURL(
+        source: source,
+        center: OperationalLandCoordinate(latitude: 0, longitude: 0),
+        radiusStatuteMiles: 1
+    ))
+    let geometry = try #require(
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first(where: { $0.name == "geometry" })?
+            .value
+    )
+    let bounds = geometry.split(separator: ",").compactMap { Double($0) }
+
+    #expect(bounds.count == 4)
+    #expect(abs(bounds[3] - (0.868976 / 60)) < 0.000_000_2)
 }
 
 @Test func operationalLandRestrictionKeepsStateParkAdvisoryDistinctFromNoFlyRule() throws {
@@ -861,6 +908,19 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(lost.alert)
     #expect(lost.hasExceededBridgeDistance)
     #expect(lost.idleThresholdSeconds == 10)
+
+    let locationStaleButAircraftStillHeard = OperationalSignalLossPolicy.evaluate(.init(
+        signalIdleSeconds: 12,
+        trackTelemetryIdleSeconds: 1,
+        learnedIntervalSeconds: nil,
+        learnedSamples: 0,
+        distanceFromDeviceFeet: 500,
+        distanceFromTakeoffFeet: 600,
+        bridgeCheckDistanceFeet: 300,
+        maximumTrackDelaySeconds: 30,
+        hasPreviouslyExceededBridgeDistance: true
+    ))
+    #expect(!locationStaleButAircraftStillHeard.alert)
 
     let returned = OperationalSignalLossPolicy.evaluate(.init(
         signalIdleSeconds: 12,
@@ -1318,6 +1378,124 @@ private func proximityDrone(
     ) == nil)
 }
 
+@Test func operationalTravelBearingRequiresClearDisplacementAndSurvivesStationaryKeepalives() async throws {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = RidTrackStore(policy: .init(minimumDistanceMeters: 0))
+    _ = await store.ingest(trackObservation(
+        id: "BEARING", at: start, latitude: 39.0, longitude: -121.0, headingDegrees: 270
+    ))
+    let jitter = await store.ingest(trackObservation(
+        id: "BEARING", at: start.addingTimeInterval(1),
+        latitude: 39.00001, longitude: -121.0, headingDegrees: 1
+    ))
+    guard case let .accepted(jitterTrack) = jitter else {
+        Issue.record("Expected jitter point to be retained for the geometry test")
+        return
+    }
+    #expect(OperationalMapGeometry.travelBearingDegrees(points: jitterTrack.points) == nil)
+
+    let north = await store.ingest(trackObservation(
+        id: "BEARING", at: start.addingTimeInterval(5),
+        latitude: 39.00012, longitude: -121.0, headingDegrees: 180
+    ))
+    guard case let .accepted(movingTrack) = north else {
+        Issue.record("Expected displaced point")
+        return
+    }
+    let movingBearing = try #require(OperationalMapGeometry.travelBearingDegrees(points: movingTrack.points))
+    #expect(abs(movingBearing) < 0.1)
+
+    let keepalive = await store.ingest(trackObservation(
+        id: "BEARING", at: start.addingTimeInterval(8),
+        latitude: 39.00012, longitude: -121.0, headingDegrees: 1
+    ))
+    guard case let .accepted(stoppedTrack) = keepalive else {
+        Issue.record("Expected stationary keepalive")
+        return
+    }
+    let stoppedBearing = try #require(OperationalMapGeometry.travelBearingDegrees(points: stoppedTrack.points))
+    #expect(abs(stoppedBearing) < 0.1)
+}
+
+@Test func operationalTravelBearingFollowsLatestVisibleMovementImmediately() async throws {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = RidTrackStore(policy: .init(
+        maximumSpeedMetersPerSecond: 1_000,
+        minimumDistanceMeters: 0
+    ))
+    let samples: [(TimeInterval, Double, Double)] = [
+        (0, 39.00000, -121.00000),
+        (2, 39.00005, -121.00000),
+        (4, 39.00010, -121.00000),
+        (6, 39.00015, -121.00000),
+        (7, 39.00015, -120.99982)
+    ]
+    var track: RidAircraftTrack?
+    for sample in samples {
+        let result = await store.ingest(trackObservation(
+            id: "IMMEDIATE-BEARING",
+            at: start.addingTimeInterval(sample.0),
+            latitude: sample.1,
+            longitude: sample.2,
+            headingDegrees: 361
+        ))
+        if case let .accepted(acceptedTrack) = result { track = acceptedTrack }
+    }
+    let eastBearing = try #require(OperationalMapGeometry.travelBearingDegrees(points: track?.points ?? []))
+    #expect(abs(eastBearing - 90) < 0.2)
+}
+
+@Test func operationalTravelBearingWorksWithTwoSparsePointsAndTurnsWithoutHistoryLag() async throws {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = RidTrackStore(policy: .init(minimumDistanceMeters: 0))
+    let samples: [(TimeInterval, Double, Double)] = [
+        (0, 39.00000, -121.00000),
+        (30, 39.00000, -120.99997),
+    ]
+    var track: RidAircraftTrack?
+    for sample in samples {
+        let result = await store.ingest(trackObservation(
+            id: "SPARSE-BEARING",
+            at: start.addingTimeInterval(sample.0),
+            latitude: sample.1,
+            longitude: sample.2,
+            headingDegrees: 361
+        ))
+        if case let .accepted(acceptedTrack) = result { track = acceptedTrack }
+    }
+    let eastBearing = try #require(OperationalMapGeometry.travelBearingDegrees(points: track?.points ?? []))
+    #expect(abs(eastBearing - 90) < 0.2)
+
+    let turn = await store.ingest(trackObservation(
+        id: "SPARSE-BEARING",
+        at: start.addingTimeInterval(60),
+        latitude: 39.00003,
+        longitude: -120.99997,
+        headingDegrees: 361
+    ))
+    guard case let .accepted(turnedTrack) = turn else {
+        Issue.record("Expected sparse turn point")
+        return
+    }
+    let northBearing = try #require(OperationalMapGeometry.travelBearingDegrees(points: turnedTrack.points))
+    #expect(abs(northBearing) < 0.2)
+}
+
+@Test func operationalMapGestureReleasesFocusedAircraft() {
+    #expect(OperationalMapFocusPolicy.shouldReleaseFocus(
+        hasFocusedAircraft: true,
+        isOperatorGesture: true
+    ))
+    #expect(!OperationalMapFocusPolicy.shouldReleaseFocus(
+        hasFocusedAircraft: false,
+        isOperatorGesture: true
+    ))
+    #expect(!OperationalMapFocusPolicy.shouldReleaseFocus(
+        hasFocusedAircraft: true,
+        isOperatorGesture: false
+    ))
+}
+
 @Test func operationalAircraftStatusLabelMatchesAndroidTokens() {
     #expect(OperationalAircraftDisplay.statusLabel(
         atoFeet: 125.2,
@@ -1367,6 +1545,23 @@ private func proximityDrone(
     #expect((coordinator.display.rangeFeet ?? 0) > 30)
     #expect(coordinator.display.aglUsesTerrain)
     #expect(!coordinator.display.aglStale)
+}
+
+@Test func operationalAltitudeClampsNegativeTerrainEstimateToGroundLevel() throws {
+    var coordinator = OperationalAltitudeCoordinator()
+    coordinator.ingest(RidObservation(
+        source: .bluetoothExtended, aircraftId: "TEST",
+        receivedAt: Date(timeIntervalSince1970: 100),
+        latitude: 39, longitude: -105,
+        altitudeMeters: 500, heightMeters: 0, heightReference: .takeoff
+    ))
+    coordinator.applyTakeoffTerrain(OperationalTerrainSample(elevationMeters: 500))
+    coordinator.applyCurrentTerrain(
+        OperationalTerrainSample(elevationMeters: 503),
+        coordinate: try #require(coordinator.currentCoordinate)
+    )
+
+    #expect(coordinator.display.aglFeet == 0)
 }
 
 @Test func operationalAltitudeMarksCachedTerrainStale() throws {
@@ -1596,6 +1791,19 @@ private func proximityDrone(
     #expect(try JSONDecoder().decode(CaltopoArtifactSnapshot.self, from: JSONEncoder().encode(snapshot)) == snapshot)
 }
 
+@Test func caltopoArtifactVisibilityOperatorOverridesWinForActiveSession() {
+    let resolved = CaltopoArtifactVisibilityPolicy.hiddenFolderIDs(
+        localHidden: ["local-hidden", "operator-shown"],
+        defaultHidden: ["server-hidden", "operator-shown"],
+        operatorVisibilityOverrides: [
+            "operator-shown": true,
+            "operator-hidden": false,
+        ]
+    )
+
+    #expect(resolved == ["local-hidden", "server-hidden", "operator-hidden"])
+}
+
 @Test func operationalCoordinateFormatsMatchAndroid() {
     #expect(OperationalCoordinateFormatter.format(
         latitude: 39.9526,
@@ -1793,6 +2001,127 @@ private func proximityDrone(
     #expect(basicID.uasID == "RID2CALTOPO12345")
 }
 
+@Test func droneScoutRelayPingRecognizesDefaultIdentityWithoutLocation() throws {
+    let relayPing = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(message: basicIDMessage("DroneScout Bridge"), counter: 8)
+    )
+    let aircraft = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(message: basicIDMessage("RID2CALTOPO12345"), counter: 9)
+    )
+
+    #expect(DroneScoutRelayPing.matches(relayPing))
+    #expect(DroneScoutRelayPing.matches(identity: "dronescout_bridge 01"))
+    #expect(!DroneScoutRelayPing.matches(aircraft))
+}
+
+@Test func terrainSchedulingPreservesInterpolationWithinNetworkCacheCell() {
+    let first = OperationalAltitudeCoordinator.Coordinate(
+        latitude: 39.153600,
+        longitude: -121.132110
+    )
+    let nearby = OperationalAltitudeCoordinator.Coordinate(
+        latitude: 39.153620,
+        longitude: -121.132090
+    )
+
+    #expect(OperationalAltitudeCoordinator.terrainKey(first) != OperationalAltitudeCoordinator.terrainKey(nearby))
+    #expect(OperationalAltitudeCoordinator.terrainCacheKey(first) == OperationalAltitudeCoordinator.terrainCacheKey(nearby))
+}
+
+@Test func droneScoutBridgeLossGateAnnouncesOnceAndResetsAfterPing() {
+    #expect(DroneScoutRelayPing.signalFreshnessSeconds == 32)
+    #expect(DroneScoutBridgeLossAnnouncementGate.defaultThreshold == 32)
+    var gate = DroneScoutBridgeLossAnnouncementGate()
+    let start = Date(timeIntervalSince1970: 1_000)
+
+    let initial = gate.shouldAnnounce(
+        monitoringActive: true, lastPingAt: nil, now: start, muted: false
+    )
+    let atBoundary = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: nil,
+        now: start.addingTimeInterval(32),
+        muted: false
+    )
+    let crossedBoundary = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: nil,
+        now: start.addingTimeInterval(32.001),
+        muted: false
+    )
+    let repeatedLoss = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: nil,
+        now: start.addingTimeInterval(30),
+        muted: false
+    )
+    #expect(!initial)
+    #expect(!atBoundary)
+    #expect(crossedBoundary)
+    #expect(!repeatedLoss)
+
+    let restored = start.addingTimeInterval(30)
+    let restoredPing = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: restored,
+        now: restored.addingTimeInterval(1),
+        muted: false
+    )
+    let lostAgain = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: restored,
+        now: restored.addingTimeInterval(32.001),
+        muted: false
+    )
+    #expect(!restoredPing)
+    #expect(lostAgain)
+}
+
+@Test func droneScoutBridgeLossGateHonorsMuteAndMonitoringState() {
+    var gate = DroneScoutBridgeLossAnnouncementGate()
+    let start = Date(timeIntervalSince1970: 2_000)
+
+    let initial = gate.shouldAnnounce(
+        monitoringActive: true, lastPingAt: nil, now: start, muted: false
+    )
+    let mutedLoss = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: nil,
+        now: start.addingTimeInterval(32.001),
+        muted: true
+    )
+    let unmutedSameLoss = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: nil,
+        now: start.addingTimeInterval(30),
+        muted: false
+    )
+    let stopped = gate.shouldAnnounce(
+        monitoringActive: false,
+        lastPingAt: nil,
+        now: start.addingTimeInterval(31),
+        muted: false
+    )
+    let restarted = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: nil,
+        now: start.addingTimeInterval(40),
+        muted: false
+    )
+    let restartedLoss = gate.shouldAnnounce(
+        monitoringActive: true,
+        lastPingAt: nil,
+        now: start.addingTimeInterval(72.001),
+        muted: false
+    )
+    #expect(!initial)
+    #expect(!mutedLoss)
+    #expect(!unmutedSameLoss)
+    #expect(!stopped)
+    #expect(!restarted)
+    #expect(restartedLoss)
+}
+
 @Test func locationDecoderMatchesAndroidWireFormulas() throws {
     let advertisement = try OpenDroneIDParser.parseBluetoothServiceData(
         bluetoothServiceData(message: locationMessage(), counter: 9)
@@ -1822,7 +2151,20 @@ private func proximityDrone(
         Issue.record("Expected a wrapped Location payload")
         return
     }
-    #expect(wrapped.directionDegrees == 1)
+    #expect(wrapped.directionDegrees == nil)
+
+    let invalidSpeedAdvertisement = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(
+            message: locationMessage(horizontalSpeed: 0xFF, verticalSpeed: 126),
+            counter: 11
+        )
+    )
+    guard case let .location(invalidSpeed) = invalidSpeedAdvertisement.messages[0].payload else {
+        Issue.record("Expected an invalid-speed Location payload")
+        return
+    }
+    #expect(invalidSpeed.horizontalSpeedMetersPerSecond == nil)
+    #expect(invalidSpeed.verticalSpeedMetersPerSecond == nil)
 }
 
 @Test func packedBasicIDAndLocationProduceObservation() async throws {
@@ -1851,6 +2193,181 @@ private func proximityDrone(
     #expect(observation?.heightReference == .takeoff)
     #expect(observation?.horizontalAccuracyCode == 10)
     #expect(observation?.signalStrengthDbm == -48)
+}
+
+@Test func assemblerDoesNotReemitCachedLocationForIdentityOnlyAdvertisement() async throws {
+    let transmitterID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+    let assembler = OpenDroneIDTrackAssembler()
+    let initial = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(
+            message: messagePack([
+                basicIDMessage("RID2CALTOPO12345"),
+                locationMessage(),
+            ]),
+            counter: 20
+        )
+    )
+    let initialObservation = await assembler.ingest(
+        initial,
+        transmitterID: transmitterID,
+        source: .bluetoothExtended,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        signalStrengthDbm: -48
+    )
+    #expect(initialObservation != nil)
+
+    let identityOnly = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(message: basicIDMessage("RID2CALTOPO12345"), counter: 21)
+    )
+    let staleObservation = await assembler.ingest(
+        identityOnly,
+        transmitterID: transmitterID,
+        source: .bluetoothExtended,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_001),
+        signalStrengthDbm: -47
+    )
+    #expect(staleObservation == nil)
+
+    let locationOnly = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(message: locationMessage(), counter: 22)
+    )
+    let freshObservation = await assembler.ingest(
+        locationOnly,
+        transmitterID: transmitterID,
+        source: .bluetoothExtended,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_002),
+        signalStrengthDbm: -46
+    )
+    #expect(freshObservation?.aircraftId == "RID2CALTOPO12345")
+    #expect(freshObservation?.signalStrengthDbm == -46)
+}
+
+@Test func assemblerReportsWhyAnAdvertisementDidNotProduceAnObservation() async throws {
+    let transmitterID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+    let assembler = OpenDroneIDTrackAssembler()
+    let locationOnly = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(message: locationMessage(), counter: 30)
+    )
+    let missingIdentity = await assembler.ingestWithResult(
+        locationOnly,
+        transmitterID: transmitterID,
+        source: .bluetoothLegacy,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        signalStrengthDbm: -60
+    )
+    #expect(missingIdentity.observation == nil)
+    #expect(missingIdentity.disposition == .missingIdentity)
+
+    let identityOnly = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(message: basicIDMessage("RID2CALTOPO12345"), counter: 31)
+    )
+    let noFreshLocation = await assembler.ingestWithResult(
+        identityOnly,
+        transmitterID: transmitterID,
+        source: .bluetoothLegacy,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_001),
+        signalStrengthDbm: -59
+    )
+    #expect(noFreshLocation.observation == nil)
+    #expect(noFreshLocation.disposition == .noFreshLocation)
+    #expect(noFreshLocation.aircraftID == "RID2CALTOPO12345")
+
+    let recovered = await assembler.ingestWithResult(
+        locationOnly,
+        transmitterID: transmitterID,
+        source: .bluetoothLegacy,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_002),
+        signalStrengthDbm: -58
+    )
+    #expect(recovered.disposition == .observation)
+    #expect(recovered.observation?.aircraftId == "RID2CALTOPO12345")
+}
+
+@Test func nonLocationAircraftMessageRefreshesLifecycleWithoutRefreshingLocationSignal() async {
+    let store = RidTrackStore(policy: .init(activeTimeout: 30))
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    _ = await store.ingest(RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "RID2CALTOPO12345",
+        receivedAt: start,
+        latitude: 39.7392,
+        longitude: -104.9903,
+        signalStrengthDbm: -61
+    ))
+
+    let refreshed = await store.noteAircraftMessage(RidAircraftMessage(
+        source: .bluetoothLegacy,
+        aircraftID: "RID2CALTOPO12345",
+        receivedAt: start.addingTimeInterval(25)
+    ))
+
+    #expect(refreshed)
+    let track = await store.snapshot().first
+    #expect(track?.lastSignalAt == start)
+    #expect(track?.lastAircraftMessageAt == start.addingTimeInterval(25))
+    #expect(await store.removeInactive(at: start.addingTimeInterval(50)).isEmpty)
+    #expect(await store.removeInactive(at: start.addingTimeInterval(56)).map(\.aircraftID) == [
+        "RID2CALTOPO12345"
+    ])
+}
+
+@Test func droneScoutSelfIDIdentifiesRelayAndBridgeInputRSSI() async throws {
+    let metadata = DroneScoutRelayMetadata.parse("DS WIFI B -74 dBm drone")
+    #expect(metadata?.droneToBridgeRssiDbm == -74)
+    #expect(metadata?.receptionMode == "WIFI B")
+    #expect(metadata?.sourceKind == "drone")
+    #expect(DroneScoutRelayMetadata.parse("Search aircraft alpha") == nil)
+
+    let pack = messagePack([
+        basicIDMessage("RID2CALTOPO12345"),
+        selfIDMessage("DS WIFI B -74 dBm drone"),
+        locationMessage(),
+    ])
+    let advertisement = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(message: pack, counter: 12)
+    )
+    let observation = await OpenDroneIDTrackAssembler().ingest(
+        advertisement,
+        transmitterID: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+        source: .bluetoothExtended,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        signalStrengthDbm: -48
+    )
+
+    #expect(observation?.signalStrengthDbm == -48)
+    #expect(observation?.droneScoutRelay?.droneToBridgeRssiDbm == -74)
+}
+
+@Test func trackStorePreservesDirectRSSIWhenRelayedPacketArrives() async {
+    let store = RidTrackStore()
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    _ = await store.ingest(RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "RID2CALTOPO12345",
+        receivedAt: start,
+        latitude: 39.7392,
+        longitude: -104.9903,
+        signalStrengthDbm: -61
+    ))
+    _ = await store.ingest(RidObservation(
+        source: .bluetoothExtended,
+        aircraftId: "RID2CALTOPO12345",
+        receivedAt: start.addingTimeInterval(4),
+        latitude: 39.7393,
+        longitude: -104.9903,
+        signalStrengthDbm: -42,
+        droneScoutRelay: DroneScoutRelayMetadata(
+            droneToBridgeRssiDbm: -78,
+            receptionMode: "WIFI B",
+            sourceKind: "drone"
+        )
+    ))
+
+    let track = await store.snapshot().first
+    #expect(track?.lastSignalStrengthDbm == -42)
+    #expect(track?.lastDirectSignalStrengthDbm == -61)
+    #expect(track?.lastDirectSignalSource == .bluetoothLegacy)
+    #expect(track?.lastDroneToBridgeSignalStrengthDbm == -78)
 }
 
 @Test func trackStoreRejectsPoorHorizontalAccuracyBeforeTakeoffAndAltitudeSeed() async throws {
@@ -1951,7 +2468,9 @@ private func proximityDrone(
         id: "RIDTEST01",
         at: start.addingTimeInterval(1),
         latitude: 39.7392,
-        longitude: -104.9903
+        longitude: -104.9903,
+        source: .wifiBeacon,
+        signalStrengthDbm: -72
     ))
     guard case let .signalOnly(duplicateTrack, reason) = duplicate else {
         Issue.record("Expected duplicate to refresh signal without adding a point")
@@ -1960,6 +2479,8 @@ private func proximityDrone(
     #expect(reason == .duplicatePosition)
     #expect(duplicateTrack.points.count == 1)
     #expect(duplicateTrack.lastSignalAt == start.addingTimeInterval(1))
+    #expect(duplicateTrack.lastSignalSource == .wifiBeacon)
+    #expect(duplicateTrack.lastSignalStrengthDbm == -72)
 
     let impossible = await store.ingest(trackObservation(
         id: "RIDTEST01",
@@ -1977,6 +2498,11 @@ private func proximityDrone(
     }
     #expect(speed > 90)
     #expect(impossibleTrack.points.count == 1)
+}
+
+@Test func defaultTrackSpeedCeilingAllowsGpsToleranceUpToTwoHundredMilesPerHour() {
+    let policy = RidTrackPolicy()
+    #expect(abs(policy.maximumSpeedMetersPerSecond * 2.236936 - 200) < 0.01)
 }
 
 @Test func trackStoreAcceptsStationaryKeepaliveAndAgesTracks() async {
@@ -2636,15 +3162,15 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
         organizationName: "NCSSAR",
         driveFileID: "1AbCdEfGhIjKlMn",
         isPublic: true,
-        version: 1
+        version: 2
     )
     let token = try OrgConfigTokenCodec.encode(original)
 
-    #expect(token.hasPrefix("R2C1:"))
+    #expect(token.hasPrefix("R2C2:"))
     #expect(OrgConfigTokenCodec.decode(token) == original)
-    #expect(OrgConfigTokenCodec.decode("r2c1://\(token.dropFirst(5))") == original)
-    #expect(OrgConfigTokenCodec.decode("R2C1:UGedORwNSuM8Sk4NMR5dSs25A0m0NDWVPNAFSA0IcrmsQv0MDCPiKRszONFNFvEC") == original)
-    #expect(OrgConfigTokenCodec.decode("R2C1:not-valid") == nil)
+    #expect(OrgConfigTokenCodec.decode("r2c2://\(token.dropFirst(5))") == original)
+    #expect(OrgConfigTokenCodec.decode("R2C1:UGedORwNSuM8Sk4NMR5dSs25A0m0NDWVPNAFSA0IcrmsQv0MDCPiKRszONFNFvEC") == nil)
+    #expect(OrgConfigTokenCodec.decode("R2C2:not-valid") == nil)
 }
 
 @Test func orgConfigCredentialPayloadEncryptsForAndroidBundleWrapper() throws {
@@ -2664,8 +3190,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
         "domain_and_port": "caltopo.example",
         "incident": "Search 42",
         "op_period": "2",
-        "tracker_api_key": "tracker-token",
-        "tracker_url_prefix": "https://tracker.example",
+        "tracker_enrollment_url": "https://r2c-tracker.com/ncssar/enroll?token=campaign-token",
         "use_peers": true,
         "predictive_head_enabled": false,
         "proximity_alert_spacing_feet": 40,
@@ -2673,16 +3198,6 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     let credentialData = try JSONSerialization.data(withJSONObject: credentialObject, options: [.sortedKeys])
     let credentialJSON = String(decoding: credentialData, as: UTF8.self)
     let encrypted = try androidCompatibleEncryptPayload(credentialJSON)
-    let faaPlaintext: [String: Any] = [
-        "source_label": "NCSSAR FAA",
-        "notam_client_id": "faa-client",
-        "notam_client_secret": "faa-secret",
-    ]
-    let faaJSON = String(decoding: try JSONSerialization.data(withJSONObject: faaPlaintext), as: UTF8.self)
-    let faaPayload = try JSONSerialization.data(withJSONObject: [
-        "type": "ct_faa_credentials_enc",
-        "enc": try androidCompatibleEncryptPayload(faaJSON),
-    ])
     let mutualAidPlaintext: [String: Any] = [
         "type": "ct_mutual_aid_credentials",
         "team_id": "ma-team",
@@ -2694,7 +3209,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     let mutualAidJSON = String(decoding: try JSONSerialization.data(withJSONObject: mutualAidPlaintext), as: UTF8.self)
     let root: [String: Any] = [
         "format": "rid2caltopo_org_config",
-        "version": 1,
+        "version": 2,
         "org_name": "NCSSAR",
         "configs": [
             [
@@ -2708,10 +3223,6 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
                 ]],
             ],
             ["type": "ct_credentials_enc", "enc": encrypted],
-            [
-                "type": "ct_faa_remote_config",
-                "faa_payload_enc": String(decoding: faaPayload, as: UTF8.self),
-            ],
             ["type": "ct_credentials_enc", "enc": try androidCompatibleEncryptPayload(mutualAidJSON)],
         ],
     ]
@@ -2720,15 +3231,15 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(bundle.organizationName == "NCSSAR")
     #expect(bundle.mappings.first?.mappedID == "Eagle1DjMtrc4td")
     #expect(bundle.credentials?.credentialSecret == "c2VjcmV0")
-    #expect(bundle.credentials?.trackerURLPrefix == "https://tracker.example")
+    #expect(bundle.trackerEnrollmentURL == "https://r2c-tracker.com/ncssar/enroll?token=campaign-token")
     #expect(bundle.credentials?.usePeers == true)
     #expect(bundle.credentials?.predictiveHeadEnabled == false)
-    #expect(bundle.faaConfig?.clientID == "faa-client")
+    #expect(bundle.faaConfig == nil)
     #expect(bundle.mutualAidTemplate?.credentialID == "ma-credential")
 }
 
 @Test func androidConfigTokenCodecRecognizesAllQrFamilies() throws {
-    let org = "R2C1:UGedORwNSuM8Sk4NMR5dSs25A0m0NDWVPNAFSA0IcrmsQv0MDCPiKRszONFNFvEC"
+    let org = try sharedConfigToken(prefix: "R2C2:", displayKey: "o", display: "NCSSAR", fileID: "org-file", version: 2)
     let faa = try sharedConfigToken(prefix: "R2CFAA1:", displayKey: "l", display: "FAA Shared", fileID: "faa-file")
     let mutualAid = try sharedConfigToken(prefix: "R2CMA1:", displayKey: "o", display: "Mutual Org", fileID: "ma-file")
 
@@ -2944,9 +3455,10 @@ private func sharedConfigToken(
     prefix: String,
     displayKey: String,
     display: String,
-    fileID: String
+    fileID: String,
+    version: Int = 1
 ) throws -> String {
-    let object: [String: Any] = [displayKey: display, "f": fileID, "p": 1, "v": 1]
+    let object: [String: Any] = [displayKey: display, "f": fileID, "p": 1, "v": version]
     let json = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     let key = Array("RID2CaltopoQR".utf8)
     let encrypted = Array(json).enumerated().map { index, value in value ^ key[index % key.count] }
@@ -3004,16 +3516,20 @@ private func trackObservation(
     id: String,
     at date: Date,
     latitude: Double,
-    longitude: Double
+    longitude: Double,
+    source: RidObservation.Source = .bluetoothLegacy,
+    signalStrengthDbm: Int = -55,
+    headingDegrees: Double? = nil
 ) -> RidObservation {
     RidObservation(
-        source: .bluetoothLegacy,
+        source: source,
         aircraftId: id,
         receivedAt: date,
         latitude: latitude,
         longitude: longitude,
         altitudeMeters: 1_600,
-        signalStrengthDbm: -55
+        headingDegrees: headingDegrees,
+        signalStrengthDbm: signalStrengthDbm
     )
 }
 
@@ -3030,14 +3546,16 @@ private func basicIDMessage(_ uasID: String) -> [UInt8] {
 private func locationMessage(
     direction: UInt8 = 90,
     eastWest: Bool = false,
-    horizontalAccuracyCode: UInt8 = 10
+    horizontalAccuracyCode: UInt8 = 10,
+    horizontalSpeed: UInt8 = 40,
+    verticalSpeed: Int8 = -4
 ) -> [UInt8] {
     var message = [UInt8](repeating: 0, count: OpenDroneIDParser.messageSize)
     message[0] = 0x12
     message[1] = eastWest ? 0x02 : 0x00
     message[2] = direction
-    message[3] = 40
-    message[4] = UInt8(bitPattern: -4)
+    message[3] = horizontalSpeed
+    message[4] = UInt8(bitPattern: verticalSpeed)
     writeInt32(397_392_000, into: &message, at: 5)
     writeInt32(-1_049_903_000, into: &message, at: 9)
     writeUInt16(2_200, into: &message, at: 13)
@@ -3045,6 +3563,16 @@ private func locationMessage(
     writeUInt16(2_100, into: &message, at: 17)
     message[19] = horizontalAccuracyCode & 0x0F
     writeUInt16(123, into: &message, at: 21)
+    return message
+}
+
+private func selfIDMessage(_ description: String) -> [UInt8] {
+    var message = [UInt8](repeating: 0, count: OpenDroneIDParser.messageSize)
+    message[0] = 0x32
+    message[1] = 0
+    for (index, byte) in description.utf8.prefix(23).enumerated() {
+        message[index + 2] = byte
+    }
     return message
 }
 
@@ -3142,4 +3670,70 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
     #expect(viewport.normalizedPanX == 1.5)
     #expect(viewport.normalizedPanY == 0)
     #expect(viewport.needsTransform)
+}
+
+@Test func applicationIdleTimeoutStartsAtLaunchAndCanBeDisabled() {
+    let startedAt = Date(timeIntervalSince1970: 1_000)
+    #expect(ApplicationIdleTimeoutPolicy.deadline(
+        appStartedAt: startedAt,
+        lastValidRIDUpdateAt: nil,
+        maximumIdleMinutes: 2
+    ) == Date(timeIntervalSince1970: 1_120))
+    #expect(ApplicationIdleTimeoutPolicy.deadline(
+        appStartedAt: startedAt,
+        lastValidRIDUpdateAt: nil,
+        maximumIdleMinutes: 0
+    ) == nil)
+}
+
+@Test func applicationLaunchDisclaimerUsesApprovedSafetyLanguage() {
+    #expect(
+        ApplicationLaunchDisclaimer.text ==
+            "This app provides supplemental situational awareness that may be unavailable or " +
+            "contain incomplete or delayed information and must not be used as the sole source " +
+            "for navigation, flight safety, communications, or incident-command decisions.  " +
+            "I am responsible for safe use and independently verifying safety-critical information."
+    )
+}
+
+@Test func applicationIdleTimeoutRestartsAfterEachValidRIDUpdate() {
+    let startedAt = Date(timeIntervalSince1970: 1_000)
+    let lastUpdateAt = Date(timeIntervalSince1970: 1_075)
+    #expect(ApplicationIdleTimeoutPolicy.deadline(
+        appStartedAt: startedAt,
+        lastValidRIDUpdateAt: lastUpdateAt,
+        maximumIdleMinutes: 2
+    ) == Date(timeIntervalSince1970: 1_195))
+    #expect(!ApplicationIdleTimeoutPolicy.isExpired(
+        appStartedAt: startedAt,
+        lastValidRIDUpdateAt: lastUpdateAt,
+        maximumIdleMinutes: 2,
+        now: Date(timeIntervalSince1970: 1_194)
+    ))
+    #expect(ApplicationIdleTimeoutPolicy.isExpired(
+        appStartedAt: startedAt,
+        lastValidRIDUpdateAt: lastUpdateAt,
+        maximumIdleMinutes: 2,
+        now: Date(timeIntervalSince1970: 1_195)
+    ))
+}
+@Test func managedVideoApprovalWaitsUntilPreflightIsReady() {
+    #expect(!ManagedVideoQualityPolicy.shouldPresentApproval(
+        routeKind: nil,
+        failure: nil
+    ))
+    #expect(ManagedVideoQualityPolicy.shouldPresentApproval(
+        routeKind: "routed",
+        failure: nil
+    ))
+}
+
+@Test func managedVideoSenderStartsBelowSelectedCeiling() {
+    let high = ManagedVideoQualityPolicy.senderBitrates(targetBps: 3_000_000)
+    #expect(high.minimumBps == 100_000)
+    #expect(high.startupBps == 600_000)
+    #expect(high.maximumBps == 3_000_000)
+
+    let emergency = ManagedVideoQualityPolicy.senderBitrates(targetBps: 200_000)
+    #expect(emergency.startupBps == emergency.maximumBps)
 }

@@ -7,28 +7,28 @@ class LocalMapMarkerTest {
     @Test
     fun removeLocalMapMarkerById_removesOnlyMatchingMarker() {
         val markers = mutableListOf(
-            localMarker(id = 1L, title = "Turnaround"),
-            localMarker(id = 2L, title = "Landing zone"),
+            localMarker(id = "one", title = "Turnaround"),
+            localMarker(id = "two", title = "Landing zone"),
         )
 
-        val removed = removeLocalMapMarkerById(markers, 1L)
+        val removed = removeLocalMapMarkerById(markers, "one")
 
         assertTrue(removed)
-        assertEquals(listOf(2L), markers.map { it.id })
+        assertEquals(listOf("two"), markers.map { it.id })
         assertEquals("Landing zone", markers.single().title)
     }
 
     @Test
     fun removeLocalMapMarkerById_returnsFalseWhenMarkerIsMissing() {
-        val markers = mutableListOf(localMarker(id = 1L, title = "Turnaround"))
+        val markers = mutableListOf(localMarker(id = "one", title = "Turnaround"))
 
-        val removed = removeLocalMapMarkerById(markers, 2L)
+        val removed = removeLocalMapMarkerById(markers, "two")
 
         assertFalse(removed)
-        assertEquals(listOf(1L), markers.map { it.id })
+        assertEquals(listOf("one"), markers.map { it.id })
     }
 
-    private fun localMarker(id: Long, title: String): LocalMapMarker =
+    private fun localMarker(id: String, title: String): LocalMapMarker =
         LocalMapMarker(
             id = id,
             lat = 39.153,

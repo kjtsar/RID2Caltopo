@@ -86,7 +86,7 @@ fi
 families="$(/usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily' "$info")"
 schemes="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes' "$info")"
 [[ "$families" == *1* && "$families" == *2* ]] || { echo "IPA is not universal for iPhone and iPad" >&2; exit 1; }
-for scheme in r2c1 r2cfaa1 r2cma1; do
+for scheme in r2c2 r2cfaa1 r2cma1; do
     [[ "$schemes" == *"$scheme"* ]] || { echo "Missing QR URL scheme: $scheme" >&2; exit 1; }
 done
 

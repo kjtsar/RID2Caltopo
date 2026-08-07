@@ -7,6 +7,7 @@ import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.DelayedExec
+import org.ncssar.rid2caltopo.data.NetworkDiagnostics
 import org.ncssar.rid2caltopo.data.CaltopoClient.RegisterDebugTags
 import org.ncssar.rid2caltopo.video.UpstreamBoundaryMarker
 import org.ncssar.rid2caltopo.video.UpstreamTimingRegistry
@@ -455,7 +456,8 @@ class FfmpegProbeService(
             "renderDelayMs=${renderDelayMs ?: -1L} upstreamBoundary=${upstreamBoundary?.boundary ?: "none"} " +
             "upstreamOutcome=${upstreamBoundary?.outcome ?: "none"} " +
             "upstreamPublisherConnId=${upstreamBoundary?.publisherConnId} " +
-            "upstreamReason=${upstreamBoundary?.reason}"
+            "upstreamReason=${upstreamBoundary?.reason} " +
+            "networkSnapshotId=${NetworkDiagnostics.getCurrentSnapshotId()}"
     }
 
     private fun setSessionPhaseLocked(

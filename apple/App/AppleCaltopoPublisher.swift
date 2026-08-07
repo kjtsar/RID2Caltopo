@@ -224,6 +224,35 @@ actor AppleCaltopoPublisher {
         }
     }
 
+    /// Stops an ignored aircraft's live track without converting it to an archived Shape.
+    func discard(remoteID: String) async {
+        finishingRemoteIDs.insert(remoteID)
+        defer {
+            finishingRemoteIDs.remove(remoteID)
+            startTasks.removeValue(forKey: remoteID)
+            liveTrackIDs.removeValue(forKey: remoteID)
+            labels.removeValue(forKey: remoteID)
+            observations.removeValue(forKey: remoteID)
+        }
+
+        let liveTrackID: String?
+        if let existing = liveTrackIDs[remoteID] {
+            liveTrackID = existing
+        } else if let task = startTasks[remoteID] {
+            liveTrackID = try? await task.value
+        } else {
+            liveTrackID = nil
+        }
+        guard let client, let liveTrackID else { return }
+        do {
+            try await client.stopLiveTrack(liveTrackID: liveTrackID)
+            continuation.yield(.trackStopped(remoteID))
+            AppleLog.info("CalTopo", "Discarded ignored aircraft remoteId=\(remoteID) liveTrackId=\(liveTrackID)")
+        } catch {
+            continuation.yield(.failed("Discard \(remoteID): \(error.localizedDescription)"))
+        }
+    }
+
     private func ensureFolders(client: CaltopoLiveClient) async throws {
         guard trackFolderID == nil || archiveFolderID == nil else { return }
         let generation = configurationGeneration

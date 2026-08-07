@@ -77,7 +77,12 @@ public class BluetoothScanner {
             ScanRecord scanRecord = result.getScanRecord();
             if (scanRecord == null)
                 return;
-            byte[] bytes = scanRecord.getBytes();
+            // Parse the UUID-relative service data instead of assuming that the FFFA field
+            // starts at byte zero of the complete advertisement. Other advertisement fields
+            // may precede it, which made otherwise valid relay pings decode intermittently.
+            byte[] serviceData = scanRecord.getServiceData(SERVICE_pUUID);
+            if (serviceData == null)
+                return;
 
             CtDroneSpec.TransportTypeEnum transportType = CtDroneSpec.TransportTypeEnum.BT4;
             if (bluetoothAdapter.isLeCodedPhySupported()) {
@@ -85,7 +90,7 @@ public class BluetoothScanner {
                     transportType = CtDroneSpec.TransportTypeEnum.BT5;
             }
 
-            if (null != dataManager) dataManager.receiveDataBluetooth(bytes, result, transportType);
+            if (null != dataManager) dataManager.receiveDataBluetooth(serviceData, result, transportType);
         }
 
         @Override

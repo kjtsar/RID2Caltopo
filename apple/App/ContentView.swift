@@ -12,6 +12,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
     @StateObject private var bluetoothScanner = BluetoothRIDScanner()
+    @StateObject private var bridgeAlerts = AppleDroneScoutBridgeAlertCenter()
     @StateObject private var mediaMTX = MediaMTXViewModel()
     @ObservedObject private var videoFrames = AppleStreamRegistry.shared.primaryModel
     @StateObject private var ridTracks = RIDTrackViewModel()
@@ -22,6 +23,7 @@ struct ContentView: View {
     @StateObject private var droneConfirmations = AppleDroneConfirmationStore()
     @StateObject private var orgConfigSettings = AppleOrgConfigSettings()
     @StateObject private var orgConfigImporter = AppleOrgConfigImporter()
+    @ObservedObject private var profileLifecycle = AppleCaltopoProfileLifecycle.shared
     @StateObject private var peerCoordinator = AppleTrackerCoordinator()
     @StateObject private var proximityAlerts = AppleProximityAlertCenter()
     @StateObject private var operationalAlerts = AppleOperationalAlertCenter()
@@ -29,6 +31,7 @@ struct ContentView: View {
     @StateObject private var airspace = AppleAirspaceCenter.shared
     @StateObject private var landRestrictions = AppleLandRestrictionCenter.shared
     @StateObject private var streamRegistry = AppleStreamRegistry.shared
+    @ObservedObject private var networkDiagnostics = AppleNetworkDiagnosticCenter.shared
     private let iCloudBackup = AppleICloudBackupCenter.shared
     @State private var showTrackMap = false
     @State private var showCaltopoSettings = false
@@ -38,9 +41,11 @@ struct ContentView: View {
     @State private var showAboutPrivacy = false
     @State private var showProximityPairs = false
     @State private var showImportConfig = false
+    @State private var importConfigNotice: ConfigImportNotice?
     @State private var showConfigurationTransfer = false
     @State private var showTeamMaps = false
     @State private var showMapOptions = false
+    @State private var showConfirmExit = false
     @State private var pendingImportToken = ""
     @State private var selectedAircraftID: String?
     @State private var pendingDroneConfirmation: DroneConfirmationRequest?
@@ -48,6 +53,8 @@ struct ContentView: View {
     @State private var controllerWiFiSSID = "Wi-Fi name unavailable"
     @State private var appStartedAt = Date()
     @State private var dismissedUpdateVersionCode = 0
+    @State private var pendingCredentialProfileID: String?
+    @State private var showCredentialSwitchConfirmation = false
     @AppStorage("video.captureStreams") private var captureStreams = false
 
     private var startupRoot: some View {
@@ -56,6 +63,40 @@ struct ContentView: View {
             .navigationTitle("RID-2-Caltopo")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Menu {
+                        ForEach(profileLifecycle.availableProfiles) { profile in
+                            Button {
+                                requestCredentialProfileSwitch(profile.id)
+                            } label: {
+                                Label {
+                                    VStack(alignment: .leading) {
+                                        Text(profile.credentialLabel)
+                                        Text(profileMenuDetail(profile))
+                                    }
+                                } icon: {
+                                    Image(systemName: profile.id == profileLifecycle.activeProfileID
+                                        ? "checkmark.circle.fill"
+                                        : "circle")
+                                }
+                            }
+                        }
+                    } label: {
+                        VStack(spacing: 0) {
+                            Text("RID-2-Caltopo")
+                                .font(.headline)
+                            HStack(spacing: 2) {
+                                Text("Teams: \(profileLifecycle.activeCredentialLabel)")
+                                    .font(.caption)
+                                    .foregroundStyle(activeCredentialNearExpiry ? .orange : .secondary)
+                                Image(systemName: "chevron.down")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .accessibilityLabel("Selected Teams credentials: \(profileLifecycle.activeCredentialLabel)")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("Live View", systemImage: "video") { showTrackMap = true }
@@ -73,6 +114,11 @@ struct ContentView: View {
                         Button("Settings", systemImage: "gearshape") { showCaltopoSettings = true }
                         Button("About & Privacy", systemImage: "hand.raised") {
                             showAboutPrivacy = true
+                        }
+                        Divider()
+                        Button("Quit", systemImage: "xmark.circle", role: .destructive) {
+                            AppleLog.info("Lifecycle", "Quit menu selected")
+                            showConfirmExit = true
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -155,18 +201,24 @@ struct ContentView: View {
                 }
                 .navigationTitle("Proximity Pairs")
             }
-            .navigationDestination(isPresented: $showImportConfig) {
-                ConfigImportView(
-                    initialToken: pendingImportToken,
-                    importer: orgConfigImporter,
-                    caltopoSettings: caltopoSettings,
-                    orgSettings: orgConfigSettings,
-                    identityStore: droneConfirmations
-                )
-                .id(pendingImportToken)
-            }
             .navigationDestination(item: $selectedAircraftID) { aircraftID in
                 aircraftDestination(aircraftID)
+            }
+            .sheet(isPresented: $showImportConfig) {
+                NavigationStack {
+                    ConfigImportView(
+                        initialToken: pendingImportToken,
+                        importer: orgConfigImporter,
+                        caltopoSettings: caltopoSettings,
+                        orgSettings: orgConfigSettings,
+                        identityStore: droneConfirmations
+                    ) { notice in
+                        importConfigNotice = notice
+                    }
+                    .id(pendingImportToken)
+                }
+                .presentationDetents([.height(440), .large])
+                .presentationDragIndicator(.visible)
             }
             .sheet(isPresented: $showTeamMaps) {
                 CaltopoTeamMapBrowser(settings: caltopoSettings) { map in
@@ -198,8 +250,42 @@ struct ContentView: View {
             } message: {
                 Text("Continue with limited functionality until RID2Caltopo is upgraded.")
             }
+            .alert("Confirm Exit", isPresented: $showConfirmExit) {
+                Button("Cancel", role: .cancel) {
+                    AppleLog.info("Lifecycle", "Quit cancelled")
+                }
+                Button("OK", role: .destructive) {
+                    AppleLog.info("Lifecycle", "Quit confirmed")
+                    AppleApplicationCleanupCenter.shared.quitPrimaryWindow(reason: "operator quit")
+                }
+            } message: {
+                Text("Do you really want to close this application?")
+            }
+            .alert("Switch Teams Credentials?", isPresented: $showCredentialSwitchConfirmation) {
+                Button("Cancel", role: .cancel) {
+                    pendingCredentialProfileID = nil
+                }
+                Button("Disconnect and Switch", role: .destructive) {
+                    if let profileID = pendingCredentialProfileID {
+                        activateCredentialProfile(profileID)
+                    }
+                    pendingCredentialProfileID = nil
+                }
+            } message: {
+                Text(
+                    "Disconnect from the current map and stop arbitration for "
+                        + "\(ridTracks.tracks.count) active aircraft before switching Teams credentials?"
+                )
+            }
+            .alert(item: $importConfigNotice) { notice in
+                Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
             .sheet(item: Binding(
-                get: { peerCoordinator.pendingVideoStreamRequest },
+                get: { peerCoordinator.videoStreamRequestReadyForApproval },
                 set: { value in
                     if value == nil {
                         peerCoordinator.acknowledgeVideoStreamRequest()
@@ -351,7 +437,10 @@ struct ContentView: View {
                     existing: droneConfirmations.identity(for: request.id),
                     identityStore: droneConfirmations,
                     onConfirm: peerCoordinator.confirm,
-                    onIgnore: { droneConfirmations.ignoreForCurrentFlight(request.id) }
+                    onIgnore: {
+                        droneConfirmations.ignore(request.id)
+                        ridTracks.suppressCaltopoPublication(remoteID: request.id)
+                    }
                 )
                 .interactiveDismissDisabled()
             }
@@ -367,15 +456,19 @@ struct ContentView: View {
                 }
                 await diagnostics.start()
                 AppleLog.info("App", "Application UI started")
+                networkDiagnostics.start()
                 if !ProcessInfo.processInfo.arguments.contains("--no-location") {
                     locationProvider.start()
                 }
                 if !ProcessInfo.processInfo.arguments.contains("--manual-radios") {
                     try? await bluetoothScanner.start()
                 }
-                refreshControllerRTMPURL()
-                await refreshControllerWiFiSSID()
+                ridTracks.configurePublicationSuppression(droneConfirmations.isIgnored)
                 ridTracks.bind(to: bluetoothScanner.observations, sourceID: "bluetooth")
+                ridTracks.bindAircraftMessages(
+                    to: bluetoothScanner.aircraftMessages,
+                    sourceID: "bluetooth"
+                )
                 ridTracks.configureClueArchiveProvider(clueStore.archiveClues)
                 _ = orgConfigImporter.restoreActiveProfile(
                     caltopoSettings: caltopoSettings,
@@ -398,6 +491,15 @@ struct ContentView: View {
                 orgConfigImporter.caltopoConfigurationHandler = { configuration in
                     ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
                     clueStore.configure(configuration, trackFolderName: orgConfigSettings.trackFolder)
+                }
+                orgConfigImporter.notamEnrollmentAppliedHandler = { faaProxyURL, trackerURLPrefix, trackerAPIKey in
+                    notams.configure(
+                        faaProxyURL: faaProxyURL,
+                        trackerURLPrefix: trackerURLPrefix,
+                        trackerAPIKey: trackerAPIKey
+                    )
+                    notams.enabled = true
+                    notams.refreshNow(location: locationProvider.lastLocation)
                 }
                 ridTracks.configurePeerCoordination(
                     peerCoordinator,
@@ -518,7 +620,7 @@ struct ContentView: View {
                 }
                 if ProcessInfo.processInfo.arguments.contains("--show-import-config") {
                     if ProcessInfo.processInfo.arguments.contains("--demo-org-token") {
-                        pendingImportToken = "R2C1:UGedORwNSuM8Sk4NMR5dSs25A0m0NDWVPNAFSA0IcrmsQv0MDCPiKRszONFNFvEC"
+                        pendingImportToken = "R2C2:not-valid-demo-token"
                     }
                     try? await Task.sleep(for: .milliseconds(500))
                     showImportConfig = true
@@ -551,14 +653,11 @@ struct ContentView: View {
             .task {
                 await monitorOperationalState()
             }
-            .task {
-                while !Task.isCancelled {
-                    _ = orgConfigImporter.removeExpiredProfiles(
-                        caltopoSettings: caltopoSettings,
-                        orgSettings: orgConfigSettings
-                    )
-                    try? await Task.sleep(for: .seconds(60))
-                }
+            .task(id: idleTimeoutFingerprint) {
+                await monitorIdleTimeout()
+            }
+            .task(id: profileLifecycle.mutualAidExpiresAt) {
+                await enforceMutualAidExpiryAtDeadline()
             }
             .task(id: scenePhase == .active) {
                 guard scenePhase == .active else { return }
@@ -601,6 +700,43 @@ struct ContentView: View {
             .onChange(of: bluetoothScanner.lastDecodeError) { _, error in
                 if let error { AppleLog.error("BluetoothRID", "Rejected advertisement: \(error)") }
             }
+            .onChange(of: bluetoothScanner.bridgeEventCount) { _, _ in
+                guard let diagnostic = bluetoothScanner.lastBridgePacketDiagnostic else { return }
+                AppleLog.info(
+                    "DroneScoutBridge",
+                    "Bridge event=\(diagnostic.eventCount) " +
+                        "classification=\(diagnostic.classification.rawValue) " +
+                        "transmitter=\(diagnostic.transmitterID.uuidString) " +
+                        "messageCounter=\(diagnostic.messageCounter) " +
+                        "aircraft=\(diagnostic.aircraftID) " +
+                        "bridgeRssiDbm=\(diagnostic.bridgeToDeviceRssiDbm)"
+                )
+            }
+            .onChange(of: bluetoothScanner.ingressDiagnostic) { _, diagnostic in
+                guard let diagnostic else { return }
+                AppleLog.info(
+                    "BluetoothRID",
+                    "Ingress callbacks=\(diagnostic.discoveryCallbacks) " +
+                        "nonRID=\(diagnostic.nonRemoteIDCallbacks) packets=\(diagnostic.receivedPackets) " +
+                        "decoded=\(diagnostic.decodedPackets) locations=\(diagnostic.locationPackets) " +
+                        "observations=\(diagnostic.emittedObservations) relayPings=\(diagnostic.relayPings) " +
+                        "noFreshLocation=\(diagnostic.noFreshLocation) " +
+                        "missingIdentity=\(diagnostic.missingIdentity) " +
+                        "invalidLocation=\(diagnostic.invalidLocation) " +
+                        "decodeFailures=\(diagnostic.decodeFailures) streamDrops=\(diagnostic.streamDrops) " +
+                        "lastSequence=\(diagnostic.lastSequence) " +
+                        "lastTransmitter=\(diagnostic.lastTransmitterID.uuidString) " +
+                        "lastCounter=\(diagnostic.lastMessageCounter.map(String.init) ?? "unavailable") " +
+                        "lastKinds=\(diagnostic.lastMessageKinds) rssi=\(diagnostic.lastRSSIDbm)"
+                )
+            }
+            .onChange(of: bluetoothScanner.scanRestartCount) { _, count in
+                guard count > 0 else { return }
+                AppleLog.info(
+                    "BluetoothRID",
+                    "High-priority scan restart=\(count) callbacks=\(bluetoothScanner.ingressDiagnostic?.discoveryCallbacks ?? 0)"
+                )
+            }
             .onChange(of: mediaMTX.status) { _, status in
                 AppleLog.info("MediaMTX", status)
             }
@@ -626,17 +762,17 @@ struct ContentView: View {
             .onChange(of: locationProvider.lastLocation?.timestamp) { _, _ in
                 peerCoordinator.updatePosition(locationProvider.lastLocation)
                 publishLocalDeviceMarker()
+            }
+            .onChange(of: networkDiagnostics.currentSnapshotID) { _, _ in
+                controllerWiFiSSID = networkDiagnostics.currentWiFiSSID ?? "Wi-Fi name unavailable"
                 refreshControllerRTMPURL()
-                Task { await refreshControllerWiFiSSID() }
             }
             .onChange(of: scenePhase) { _, phase in
                 updateIdleTimerPolicy(for: phase)
                 switch phase {
                 case .active:
-                    refreshControllerRTMPURL()
                     mediaMTX.ensureHealthy(captureStreams: captureStreams)
                     Task { await ridTracks.setLocalDeviceMarkerPublishingEnabled(true) }
-                    Task { await refreshControllerWiFiSSID() }
                 case .background:
                     removeLocalDeviceMarkerInBackground()
                 case .inactive:
@@ -738,7 +874,12 @@ struct ContentView: View {
                         await ridTracks.setLocalDeviceMarkerPublishingEnabled(false)
                     },
                     fullCleanup: {
+                        await bluetoothScanner.stop()
+                        locationProvider.stop()
+                        networkDiagnostics.stop()
+                        streamRegistry.shutdown()
                         await ridTracks.setLocalDeviceMarkerPublishingEnabled(false)
+                        await ridTracks.shutdown()
                         await peerCoordinator.shutdown()
                         await mediaMTX.shutdown()
                     }
@@ -748,6 +889,43 @@ struct ContentView: View {
 
     private var rootScreen: some View {
         androidParityDashboard
+    }
+
+    private var idleTimeoutFingerprint: String {
+        "\(orgConfigSettings.maximumIdleMinutes)|\(ridTracks.lastValidRIDUpdateAt?.timeIntervalSince1970 ?? 0)"
+    }
+
+    private func monitorIdleTimeout() async {
+        guard let deadline = ApplicationIdleTimeoutPolicy.deadline(
+            appStartedAt: appStartedAt,
+            lastValidRIDUpdateAt: ridTracks.lastValidRIDUpdateAt,
+            maximumIdleMinutes: orgConfigSettings.maximumIdleMinutes
+        ) else { return }
+
+        let delay = deadline.timeIntervalSinceNow
+        if delay > 0 {
+            try? await Task.sleep(for: .seconds(delay))
+        }
+        guard !Task.isCancelled,
+              ApplicationIdleTimeoutPolicy.isExpired(
+                appStartedAt: appStartedAt,
+                lastValidRIDUpdateAt: ridTracks.lastValidRIDUpdateAt,
+                maximumIdleMinutes: orgConfigSettings.maximumIdleMinutes,
+                now: Date()
+              )
+        else { return }
+
+        let baseline = max(appStartedAt, ridTracks.lastValidRIDUpdateAt ?? appStartedAt)
+        let idleMinutes = Date().timeIntervalSince(baseline) / 60
+        AppleLog.warning(
+            "Lifecycle",
+            String(
+                format: "Maximum idle timeout expired after %.3f/%.3f minutes without valid RID updates; closing the application session",
+                idleMinutes,
+                Double(orgConfigSettings.maximumIdleMinutes)
+            )
+        )
+        AppleApplicationCleanupCenter.shared.quitPrimaryWindow(reason: "maximum idle timeout")
     }
 
     private var bluetoothStatus: String {
@@ -839,6 +1017,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             androidHeaderCell("Coordinator", androidCoordinatorStatus, width: 150)
             androidHeaderCell("Team Drones", "\(droneConfirmations.importedMappingCount)", width: 110)
+            androidBridgeHeaderCell
             androidHeaderCell("", deviceVersionText, width: 190)
             androidHeaderCell("Up Time", appUptimeText, width: 100)
             androidHeaderCell("Caltopo msg rtt", caltopoRTTText, width: 145)
@@ -869,7 +1048,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
             }
-            if landRestrictions.enabled {
+            if landRestrictions.state.visible {
                 NavigationLink {
                     AppleLandRestrictionPanel(center: landRestrictions, location: locationProvider.lastLocation)
                 } label: {
@@ -950,7 +1129,7 @@ struct ContentView: View {
         HStack(spacing: 1) {
             androidGroupedHeader(top: "", bottom: "", width: 28)
             androidGroupedHeader(top: "", bottom: "Track Label:", width: 200)
-            androidGroupedHeader(top: "", bottom: "Remote ID:", width: 240)
+            androidGroupedHeader(top: "RSSI: D→Device / D→Bridge", bottom: "Remote ID:", width: 240)
             VStack(spacing: 1) {
                 Text("Waypoints Received")
                     .font(.caption.bold())
@@ -987,7 +1166,17 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .frame(width: 200, height: 42)
                 .background(Color(uiColor: .secondarySystemBackground))
-            androidTableValue(track.aircraftID, width: 240, monospaced: true)
+            VStack(spacing: 2) {
+                Text(track.aircraftID)
+                    .font(.caption.monospaced())
+                    .lineLimit(1)
+                Text(droneRSSIStatisticsText(track))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 240, height: 42)
+            .background(Color(uiColor: .secondarySystemBackground))
             androidTransportCell(track, source: .bluetoothLegacy)
             androidTransportCell(track, source: .bluetoothExtended)
             androidTableValue("\(sourceCount(track, .trackerRelay))", width: 80)
@@ -1002,14 +1191,21 @@ struct ContentView: View {
         HStack(spacing: 1) {
             androidTableValue("\(sourceCount(track, source))", width: 80)
             androidSignalBars(
-                rssi: track.lastObservation.source == source ? track.lastSignalStrengthDbm : nil
+                rssi: track.lastDirectSignalSource == source
+                    ? track.lastDirectSignalStrengthDbm : nil
             )
             .frame(width: 40, height: 42)
             .background(Color(uiColor: .secondarySystemBackground))
         }
     }
 
-    private func androidSignalBars(rssi: Int?) -> some View {
+    private func droneRSSIStatisticsText(_ track: RidAircraftTrack) -> String {
+        let direct = track.lastDirectSignalStrengthDbm.map(String.init) ?? "—"
+        let bridge = track.lastDroneToBridgeSignalStrengthDbm.map(String.init) ?? "—"
+        return "D→Device \(direct) • D→Bridge \(bridge) dBm"
+    }
+
+    private func androidSignalBars(rssi: Int?, colorByStrength: Bool = false) -> some View {
         let filled = rssi.map { value in
             if value >= -60 { return 4 }
             if value >= -70 { return 3 }
@@ -1017,13 +1213,55 @@ struct ContentView: View {
             if value >= -90 { return 1 }
             return 0
         } ?? 0
+        let filledColor: Color = if colorByStrength {
+            switch filled {
+            case 1: .red
+            case 2: .yellow
+            default: .green
+            }
+        } else {
+            .green
+        }
+        let emptyColor = colorByStrength ? Color.secondary.opacity(0.2) : Color.green.opacity(0.25)
         return HStack(alignment: .bottom, spacing: 2) {
             ForEach(0 ..< 4, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(index < filled ? Color.green : Color.green.opacity(0.25))
+                    .fill(index < filled ? filledColor : emptyColor)
                     .frame(width: 4, height: CGFloat(5 + index * 4))
             }
         }
+    }
+
+    private var androidBridgeHeaderCell: some View {
+        Button {
+            bridgeAlerts.toggleAudioMuted()
+        } label: {
+            VStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    Text("Bridge:")
+                        .font(.caption)
+                    Image(systemName: bridgeAlerts.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.caption2)
+                }
+                androidSignalBars(
+                    rssi: bluetoothScanner.bridgeSignalStrengthDbm,
+                    colorByStrength: true
+                )
+                .frame(width: 28, height: 22)
+            }
+            .frame(width: 90, height: 58)
+            .background(Color(uiColor: .secondarySystemBackground))
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Bridge signal strength")
+        .accessibilityValue(
+            [
+                bluetoothScanner.bridgeSignalStrengthDbm.map { "\($0) decibels milliwatt" }
+                    ?? "not detected",
+                bridgeAlerts.audioMuted ? "warning muted" : "warning enabled",
+            ].joined(separator: ", ")
+        )
     }
 
     private func androidHeaderCell(_ title: String, _ value: String, width: CGFloat) -> some View {
@@ -1087,6 +1325,7 @@ struct ContentView: View {
         switch peerCoordinator.status {
         case .healthy: "Tracker OK"
         case .degraded: "Tracker degraded"
+        case .unavailable: "Unavailable"
         case .standalone: "Disabled"
         case .unconfigured: "Not configured"
         case .connecting: "Connecting"
@@ -1229,6 +1468,11 @@ struct ContentView: View {
             }
             LabeledContent("Accepted track points", value: String(ridTracks.acceptedObservationCount))
             LabeledContent("Filtered observations", value: String(ridTracks.filteredObservationCount))
+            LabeledContent("Duplicate position", value: String(ridTracks.duplicatePositionFilterCount))
+            LabeledContent("Under minimum distance", value: String(ridTracks.minimumDistanceFilterCount))
+            LabeledContent("Implausible speed", value: String(ridTracks.implausibleSpeedFilterCount))
+            LabeledContent("Horizontal accuracy", value: String(ridTracks.horizontalAccuracyFilterCount))
+            LabeledContent("Invalid observation", value: String(ridTracks.invalidObservationCount))
             LabeledContent("Archived tracks", value: String(ridTracks.archivedTrackCount))
             Text(ridTracks.archiveStatus).font(.caption).foregroundStyle(.secondary)
             LabeledContent("Tracker archive", value: ridTracks.trackerArchiveStatus)
@@ -1371,6 +1615,58 @@ struct ContentView: View {
         showTrackMap = false
     }
 
+    private var activeCredentialNearExpiry: Bool {
+        guard let expiry = profileLifecycle.availableProfiles.first(where: {
+            $0.id == profileLifecycle.activeProfileID
+        })?.expiresAt else { return false }
+        return expiry > Date() && expiry.timeIntervalSinceNow <= 3_600
+    }
+
+    private func profileMenuDetail(_ profile: AppleOperationalProfileOption) -> String {
+        guard let expiry = profile.expiresAt else { return profile.description }
+        return "\(profile.description) • expires \(expiry.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private func requestCredentialProfileSwitch(_ profileID: String) {
+        guard profileID != profileLifecycle.activeProfileID else { return }
+        if ridTracks.tracks.isEmpty {
+            activateCredentialProfile(profileID)
+        } else {
+            pendingCredentialProfileID = profileID
+            showCredentialSwitchConfirmation = true
+        }
+    }
+
+    private func activateCredentialProfile(_ profileID: String) {
+        guard orgConfigImporter.activateProfile(
+            profileID,
+            caltopoSettings: caltopoSettings,
+            orgSettings: orgConfigSettings
+        ) else { return }
+        applyCaltopoConfiguration(caltopoSettings.configuration)
+    }
+
+    private func enforceMutualAidExpiryAtDeadline() async {
+        guard let expiry = profileLifecycle.mutualAidExpiresAt else { return }
+        let delaySeconds = max(0, expiry.timeIntervalSinceNow)
+        if delaySeconds > 0 {
+            let maximumSeconds = Double(UInt64.max) / 1_000_000_000
+            let nanoseconds = UInt64(min(delaySeconds, maximumSeconds) * 1_000_000_000)
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+        }
+        guard !Task.isCancelled else { return }
+        if orgConfigImporter.removeExpiredProfiles(
+            caltopoSettings: caltopoSettings,
+            orgSettings: orgConfigSettings
+        ) {
+            applyCaltopoConfiguration(caltopoSettings.configuration)
+        }
+    }
+
     private func openCaltopoMapActions() {
         if caltopoSettings.teamID.isEmpty
             || caltopoSettings.credentialID.isEmpty
@@ -1412,6 +1708,8 @@ struct ContentView: View {
             locationStatus: locationProvider.statusText,
             configSource: orgConfigSettings.sourceDescription,
             organization: orgConfigSettings.organizationName,
+            hasManagedTrackerEnrollment: orgConfigSettings.hasManagedTrackerEnrollment,
+            notamProxyStatus: notams.state.errorMessage ?? notams.state.statusLine,
             incident: orgConfigSettings.incident,
             operationalPeriod: orgConfigSettings.operationalPeriod,
             trackerStatus: peerCoordinator.status.rawValue,
@@ -1422,6 +1720,11 @@ struct ContentView: View {
             activeAircraft: ridTracks.tracks.count,
             acceptedTrackPoints: ridTracks.acceptedObservationCount,
             filteredObservations: ridTracks.filteredObservationCount,
+            duplicatePositionFilters: ridTracks.duplicatePositionFilterCount,
+            minimumDistanceFilters: ridTracks.minimumDistanceFilterCount,
+            implausibleSpeedFilters: ridTracks.implausibleSpeedFilterCount,
+            horizontalAccuracyFilters: ridTracks.horizontalAccuracyFilterCount,
+            invalidObservationFilters: ridTracks.invalidObservationCount,
             archivedTracks: ridTracks.archivedTrackCount,
             mediaMTXStatus: mediaMTX.status,
             videoStatus: videoStatus,
@@ -1482,7 +1785,7 @@ struct ContentView: View {
         switch peerCoordinator.status {
         case .healthy, .standalone: color = "#2e7d32"
         case .connecting: color = "#f9a825"
-        case .degraded: color = "#c62828"
+        case .degraded, .unavailable: color = "#c62828"
         case .unconfigured: color = "#757575"
         }
         ridTracks.publishLocalDeviceMarker(
@@ -1543,7 +1846,8 @@ struct ContentView: View {
             identityProvider: droneConfirmations.identity,
             alertEligibility: demoAlerts ? { _ in true } : peerCoordinator.isLocalAlertEligible,
             bridgeCheckDistanceFeet: Double(orgConfigSettings.bridgeCheckDistanceFeet),
-            maximumTrackDelaySeconds: Double(orgConfigSettings.newTrackDelaySeconds)
+            maximumTrackDelaySeconds: Double(orgConfigSettings.newTrackDelaySeconds),
+            bridgeLastSeenAt: bluetoothScanner.bridgeLastSeenAt
         )
     }
 
@@ -1588,6 +1892,10 @@ struct ContentView: View {
     private func monitorOperationalState() async {
         while !Task.isCancelled {
             updateOperationalAlerts()
+            bridgeAlerts.update(
+                monitoringActive: bluetoothScanner.state == .scanning && !ridTracks.tracks.isEmpty,
+                lastPingAt: bluetoothScanner.bridgeLastSeenAt
+            )
             if !ProcessInfo.processInfo.arguments.contains("--demo-notam") {
                 notams.update(location: locationProvider.lastLocation)
                 airspace.update(location: locationProvider.lastLocation)
@@ -1597,7 +1905,8 @@ struct ContentView: View {
                 "Altitude Limit Exceeded: " + ($0.mappedID.isEmpty ? $0.remoteID : $0.mappedID)
             }
             let signalText = operationalAlerts.signalLossAlerts.first.map {
-                "Drone Signal Lost: " + ($0.mappedID.isEmpty ? $0.remoteID : $0.mappedID)
+                ($0.bridgeRecentlySeen ? "Drone Location Stale: " : "Drone Signal Lost: ")
+                    + ($0.mappedID.isEmpty ? $0.remoteID : $0.mappedID)
             }
             let proximityText = proximityAlerts.activeAlert.map { _ in "Aircraft Proximity Alert" }
             AppleExternalDisplayData.shared.update(
@@ -1649,16 +1958,6 @@ struct ContentView: View {
                     "No usable Wi-Fi/Ethernet IPv4 address for controller RTMP interfaces=\(interfaces)"
                 )
             }
-        }
-    }
-
-    private func refreshControllerWiFiSSID() async {
-        if let ssid = await AppleNetworkAddress.currentWiFiSSID() {
-            controllerWiFiSSID = ssid
-            AppleLog.info("Network", "Current Wi-Fi network: \(ssid)")
-        } else {
-            controllerWiFiSSID = "Wi-Fi name unavailable"
-            AppleLog.warning("Network", "Current Wi-Fi SSID unavailable; Access Wi-Fi Information and Precise Location are required")
         }
     }
 

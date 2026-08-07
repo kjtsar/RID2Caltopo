@@ -3,10 +3,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.assertSame
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.CtDroneSpec
+import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
 
 class ClueCaptureSummaryTest {
     @Test
-    fun buildClueCaptureSummary_includesUsngForClueWaypoint() {
+    fun buildClueCaptureSummary_usesPreferredUsngAndRetainsDecimal() {
         val summary = buildClueCaptureSummary(
             PendingClue(
                 droneSpec = CtDroneSpec("RID123"),
@@ -27,10 +28,12 @@ class ClueCaptureSummaryTest {
                 preview = null,
                 title = "Clue",
                 description = ""
-            )
+            ),
+            CoordinateDisplayFormat.USNG,
         )
 
-        assertTrue(summary.contains("  USNG: 18S VK "))
+        assertTrue(summary.contains("  Position (USNG): 18S VK "))
+        assertTrue(summary.contains("  Decimal: 39.952600, -75.165200"))
         assertTrue(summary.contains("  Gimbal angle at capture: -45.0°"))
         assertTrue(summary.contains("  AGL: 82'"))
         assertTrue(summary.contains("  ATO: 131'"))

@@ -51,6 +51,19 @@ public final class ManagedVideoMediaPeer implements AutoCloseable {
     private static final String TAG = "ManagedVideoMedia";
     private static final long PARTIAL_ICE_ANSWER_DELAY_MS = 2_500L;
     private static final long MEDIA_ANSWER_TIMEOUT_MS = 15_000L;
+
+    static int minimumBitrateForTarget(long targetBitrateBps) {
+        return (int) Math.min(Math.max(1L, targetBitrateBps), 100_000L);
+    }
+
+    static int startupBitrateForTarget(long targetBitrateBps) {
+        int target = (int) Math.min(
+                Integer.MAX_VALUE,
+                Math.max(1L, targetBitrateBps));
+        return Math.min(
+                target,
+                Math.max(200_000, Math.min(750_000, target / 5)));
+    }
     public interface Sink {
         void sendAnswer(@NonNull String requestId, @NonNull String sdp);
         void onMetrics(@NonNull Metrics metrics);
@@ -254,7 +267,8 @@ public final class ManagedVideoMediaPeer implements AutoCloseable {
         if (sender == null) return;
         RtpParameters parameters = sender.getParameters();
         int target = (int) Math.min(Integer.MAX_VALUE, selectedBitrateBps);
-        int minimum = Math.max(100_000, target * 60 / 100);
+        int minimum = minimumBitrateForTarget(target);
+        int startup = startupBitrateForTarget(target);
         for (RtpParameters.Encoding encoding : parameters.encodings) {
             encoding.minBitrateBps = minimum;
             encoding.maxBitrateBps = target;
@@ -264,12 +278,13 @@ public final class ManagedVideoMediaPeer implements AutoCloseable {
         parameters.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION;
         boolean senderApplied = sender.setParameters(parameters);
         PeerConnection activePeer = peer;
-        boolean bweApplied = activePeer != null && activePeer.setBitrate(minimum, target, target);
+        boolean bweApplied = activePeer != null && activePeer.setBitrate(
+                minimum, startup, target);
         CaltopoClient.CTDebug(
                 TAG,
                 "Sender target request=" + requestId + " " + selectedWidth + "x"
                         + selectedHeight + "@" + selectedFps
-                        + " bitrate min/current/max=" + minimum + "/" + target + "/" + target
+                        + " bitrate min/current/max=" + minimum + "/" + startup + "/" + target
                         + " degradation=maintain-resolution scale=1.0"
                         + " senderApplied=" + senderApplied + " bweApplied=" + bweApplied);
     }

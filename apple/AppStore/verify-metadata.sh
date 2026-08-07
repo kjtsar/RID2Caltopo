@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="${0:A:h}"
+repo_root="${script_dir:h:h}"
 locale_dir="$script_dir/metadata/en-US"
 marketing_version=""
 
@@ -10,7 +11,7 @@ usage() {
 usage: apple/AppStore/verify-metadata.sh [--marketing-version VERSION]
 
 When a marketing version is supplied, metadata/en-US/whats_new.txt must match
-release-notes/VERSION.txt exactly.
+the repository's release-notes/VERSION/whats_new.txt exactly.
 USAGE
 }
 
@@ -51,8 +52,12 @@ rg -q '^Latest changes:$' "$whats_new" || {
     echo "What's new must contain a 'Latest changes:' section." >&2
     exit 1
 }
-rg -q '^Remaining Android differences:$' "$whats_new" || {
-    echo "What's new must contain a 'Remaining Android differences:' section." >&2
+rg -q '^Platform-specific changes:$' "$whats_new" || {
+    echo "What's new must contain a 'Platform-specific changes:' section." >&2
+    exit 1
+}
+rg -q '^Known platform differences:$' "$whats_new" || {
+    echo "What's new must contain a 'Known platform differences:' section." >&2
     exit 1
 }
 
@@ -61,14 +66,23 @@ if [[ -n "$marketing_version" ]]; then
         echo "Invalid marketing version: $marketing_version" >&2
         exit 2
     }
-    version_notes="$script_dir/release-notes/$marketing_version.txt"
+    version_notes="$repo_root/release-notes/$marketing_version/whats_new.txt"
     [[ -s "$version_notes" ]] || {
         echo "Missing release notes for version $marketing_version: $version_notes" >&2
         exit 1
     }
     cmp -s "$version_notes" "$whats_new" || {
-        echo "What's new does not match release-notes/$marketing_version.txt" >&2
-        echo "Copy the reviewed version notes to metadata/en-US/whats_new.txt before release." >&2
+        echo "What's new does not match release-notes/$marketing_version/whats_new.txt" >&2
+        echo "Run tools/sync_release_notes.sh $marketing_version before release." >&2
+        exit 1
+    }
+    project_file="$repo_root/apple/RID2CaltopoApple.xcodeproj/project.pbxproj"
+    grep -Fq "MARKETING_VERSION = $marketing_version;" "$project_file" || {
+        echo "The Apple MARKETING_VERSION does not match canonical release notes $marketing_version." >&2
+        exit 1
+    }
+    grep -Fq "path = ../release-notes/$marketing_version/whats_new.txt;" "$project_file" || {
+        echo "The Apple app does not bundle the canonical $marketing_version release notes." >&2
         exit 1
     }
     echo "  release notes: version $marketing_version"

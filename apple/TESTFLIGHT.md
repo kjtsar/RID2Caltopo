@@ -26,10 +26,11 @@ install RID2Caltopo like any other beta application.
 
 ## Reproducible build and upload
 
-Create `AppStore/release-notes/<version>.txt` for every release. It must contain
-both `Latest changes:` and `Remaining Android differences:` sections. After
-review, copy that exact text to `AppStore/metadata/en-US/whats_new.txt`; the
-release gate rejects missing, stale, or mismatched version notes.
+Create `../release-notes/<version>/whats_new.txt` for every release. It must
+contain `Latest changes:`, `Platform-specific changes:`, and
+`Known platform differences:` sections. After review, run
+`tools/sync_release_notes.sh <version>`; the release gate rejects missing,
+stale, mismatched, or incorrectly bundled notes.
 
 Review the checked-in App Store wording and verify Apple's text limits first:
 

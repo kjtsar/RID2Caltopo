@@ -175,6 +175,7 @@ internal fun buildArtifactHydrationResult(
     snapshot: Collection<JSONObject>,
     hiddenFolderIds: Set<String> = emptySet(),
     hiddenItemIds: Set<String> = emptySet(),
+    folderVisibilityOverrides: Map<String, Boolean> = emptyMap(),
     progressInterval: Int = 100,
     pilotArchiveTrackColorForCallsign: (String) -> String? = { null },
     onProgress: (ArtifactHydrationProgress) -> Unit = {}
@@ -216,13 +217,43 @@ internal fun buildArtifactHydrationResult(
         featuresById = featuresById,
         overlayState = buildArtifactOverlayState(
             featuresById.values,
-            hiddenFolderIds + serverHiddenFolderIds,
+            resolveHiddenFolderIds(
+                localHiddenFolderIds = hiddenFolderIds,
+                defaultHiddenFolderIds = serverHiddenFolderIds,
+                operatorVisibilityOverrides = folderVisibilityOverrides
+            ),
             hiddenItemIds,
             pilotArchiveTrackColorForCallsign
         ),
         folderDefaults = folderDefaults,
         serverHiddenFolderIds = serverHiddenFolderIds
     )
+}
+
+/**
+ * Resolves server/default folder visibility without overwriting an explicit operator
+ * choice made during the active map session.
+ */
+internal fun resolveHiddenFolderIds(
+    localHiddenFolderIds: Set<String>,
+    defaultHiddenFolderIds: Set<String>,
+    operatorVisibilityOverrides: Map<String, Boolean>
+): Set<String> {
+    val resolved = (localHiddenFolderIds + defaultHiddenFolderIds).toMutableSet()
+    operatorVisibilityOverrides.forEach { (folderId, visible) ->
+        if (visible) resolved.remove(folderId) else resolved.add(folderId)
+    }
+    return resolved
+}
+
+internal fun folderHiddenAfterDefault(
+    currentlyHidden: Boolean,
+    defaultVisible: Boolean,
+    operatorVisibilityOverride: Boolean?
+): Boolean = when (operatorVisibilityOverride) {
+    true -> false
+    false -> true
+    null -> currentlyHidden || !defaultVisible
 }
 
 internal fun movedDroneFolderMarkerIds(

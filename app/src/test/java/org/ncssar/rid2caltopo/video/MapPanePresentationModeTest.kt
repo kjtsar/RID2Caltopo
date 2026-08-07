@@ -182,6 +182,44 @@ class MapPanePresentationModeTest {
     }
 
     @Test
+    fun operatorPanOrZoom_releasesFocusedDroneOnlyOnInteractiveMap() {
+        listOf(OperatorMapGesture.Pan, OperatorMapGesture.Zoom).forEach { gesture ->
+            assertTrue(
+                shouldReleaseFocusedDroneForMapGesture(
+                    presentationMode = MapPanePresentationMode.Full,
+                    hasFocusedDrone = true,
+                    gesture = gesture
+                )
+            )
+            assertFalse(
+                shouldReleaseFocusedDroneForMapGesture(
+                    presentationMode = MapPanePresentationMode.Inset,
+                    hasFocusedDrone = true,
+                    gesture = gesture
+                )
+            )
+        }
+    }
+
+    @Test
+    fun operatorTapOrMissingFocus_doesNotReleaseDroneFocus() {
+        assertFalse(
+            shouldReleaseFocusedDroneForMapGesture(
+                presentationMode = MapPanePresentationMode.Full,
+                hasFocusedDrone = true,
+                gesture = OperatorMapGesture.Tap
+            )
+        )
+        assertFalse(
+            shouldReleaseFocusedDroneForMapGesture(
+                presentationMode = MapPanePresentationMode.Full,
+                hasFocusedDrone = false,
+                gesture = OperatorMapGesture.Pan
+            )
+        )
+    }
+
+    @Test
     fun mapPaneArtifactMountPolicy_keepsInsetMapLightweight() {
         assertFalse(
             mapPaneShouldReplayCachedArtifacts(

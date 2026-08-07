@@ -5,6 +5,15 @@ import org.junit.Test
 
 class StreamPipInsetFrameTest {
     @Test
+    fun streamClueCaptureButton_isVisibleOnlyForInteractiveLiveStreams() {
+        assertEquals(true, shouldShowStreamClueCaptureButton(true, false, StreamState.LIVE))
+        assertEquals(false, shouldShowStreamClueCaptureButton(false, false, StreamState.LIVE))
+        assertEquals(false, shouldShowStreamClueCaptureButton(true, true, StreamState.LIVE))
+        assertEquals(false, shouldShowStreamClueCaptureButton(true, false, StreamState.CONNECTING))
+        assertEquals(false, shouldShowStreamClueCaptureButton(true, false, StreamState.ERROR))
+    }
+
+    @Test
     fun streamPipInsetSize_matchesLandscapeFullFrameAspectRatio() {
         val size = streamPipInsetSize(
             maxWidth = 1000f,

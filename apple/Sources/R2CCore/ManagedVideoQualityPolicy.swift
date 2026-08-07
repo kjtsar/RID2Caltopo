@@ -20,6 +20,12 @@ public struct ManagedVideoQualityOption: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct ManagedVideoSenderBitrates: Equatable, Sendable {
+    public let minimumBps: Int64
+    public let startupBps: Int64
+    public let maximumBps: Int64
+}
+
 public enum ManagedVideoQualityPolicy {
     private struct Preset {
         let name: String
@@ -109,6 +115,22 @@ public enum ManagedVideoQualityPolicy {
             capacity: .fallback
         )
         return adjusted
+    }
+
+    public static func senderBitrates(targetBps: Int64) -> ManagedVideoSenderBitrates {
+        let target = max(1, targetBps)
+        return ManagedVideoSenderBitrates(
+            minimumBps: min(target, 100_000),
+            startupBps: min(target, max(200_000, min(750_000, target / 5))),
+            maximumBps: target
+        )
+    }
+
+    public static func shouldPresentApproval(
+        routeKind: String?,
+        failure: String?
+    ) -> Bool {
+        routeKind?.isEmpty == false || failure?.isEmpty == false
     }
 
     private static func evenSize(width: Int, height: Int) -> (Int, Int) {

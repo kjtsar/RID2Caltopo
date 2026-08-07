@@ -2,6 +2,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 
 class DroneAltitudeCoordinatorTest {
     @Test
@@ -106,11 +107,11 @@ class DroneAltitudeCoordinatorTest {
             demScaleToMeters = demScaleToMeters,
         )
 
-        assertEquals(-2.6, aglWithoutAto, 0.000001)
+        assertEquals(0.0, aglWithoutAto, 0.000001)
     }
 
     @Test
-    fun calculateDemBackedAglMeters_allowsNegativeDemResult() {
+    fun calculateDemBackedAglMeters_clampsNegativeDemResultToGroundLevel() {
         val calibration = DroneAltitudeCalibration(100.0, AtoSeedSource.AUTO_SEALED)
 
         val aglMeters = DroneAltitudeCoordinator.calculateDemBackedAglMeters(
@@ -122,6 +123,38 @@ class DroneAltitudeCoordinatorTest {
             demScaleToMeters = 1.0,
         )
 
-        assertEquals(-0.9144, aglMeters, 0.000001)
+        assertEquals(0.0, aglMeters, 0.000001)
+    }
+
+    @Test
+    fun demPositionSamplingKeyChangesWithinOneArcSecondCell() {
+        val first = DemElevationService.positionSamplingKey(39.153600, -121.132110)
+        val nearby = DemElevationService.positionSamplingKey(39.153620, -121.132090)
+
+        assertFalse(first == nearby)
+    }
+
+    @Test
+    fun sealedCorrectionUsesTakeoffTerrainAndPreservesExistingWhenUnavailable() {
+        assertEquals(
+            -20.78,
+            DroneAltitudeCoordinator.refinedCorrectionFromTakeoffDem(
+                takeoffTrackAltitudeM = 523.5,
+                takeoffDemGroundRaw = 544.28,
+                demScaleToMeters = 1.0,
+                existingCorrectionM = -8.2,
+            )!!,
+            0.000001,
+        )
+        assertEquals(
+            -8.2,
+            DroneAltitudeCoordinator.refinedCorrectionFromTakeoffDem(
+                takeoffTrackAltitudeM = 523.5,
+                takeoffDemGroundRaw = null,
+                demScaleToMeters = 1.0,
+                existingCorrectionM = -8.2,
+            )!!,
+            0.000001,
+        )
     }
 }

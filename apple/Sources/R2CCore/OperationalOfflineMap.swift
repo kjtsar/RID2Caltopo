@@ -35,6 +35,17 @@ public struct OperationalOfflineTile: Sendable, Hashable {
     }
 }
 
+public enum OperationalMapTileLayerState {
+    public static func fingerprint(
+        baseLayer: OperationalMapBaseLayer,
+        contours: Bool,
+        offlineOnly: Bool,
+        revision: Int
+    ) -> String {
+        "\(baseLayer.rawValue)|\(contours)|\(offlineOnly)|\(revision)"
+    }
+}
+
 public enum OperationalVisibleMapTile {
     public static func zoomLevel(
         worldMapWidth: Double,
@@ -163,6 +174,7 @@ public enum OperationalOfflineMapPlanner {
 
 public struct OperationalSignalLossInput: Sendable, Equatable {
     public let signalIdleSeconds: Double
+    public let trackTelemetryIdleSeconds: Double
     public let learnedIntervalSeconds: Double?
     public let learnedSamples: Int
     public let distanceFromDeviceFeet: Double
@@ -173,6 +185,7 @@ public struct OperationalSignalLossInput: Sendable, Equatable {
 
     public init(
         signalIdleSeconds: Double,
+        trackTelemetryIdleSeconds: Double? = nil,
         learnedIntervalSeconds: Double?,
         learnedSamples: Int,
         distanceFromDeviceFeet: Double,
@@ -182,6 +195,7 @@ public struct OperationalSignalLossInput: Sendable, Equatable {
         hasPreviouslyExceededBridgeDistance: Bool
     ) {
         self.signalIdleSeconds = signalIdleSeconds
+        self.trackTelemetryIdleSeconds = trackTelemetryIdleSeconds ?? signalIdleSeconds
         self.learnedIntervalSeconds = learnedIntervalSeconds
         self.learnedSamples = learnedSamples
         self.distanceFromDeviceFeet = distanceFromDeviceFeet
@@ -211,7 +225,11 @@ public enum OperationalSignalLossPolicy {
         let returnedToDevice = input.distanceFromDeviceFeet <= input.bridgeCheckDistanceFeet
         let returnedToTakeoff = input.distanceFromTakeoffFeet.map { $0 <= 30 } ?? false
         return OperationalSignalLossDecision(
-            alert: exceeded && !returnedToDevice && !returnedToTakeoff && input.signalIdleSeconds > threshold,
+            alert: exceeded
+                && !returnedToDevice
+                && !returnedToTakeoff
+                && input.signalIdleSeconds > threshold
+                && input.trackTelemetryIdleSeconds > threshold,
             hasExceededBridgeDistance: exceeded,
             idleThresholdSeconds: threshold
         )

@@ -23,7 +23,28 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 15
+    const val SCHEMA_VERSION = 16
+
+    internal data class LandRestrictionDefaults(
+        val enabled: Boolean,
+        val showOnMap: Boolean,
+        val autoRefresh: Boolean,
+        val radiusStatuteMiles: Int
+    )
+
+    internal fun resolveLandRestrictionDefaults(config: AppConfig): LandRestrictionDefaults {
+        val hasPersistedSelection = config.schemaVersion >= 14 && config.hasLandRestrictions()
+        return LandRestrictionDefaults(
+            enabled = if (hasPersistedSelection) config.landRestrictions.enabled else true,
+            showOnMap = if (hasPersistedSelection) config.landRestrictions.showOnMap else true,
+            autoRefresh = if (hasPersistedSelection) config.landRestrictions.autoRefresh else true,
+            // radius_nm is the legacy wire/storage name. Android now treats the
+            // operator-facing value as statute miles and converts only at query time.
+            radiusStatuteMiles = config.landRestrictions.radiusNm.takeIf {
+                hasPersistedSelection && it in 1..50
+            } ?: 1
+        )
+    }
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -253,6 +274,7 @@ object AppConfigStore {
         if (config.trackerApiKey.isNotBlank()) return true
         if (config.trackerUrlPrefix.isNotBlank()) return true
         if (config.trackerFaaProxyUrl.isNotBlank()) return true
+        if (config.trackerEnrollmentUrl.isNotBlank()) return true
         if (config.archiveLocation.treeUri.isNotBlank()) return true
         if (config.archiveLocation.selectionHintUri.isNotBlank()) return true
         if (config.archiveLocation.requiresRegrant) return true
@@ -269,6 +291,7 @@ object AppConfigStore {
         if (config.notam.lastUpdatedEpochMs != 0L) return true
         if (config.faaRemoteConfig.token.isNotBlank()) return true
         if (config.faaRemoteConfig.payloadEnc.isNotBlank()) return true
+        if (config.hasLandRestrictions()) return true
         if (config.ridMappingsCount > 0) return true
         if (config.loadedConfigFilesCount > 0) return true
         if (config.mutualAidTemplate.teamId.isNotBlank()) return true
@@ -322,6 +345,7 @@ object AppConfigStore {
         state.trackerApiKey = activeProfile?.trackerApiKey ?: config.trackerApiKey
         state.trackerUrlPfx = activeProfile?.trackerUrlPfx ?: config.trackerUrlPrefix
         state.trackerFaaProxyUrl = config.trackerFaaProxyUrl
+        state.trackerEnrollmentUrl = config.trackerEnrollmentUrl
         state.coordinateDisplayFormat = config.coordinateDisplayFormat.ifBlank { "decimal" }
         state.captureVideoStreamsFlag = config.captureVideoStreams
         state.usePeersFlag = config.usePeers
@@ -351,10 +375,11 @@ object AppConfigStore {
         state.notamClientSecret = config.notam.clientSecret
         state.notamScope = config.notam.scope
         state.notamLastUpdatedEpochMs = config.notam.lastUpdatedEpochMs
-        state.landRestrictionsEnabled = if (config.schemaVersion >= 14) config.landRestrictions.enabled else true
-        state.landRestrictionsShowOnMap = if (config.schemaVersion >= 14) config.landRestrictions.showOnMap else true
-        state.landRestrictionsAutoRefresh = if (config.schemaVersion >= 14) config.landRestrictions.autoRefresh else true
-        state.landRestrictionsRadiusNm = config.landRestrictions.radiusNm.takeIf { it in 1..50 } ?: 5
+        val landRestrictionDefaults = resolveLandRestrictionDefaults(config)
+        state.landRestrictionsEnabled = landRestrictionDefaults.enabled
+        state.landRestrictionsShowOnMap = landRestrictionDefaults.showOnMap
+        state.landRestrictionsAutoRefresh = landRestrictionDefaults.autoRefresh
+        state.landRestrictionsRadiusNm = landRestrictionDefaults.radiusStatuteMiles
         state.landRestrictionsLastUpdatedEpochMs = config.landRestrictions.lastUpdatedEpochMs
         state.faaRemoteToken = config.faaRemoteConfig.token
         state.faaConfigLabel = config.faaRemoteConfig.label
@@ -442,6 +467,7 @@ object AppConfigStore {
             .setTrackerApiKey(activeProfile.trackerApiKey)
             .setTrackerUrlPrefix(activeProfile.trackerUrlPfx)
             .setTrackerFaaProxyUrl(state.trackerFaaProxyUrl ?: "")
+            .setTrackerEnrollmentUrl(state.trackerEnrollmentUrl ?: "")
             .setNotam(
                 AppConfig.NotamConfig.newBuilder()
                     .setEnabled(state.notamEnabled)

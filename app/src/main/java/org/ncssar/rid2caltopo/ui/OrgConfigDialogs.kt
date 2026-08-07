@@ -9,6 +9,7 @@ package org.ncssar.rid2caltopo.ui
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -27,9 +28,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
@@ -40,6 +40,7 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigToken
@@ -163,9 +164,9 @@ fun OrgConfigExportDialog(
                     is ExportStep.EnterName -> {
                         Text(
                             "The app will upload your current " +
-                                "ridmap and credentials to Google Drive and generate a QR " +
-                                "code team members can scan to receive the org config. " +
-                                "Credentials are encrypted before upload.",
+                                "drone mappings and Teams configuration to Google Drive and " +
+                                "generate an R2C2 QR. Each receiving device redeems the saved " +
+                                "r2c-tracker enrollment locator for its own credential.",
                             style = MaterialTheme.typography.bodySmall
                         )
                         Spacer(Modifier.height(12.dp))
@@ -181,17 +182,15 @@ fun OrgConfigExportDialog(
 
                     is ExportStep.ShowQr -> {
                         Text(
-                            "Share this QR with your team. Each member scans it once " +
-                                "using Menu → Import Org.",
+                            "Share this R2C2 QR with your team. The tracker enrollment campaign " +
+                                "must have one remaining redemption for each receiving device.",
                             style = MaterialTheme.typography.bodySmall,
                             textAlign = TextAlign.Center
                         )
                         Spacer(Modifier.height(12.dp))
                         QrCodeImage(
-                            // Encode as r2c1:// URI so the OS camera dispatches
-                            // it directly to this app rather than showing "no app
-                            // found".  The payload is the opaque part after R2C1:.
-                            content = "r2c1://" + s.token.removePrefix(OrgConfigToken.MAGIC_PREFIX),
+                            content = "${OrgConfigToken.QR_SCHEME}://" +
+                                s.token.removePrefix(OrgConfigToken.MAGIC_PREFIX),
                             modifier = Modifier.size(240.dp)
                         )
                         Spacer(Modifier.height(12.dp))
@@ -598,15 +597,15 @@ fun MutualAidExportDialog(
 /**
  * Single-step dialog shown for importing shared configuration.
  *
- * The user scans or pastes an org, FAA, or MA token, or chooses a packaged MA
- * config file. Tokens are validated in real time and routed to the matching
- * config manager when confirmed.
+ * The user scans or pastes an org, FAA, or MA token, or chooses a JSON config
+ * or packaged MA config file. Tokens are validated in real time and routed to
+ * the matching config manager when confirmed.
  *
  * [onDismiss] is called when the dialog should close.
  * [onJoin] is called with the normalized org token when confirmed.
  * [onFaaJoin] is called with the normalized FAA token when confirmed.
  * [onMutualAidJoin] is called with the normalized MA token when confirmed.
- * [onPickFile] is called when the user chooses an MA package file.
+ * [onPickFile] is called when the user chooses a JSON config or MA package file.
  */
 @Composable
 fun ImportConfigDialog(
@@ -628,13 +627,24 @@ fun ImportConfigDialog(
     }
     val isValid = orgDecoded != null || faaDecoded != null || mutualAidDecoded != null || trackerEnrollment
 
-    val scanner = remember(context) {
-        GmsBarcodeScanning.getClient(
-            context,
-            GmsBarcodeScannerOptions.Builder()
-                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                .build()
-        )
+    var scannerOpening by remember { mutableStateOf(false) }
+    val scannerOptions = remember {
+        ScanOptions()
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setPrompt("Scan an RID2Caltopo configuration QR code")
+            .setBeepEnabled(false)
+            .setBarcodeImageEnabled(false)
+            .setOrientationLocked(false)
+    }
+    val scannerLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        scannerOpening = false
+        val raw = result.contents
+        if (raw.isNullOrBlank()) {
+            CaltopoClient.CTDebug("ImportConfig", "Bundled QR scanner cancelled by operator.")
+        } else {
+            CaltopoClient.CTDebug("ImportConfig", "Bundled QR scanner returned an import payload.")
+            tokenText = normalizeImportToken(raw)
+        }
     }
 
     AlertDialog(
@@ -643,7 +653,7 @@ fun ImportConfigDialog(
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "Scan an r2c-tracker enrollment QR code. Legacy config tokens and MA packages remain available for migration.",
+                    "Scan an R2C2 organization QR or a direct r2c-tracker enrollment QR. R2C1 organization tokens are no longer accepted.",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Spacer(Modifier.height(12.dp))
@@ -655,24 +665,48 @@ fun ImportConfigDialog(
                     singleLine = false,
                     isError = tokenText.isNotBlank() && !isValid,
                     trailingIcon = {
-                        IconButton(onClick = {
-                            scanner.startScan()
-                                .addOnSuccessListener { barcode ->
-                                    val raw = barcode.rawValue ?: return@addOnSuccessListener
-                                    tokenText = normalizeImportToken(raw)
+                        IconButton(
+                            enabled = !scannerOpening,
+                            onClick = {
+                                CaltopoClient.CTDebug(
+                                    "ImportConfig",
+                                    "Bundled QR scanner requested from Import Config dialog."
+                                )
+                                scannerOpening = true
+                                try {
+                                    scannerLauncher.launch(scannerOptions)
+                                } catch (error: Exception) {
+                                    scannerOpening = false
+                                    CaltopoClient.CTWarn(
+                                        "ImportConfig",
+                                        "Bundled QR scanner could not open.",
+                                        error
+                                    )
+                                    CaltopoClient.ShowToast(
+                                        "QR scanner could not open. You can paste the import token instead."
+                                    )
                                 }
-                                .addOnFailureListener { /* user cancelled or scan failed — leave field as-is */ }
-                        }) {
-                            Icon(
-                                imageVector = Icons.Filled.QrCodeScanner,
-                                contentDescription = "Scan QR code"
-                            )
+                            }
+                        ) {
+                            if (scannerOpening) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Filled.QrCodeScanner,
+                                    contentDescription = "Scan QR code"
+                                )
+                            }
                         }
                     },
                     supportingText = {
                         when {
-                            tokenText.isBlank() -> Text("Scan QR, paste token, or choose an MA package file")
-                            orgDecoded != null -> Text("Org: ${orgDecoded.orgName}")
+                            tokenText.isBlank() -> Text("Scan QR, paste token, or choose a JSON/MA package file")
+                            orgDecoded != null -> Text(
+                                "Organization Teams config: ${orgDecoded.orgName} (tracker access verified after import)"
+                            )
                             faaDecoded != null -> Text(
                                 "FAA: ${faaDecoded.label.ifBlank { "Shared NOTAM credentials" }}"
                             )
@@ -715,8 +749,8 @@ fun ImportConfigDialog(
 private fun normalizeImportToken(raw: String): String {
     val trimmed = raw.trim()
     return when {
-        trimmed.startsWith("r2c1://") ->
-            OrgConfigToken.MAGIC_PREFIX + trimmed.removePrefix("r2c1://")
+        trimmed.startsWith("${OrgConfigToken.QR_SCHEME}://") ->
+            OrgConfigToken.MAGIC_PREFIX + trimmed.removePrefix("${OrgConfigToken.QR_SCHEME}://")
         trimmed.startsWith("${FaaConfigToken.QR_SCHEME}://") ->
             FaaConfigToken.fromQrUri(trimmed) ?: trimmed
         trimmed.startsWith("r2cma1://") ->

@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.video
 
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.NetworkDiagnostics
 
 data class UpstreamBoundaryMarker(
     val designator: String,
@@ -77,7 +78,7 @@ object UpstreamTimingRegistry {
                 "sincePreviousMs=${sincePreviousMs ?: -1L} publisherConnId=${marker.publisherConnId} " +
                 "previousPublisherConnId=${marker.previousPublisherConnId} " +
                 "publisherRotated=${marker.publisherRotated} rotationSeq=${marker.rotationSequence} " +
-                "reason=${marker.reason}"
+                "reason=${marker.reason} networkSnapshotId=${NetworkDiagnostics.getCurrentSnapshotId()}"
         )
         return marker
     }

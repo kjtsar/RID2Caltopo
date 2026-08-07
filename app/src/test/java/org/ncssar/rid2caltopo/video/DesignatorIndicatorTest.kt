@@ -63,9 +63,16 @@ class DesignatorIndicatorTest {
     @Test
     fun telemetryChipText_describesUnpairedAndPairedStreams() {
         assertEquals(
-            "No Telemetry",
+            "Pair Telemetry",
             telemetryChipTextFor(
                 designatorState = DesignatorState.Yellow(emptyMap()),
+                display = null
+            )
+        )
+        assertEquals(
+            "No Telemetry",
+            telemetryChipTextFor(
+                designatorState = DesignatorState.Red,
                 display = null
             )
         )

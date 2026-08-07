@@ -331,7 +331,8 @@ internal fun telemetryChipTextFor(
     display: DroneDisplayState?
 ): String = when (designatorState) {
     is DesignatorState.Green -> formatCompactTelemetry(display)
-    else -> "No Telemetry"
+    is DesignatorState.Yellow -> "Pair Telemetry"
+    DesignatorState.Red -> "No Telemetry"
 }
 
 internal fun formatLiveState(

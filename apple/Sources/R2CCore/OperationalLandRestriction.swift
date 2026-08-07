@@ -167,8 +167,9 @@ public enum OperationalLandRestriction {
     public static func queryURL(
         source: OperationalLandSource,
         center: OperationalLandCoordinate,
-        radiusNM: Double
+        radiusStatuteMiles: Double
     ) -> URL? {
+        let radiusNM = radiusStatuteMiles * 0.868976
         let latitudeDelta = radiusNM / 60
         let longitudeDelta = radiusNM / max(1, 60 * cos(center.latitude * .pi / 180))
         let envelope = [

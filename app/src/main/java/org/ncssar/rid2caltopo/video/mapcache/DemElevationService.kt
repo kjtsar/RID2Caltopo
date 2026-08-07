@@ -37,6 +37,14 @@ internal class DemElevationService(context: Context) {
         private val epqsRateGateLock = Any()
         @Volatile
         private var nextEpqsRequestAtMs = 0L
+
+        internal fun positionSamplingKey(lat: Double, lng: Double): String {
+            // About one metre in latitude: frequent enough to expose the GeoTIFF sampler's
+            // bilinear interpolation without issuing a lookup for stationary coordinate noise.
+            val qLat = kotlin.math.round(lat * 100_000.0).toLong()
+            val qLng = kotlin.math.round(lng * 100_000.0).toLong()
+            return "$qLat|$qLng"
+        }
     }
 
     private val demHttpCodeRegex = Regex("""dem http-fail code=(\d{3})""")
@@ -95,6 +103,27 @@ internal class DemElevationService(context: Context) {
         if (!lat.isFinite() || !lng.isFinite()) return@withContext null
         val key = cacheKey(lat, lng)
 
+        // Sample the local raster at the aircraft's exact coordinate before consulting the
+        // one-arc-second point cache. GeoTiffDemSource bilinearly interpolates the surrounding
+        // pixels and has its own decoded-block cache, so this is both cheap and spatially smooth.
+        // The coarser point cache remains appropriate for EPQS/network fallback values.
+        val localTiff = localGeoTiff.sampleElevationMeters(lat, lng)
+        if (localTiff != null && localTiff.isFinite() && localTiff >= -500.0 && localTiff <= 10_000.0) {
+            val sample = DemElevationSample(
+                elevationMeters = localTiff,
+                stale = false,
+                source = "usgs-geotiff-local"
+            )
+            MapCacheDebug.log("dem local-geotiff key=$key elevM=${"%.2f".format(Locale.US, sample.elevationMeters)}")
+            return@withContext sample
+        }
+        if (localTiff != null) {
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                "dem local-geotiff-range-reject key=$key elevM=$localTiff " +
+                    "lat=${"%.5f".format(Locale.US, lat)} lng=${"%.5f".format(Locale.US, lng)}")
+        }
+        MapCacheDebug.log("dem local-geotiff-miss key=$key")
+
         synchronized(mem) {
             val cached = mem[key]
             if (cached != null) {
@@ -115,28 +144,6 @@ internal class DemElevationService(context: Context) {
         } else {
             MapCacheDebug.log("dem disk-stale key=$key source=${cachedSample.source}")
         }
-
-        val localTiff = localGeoTiff.sampleElevationMeters(lat, lng)
-        if (localTiff != null && localTiff.isFinite() && localTiff >= -500.0 && localTiff <= 10_000.0) {
-            val sample = DemElevationSample(
-                elevationMeters = localTiff,
-                stale = false,
-                source = "usgs-geotiff-local"
-            )
-            // Do not write to the point blob cache here — GeoTiffDemSource's decoded-block
-            // cache (.f32raw files) already persists the data far more efficiently.
-            synchronized(mem) { mem[key] = sample }
-            MapCacheDebug.log("dem local-geotiff key=$key elevM=${"%.2f".format(Locale.US, sample.elevationMeters)}")
-            return@withContext sample
-        }
-        if (localTiff != null) {
-            // Decoded value is out of plausible terrain range — decoder bug or corrupt tile.
-            // Log and fall through to EPQS rather than caching the garbage value.
-            MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
-                "dem local-geotiff-range-reject key=$key elevM=$localTiff " +
-                    "lat=${"%.5f".format(Locale.US, lat)} lng=${"%.5f".format(Locale.US, lng)}")
-        }
-        MapCacheDebug.log("dem local-geotiff-miss key=$key")
 
         val network = fetchSample(lat, lng)
         if (network != null) {
@@ -208,6 +215,9 @@ internal class DemElevationService(context: Context) {
         //     they are cleaned up by LRU eviction or the one-time migration thread.
         return "v6|$qLat|$qLng|m"
     }
+
+    /** Position key used to decide when to re-sample the locally interpolated DEM. */
+    fun samplingKey(lat: Double, lng: Double): String = positionSamplingKey(lat, lng)
 
     private fun quantize(value: Double): Int {
         // 3600 arc-seconds per degree → each cache cell is ≈1 arc-second ≈ 30 m,

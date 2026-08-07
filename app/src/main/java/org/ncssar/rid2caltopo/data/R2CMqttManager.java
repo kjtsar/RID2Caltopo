@@ -18,7 +18,6 @@ import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -1211,28 +1210,38 @@ public class R2CMqttManager {
 
     public static void InitializeNetworkAddressMonitor(@Nullable Context context) {
         if (context == null) return;
+        Context appContext = context.getApplicationContext() == null
+                ? context : context.getApplicationContext();
         synchronized (AddrLock) {
             if (addrMonitorStarted) return;
             ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
             if (cm == null) return;
             addrCallback = new ConnectivityManager.NetworkCallback() {
-                @Override public void onAvailable(@NonNull Network n)    { refreshIpAddrs(cm); }
-                @Override public void onLost(@NonNull Network n)         { refreshIpAddrs(cm); }
+                @Override public void onAvailable(@NonNull Network n)    { refreshNetworkState(appContext, cm, "available"); }
+                @Override public void onLost(@NonNull Network n)         { refreshNetworkState(appContext, cm, "lost"); }
                 @Override public void onLinkPropertiesChanged(
-                        @NonNull Network n, @NonNull LinkProperties lp)  { refreshIpAddrs(cm); }
+                        @NonNull Network n, @NonNull LinkProperties lp)  { refreshNetworkState(appContext, cm, "link_properties"); }
+                @Override public void onCapabilitiesChanged(
+                        @NonNull Network n, @NonNull NetworkCapabilities nc) { refreshNetworkState(appContext, cm, "capabilities"); }
             };
             try {
-                cm.registerNetworkCallback(
-                        new NetworkRequest.Builder()
-                                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                                .build(),
-                        addrCallback);
+                // Track the effective default route, including an unvalidated controller LAN.
+                cm.registerDefaultNetworkCallback(addrCallback);
                 addrMonitorStarted = true;
                 refreshIpAddrs(cm);
+                NetworkDiagnostics.recordCurrentNetwork(appContext, cm, "startup", true);
             } catch (Exception e) {
                 CTError(TAG, "InitializeNetworkAddressMonitor(): registerNetworkCallback raised.", e);
             }
         }
+    }
+
+    private static void refreshNetworkState(
+            @NonNull Context context,
+            @NonNull ConnectivityManager cm,
+            @NonNull String reason) {
+        refreshIpAddrs(cm);
+        NetworkDiagnostics.recordCurrentNetwork(context, cm, reason, false);
     }
 
     private static void refreshIpAddrs(@NonNull ConnectivityManager cm) {

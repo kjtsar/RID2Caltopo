@@ -41,6 +41,8 @@ import kotlinx.coroutines.launch
 import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.notam.NotamAuthManager
+import org.ncssar.rid2caltopo.notam.NotamCenter
 import kotlin.math.roundToInt
 
 @Composable
@@ -55,6 +57,7 @@ fun ScannerScreen(
     val verticalSliderMax = verticalScrollState.maxValue.toFloat()
     val horizontalSliderMax = horizontalScrollState.maxValue.toFloat()
     val statusText = buildStatusText(persistedDroneSpecs)
+    val faaTrackerAccessStatus = currentFaaTrackerAccessStatus()
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -105,7 +108,11 @@ fun ScannerScreen(
                                 Text("NaN: ${R2CActivity.nanSupported}")
 
                                 Spacer(modifier = Modifier.height(24.dp))
-                                StatusSectionHeader("Loaded Config Files")
+                                StatusSectionHeader("FAA / Tracker Access")
+                                Text(faaTrackerAccessStatus)
+
+                                Spacer(modifier = Modifier.height(24.dp))
+                                StatusSectionHeader("Loaded Configuration Components (not access grants)")
                                 Text(CaltopoClient.GetConfigFilesLoadedRecord())
 
                                 Spacer(modifier = Modifier.height(24.dp))
@@ -209,7 +216,10 @@ internal fun buildStatusText(persistedDroneSpecs: List<org.ncssar.rid2caltopo.da
     builder.appendLine("WiFi: ${R2CActivity.wifiSupported}")
     builder.appendLine("NaN: ${R2CActivity.nanSupported}")
     builder.appendLine()
-    builder.appendLine("Loaded Config Files")
+    builder.appendLine("FAA / Tracker Access")
+    builder.appendLine(currentFaaTrackerAccessStatus())
+    builder.appendLine()
+    builder.appendLine("Loaded Configuration Components (not access grants)")
     builder.appendLine(CaltopoClient.GetConfigFilesLoadedRecord())
     builder.appendLine()
     builder.appendLine("Persisted CtDroneSpecs")
@@ -223,6 +233,42 @@ internal fun buildStatusText(persistedDroneSpecs: List<org.ncssar.rid2caltopo.da
         }
     }
     return builder.toString().trimEnd()
+}
+
+private fun currentFaaTrackerAccessStatus(): String = buildFaaTrackerAccessStatus(
+    organization = CaltopoClient.GetHomeOrgName(),
+    credentialSource = NotamAuthManager.credentialSource(),
+    faaRemoteConfigLoaded = CaltopoClient.GetFaaPayloadEnc().isNotBlank(),
+    latestNotamResult = NotamCenter.uiState.value.errorMessage
+)
+
+internal fun buildFaaTrackerAccessStatus(
+    organization: String,
+    credentialSource: NotamAuthManager.CredentialSource,
+    faaRemoteConfigLoaded: Boolean,
+    latestNotamResult: String?
+): String = buildString {
+    appendLine("Teams configuration: ${organization.ifBlank { "Not loaded" }} (operational identity only)")
+    appendLine(
+        "FAA remote config component: " +
+            if (faaRemoteConfigLoaded) {
+                "Loaded (shared FAA configuration; not a tracker device access grant)"
+            } else {
+                "Not loaded"
+            }
+    )
+    appendLine(
+        "Tracker credential source: " + when (credentialSource) {
+            NotamAuthManager.CredentialSource.MANAGED_DEVICE_ENROLLMENT -> "Managed device enrollment"
+            NotamAuthManager.CredentialSource.ORGANIZATION_CONFIG_CREDENTIAL ->
+                "Organization-config credential (proxy authorization must be verified)"
+            NotamAuthManager.CredentialSource.NONE -> "Not configured"
+        }
+    )
+    append(
+        "Latest NOTAM proxy result: " +
+            latestNotamResult?.takeIf { it.isNotBlank() }.orEmpty().ifBlank { "No authorization failure recorded" }
+    )
 }
 
 private fun currentBuildVersion(): String = BuildConfig.BUILD_VERSION

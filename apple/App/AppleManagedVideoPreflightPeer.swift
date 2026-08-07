@@ -111,7 +111,10 @@ final class AppleManagedVideoPreflightPeer: NSObject, @unchecked Sendable {
 
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
-        configuration.iceTransportPolicy = .relay
+        // The browser offer is relay-only, so any selected pair remains
+        // routed. Let the tablet contribute its fastest reachable candidate
+        // instead of requiring a second TURN allocation.
+        configuration.iceTransportPolicy = .all
         configuration.iceServers = iceServers.map {
             RTCIceServer(
                 urlStrings: $0.urls,
@@ -428,7 +431,9 @@ extension AppleManagedVideoPreflightPeer: RTCPeerConnectionDelegate {
         _ peerConnection: RTCPeerConnection,
         didGenerate candidate: RTCIceCandidate
     ) {
-        guard candidate.sdp.contains(" typ relay ") else { return }
+        guard candidate.sdp.contains(" typ srflx ")
+            || candidate.sdp.contains(" typ relay ")
+        else { return }
         queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
             self?.maybeSendAnswerOnQueue(allowPartialGathering: true)
         }

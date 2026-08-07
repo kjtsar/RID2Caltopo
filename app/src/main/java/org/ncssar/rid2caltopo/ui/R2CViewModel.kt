@@ -95,6 +95,13 @@ data class MapBrowserProfileOption(
     val label: String
 )
 
+data class OperationalProfileUiOption(
+    val profileId: String,
+    val credentialLabel: String,
+    val description: String,
+    val expiresAtEpochMs: Long
+)
+
 data class PendingProfileSwitchUiState(
     val profileId: String,
     val label: String,
@@ -204,6 +211,10 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         private set
     var selectedMapBrowserProfileId by mutableStateOf("")
         private set
+    var operationalProfiles by mutableStateOf<List<OperationalProfileUiOption>>(emptyList())
+        private set
+    var selectedOperationalProfileId by mutableStateOf("")
+        private set
     var pendingProfileSwitch by mutableStateOf<PendingProfileSwitchUiState?>(null)
         private set
 
@@ -237,6 +248,25 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             )
         }
         selectedMapBrowserProfileId = CaltopoClient.GetActiveCaltopoProfileId().orEmpty()
+        refreshOperationalProfiles()
+    }
+
+    fun refreshOperationalProfiles() {
+        operationalProfiles = CaltopoClient.GetOperationalProfileOptions()
+            .mapNotNull { fields ->
+                if (fields.size < 4) return@mapNotNull null
+                OperationalProfileUiOption(
+                    profileId = fields[0],
+                    credentialLabel = fields[1],
+                    description = fields[2],
+                    expiresAtEpochMs = fields[3].toLongOrNull() ?: 0L
+                )
+            }
+        selectedOperationalProfileId = CaltopoClient.GetActiveCaltopoProfileId().orEmpty()
+    }
+
+    fun selectOperationalProfile(profileId: String) {
+        onUIEvent(UIEvent.BrowseProfileSelected(profileId))
     }
 
     private fun performMapBrowserProfileSwitch(profileId: String) {
@@ -578,16 +608,16 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             tag,
             "savePendingDroneConfirmation(): notifying peer remoteId=$remoteId mappedId='$mappedId' peer=${peerCoordinator.javaClass.simpleName}"
         )
-        peerCoordinator.onDroneConfirmed(
+        confirmedCurrentFlightRemoteIds.add(remoteId)
+        CTDebug(tag, "savePendingDroneConfirmation(): saving local confirmation remoteId=$remoteId mappedId='$mappedId'")
+        CaltopoClient.SaveDroneSpecConfirmation(
             remoteId,
             organization,
             droneDescription,
             callsign,
             mappedId
         )
-        confirmedCurrentFlightRemoteIds.add(remoteId)
-        CTDebug(tag, "savePendingDroneConfirmation(): saving local confirmation remoteId=$remoteId mappedId='$mappedId'")
-        CaltopoClient.SaveDroneSpecConfirmation(
+        peerCoordinator.onDroneConfirmed(
             remoteId,
             organization,
             droneDescription,
@@ -601,6 +631,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
 
     fun housekeeping() {
         _appUptime.value = uptimeTimer.durationAsString()
+        refreshOperationalProfiles()
         val newDeviceName = R2CActivity.MyDeviceName
                 if (_hostname.value.isEmpty() || _hostname.value != newDeviceName) {
             _hostname.value = newDeviceName
@@ -749,6 +780,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             )
         )
     }
+
 
     private fun refreshPendingDroneConfirmationValidation() {
         _pendingDroneConfirmation.value = _pendingDroneConfirmation.value

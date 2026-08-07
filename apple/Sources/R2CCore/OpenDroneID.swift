@@ -24,6 +24,7 @@ public struct OpenDroneIDMessage: Equatable, Sendable {
     public indirect enum Payload: Equatable, Sendable {
         case basicID(OpenDroneIDBasicID)
         case location(OpenDroneIDLocation)
+        case selfID(OpenDroneIDSelfID)
         case system(OpenDroneIDSystem)
         case messagePack([OpenDroneIDMessage])
         case opaque(kind: Kind, bytes: Data)
@@ -34,12 +35,114 @@ public struct OpenDroneIDMessage: Equatable, Sendable {
     public let payload: Payload
 }
 
+public struct OpenDroneIDSelfID: Equatable, Sendable {
+    public let descriptionType: UInt8
+    public let operationDescription: String
+}
+
 public struct OpenDroneIDBasicID: Equatable, Sendable {
     public let idType: UInt8
     public let aircraftType: UInt8
     public let uasID: String
 
     public var isSerialNumber: Bool { idType == 1 }
+}
+
+public struct DroneScoutRelayMetadata: Equatable, Sendable {
+    public let droneToBridgeRssiDbm: Int
+    public let receptionMode: String
+    public let sourceKind: String?
+
+    public static func parse(_ description: String) -> Self? {
+        let pattern = #"(?:^|\s)DS\s+(WIFI\s+B|BT5|WIB)\s+(-?\d{1,3})(?:\s*dBm)?(?:\s+(drone|addon|grounded))?"#
+        guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(description.startIndex..., in: description)
+        guard let match = expression.firstMatch(in: description, range: range),
+              let rssiRange = Range(match.range(at: 2), in: description),
+              let rssi = Int(description[rssiRange]),
+              (-127 ... -1).contains(rssi),
+              let modeRange = Range(match.range(at: 1), in: description)
+        else {
+            return nil
+        }
+        let sourceKind = Range(match.range(at: 3), in: description)
+            .map { String(description[$0]).lowercased() }
+        return Self(
+            droneToBridgeRssiDbm: rssi,
+            receptionMode: String(description[modeRange])
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+                .uppercased(),
+            sourceKind: sourceKind
+        )
+    }
+}
+
+public enum DroneScoutRelayPing {
+    // Match the loss-announcement decision so normal ping jitter never blanks the most recent
+    // signal reading before the bridge has actually been classified as absent.
+    public static let signalFreshnessSeconds: Int64 = 32
+
+    private static let defaultIdentity = "DRONESCOUTBRIDGE"
+
+    public static func matches(_ advertisement: OpenDroneIDAdvertisement) -> Bool {
+        advertisement.messages.contains(where: messageMatches)
+    }
+
+    public static func matches(identity: String) -> Bool {
+        let normalized = identity.uppercased().filter { character in
+            character.isLetter || character.isNumber
+        }
+        return normalized.hasPrefix(defaultIdentity)
+    }
+
+    private static func messageMatches(_ message: OpenDroneIDMessage) -> Bool {
+        switch message.payload {
+        case let .basicID(basicID):
+            return matches(identity: basicID.uasID)
+        case let .messagePack(messages):
+            return messages.contains(where: messageMatches)
+        case .location, .selfID, .system, .opaque:
+            return false
+        }
+    }
+}
+
+public struct DroneScoutBridgeLossAnnouncementGate: Sendable {
+    public static let defaultThreshold: TimeInterval = 32
+
+    private var monitoringStartedAt: Date?
+    private var lossActive = false
+
+    public init() {}
+
+    public mutating func shouldAnnounce(
+        monitoringActive: Bool,
+        lastPingAt: Date?,
+        now: Date,
+        muted: Bool,
+        threshold: TimeInterval = Self.defaultThreshold
+    ) -> Bool {
+        guard monitoringActive else {
+            monitoringStartedAt = nil
+            lossActive = false
+            return false
+        }
+
+        let startedAt = monitoringStartedAt ?? now
+        monitoringStartedAt = startedAt
+        let baseline = max(startedAt, lastPingAt ?? startedAt)
+        let missing = now.timeIntervalSince(baseline) > threshold
+        guard missing else {
+            lossActive = false
+            return false
+        }
+        guard !lossActive else { return false }
+        lossActive = true
+        return !muted
+    }
 }
 
 public struct OpenDroneIDLocation: Equatable, Sendable {
@@ -51,9 +154,9 @@ public struct OpenDroneIDLocation: Equatable, Sendable {
     public let geodeticAltitudeMeters: Double
     public let heightMeters: Double
     public let horizontalAccuracyCode: UInt8
-    public let directionDegrees: Double
-    public let horizontalSpeedMetersPerSecond: Double
-    public let verticalSpeedMetersPerSecond: Double
+    public let directionDegrees: Double?
+    public let horizontalSpeedMetersPerSecond: Double?
+    public let verticalSpeedMetersPerSecond: Double?
     public let timestampTenths: UInt16
 
     public var preferredAltitudeMeters: Double? {
@@ -128,9 +231,11 @@ public enum OpenDroneIDParser {
             payload = .location(parseLocation(data))
         case .system:
             payload = .system(parseSystem(data))
+        case .selfID:
+            payload = .selfID(parseSelfID(data))
         case .messagePack:
             payload = .messagePack(try parseMessagePack(data))
-        case .authentication, .selfID, .operatorID:
+        case .authentication, .operatorID:
             payload = .opaque(kind: kind, bytes: Data(data.prefix(messageSize)))
         }
 
@@ -148,6 +253,18 @@ public enum OpenDroneIDParser {
         )
     }
 
+    private static func parseSelfID(_ data: Data) -> OpenDroneIDSelfID {
+        let descriptionBytes = dataBytes(data, 2 ..< messageSize)
+        let description = String(
+            bytes: descriptionBytes.prefix { $0 != 0 },
+            encoding: .ascii
+        ) ?? ""
+        return OpenDroneIDSelfID(
+            descriptionType: byte(data, 1),
+            operationDescription: description
+        )
+    }
+
     private static func parseLocation(_ data: Data) -> OpenDroneIDLocation {
         let flags = byte(data, 1)
         let eastWest = (flags >> 1) & 0x01
@@ -155,6 +272,8 @@ public enum OpenDroneIDParser {
         let rawDirection = byte(data, 2)
         let rawHorizontalSpeed = byte(data, 3)
         let rawVerticalSpeed = Int8(bitPattern: byte(data, 4))
+        let decodedDirection = Double(rawDirection) + (eastWest == 0 ? 0 : 180)
+        let decodedVerticalSpeed = Double(rawVerticalSpeed) * 0.5
 
         return OpenDroneIDLocation(
             status: flags >> 4,
@@ -165,13 +284,18 @@ public enum OpenDroneIDParser {
             geodeticAltitudeMeters: altitude(uint16LE(data, 15)),
             heightMeters: altitude(uint16LE(data, 17)),
             horizontalAccuracyCode: byte(data, 19) & 0x0F,
-            directionDegrees: RidHeading.normalized(
-                Double(rawDirection) + (eastWest == 0 ? 0 : 180)
-            ) ?? 0,
-            horizontalSpeedMetersPerSecond: speedMultiplier == 0
-                ? Double(rawHorizontalSpeed) * 0.25
-                : Double(rawHorizontalSpeed) * 0.75 + 63.75,
-            verticalSpeedMetersPerSecond: Double(rawVerticalSpeed) * 0.5,
+            // ASTM F3411 reserves 361 degrees for unavailable direction. Do not
+            // normalize that sentinel to 1 degree and accidentally display it.
+            directionDegrees: (0 ... 360).contains(decodedDirection)
+                ? RidHeading.normalized(decodedDirection)
+                : nil,
+            // These wire-format sentinel values mean speed is unavailable.
+            horizontalSpeedMetersPerSecond: rawHorizontalSpeed == 0xFF
+                ? nil
+                : (speedMultiplier == 0
+                    ? Double(rawHorizontalSpeed) * 0.25
+                    : Double(rawHorizontalSpeed) * 0.75 + 63.75),
+            verticalSpeedMetersPerSecond: decodedVerticalSpeed == 63 ? nil : decodedVerticalSpeed,
             timestampTenths: uint16LE(data, 21)
         )
     }

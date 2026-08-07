@@ -57,6 +57,7 @@ internal object NotamPolicy {
     ): String {
         if (loading) return "NOTAMs updating..."
         if (hasError && notices.isEmpty()) return "NOTAMs unavailable"
+        if (!configured) return "NOTAMs pending"
 
         val restrictiveHere = notices.firstOrNull {
             it.intersectsPilotBubble && it.severity == NotamChipSeverity.Danger

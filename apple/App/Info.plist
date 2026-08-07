@@ -48,7 +48,7 @@
 			<string>org.ncssar.RID2CaltopoApple.org-config</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>r2c1</string>
+				<string>r2c2</string>
 				<string>r2cfaa1</string>
 				<string>r2cma1</string>
 			</array>
@@ -85,6 +85,11 @@
     <array>
         <string>bluetooth-central</string>
     </array>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <true/>
+    </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>

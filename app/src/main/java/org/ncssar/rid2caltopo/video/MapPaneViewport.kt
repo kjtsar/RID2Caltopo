@@ -84,6 +84,21 @@ internal fun shouldFollowFocusedDrone(
     return presentationMode == MapPanePresentationMode.Inset || !operatorAdjustedViewport
 }
 
+internal enum class OperatorMapGesture {
+    Pan,
+    Zoom,
+    Tap
+}
+
+internal fun shouldReleaseFocusedDroneForMapGesture(
+    presentationMode: MapPanePresentationMode,
+    hasFocusedDrone: Boolean,
+    gesture: OperatorMapGesture
+): Boolean =
+    presentationMode == MapPanePresentationMode.Full &&
+        hasFocusedDrone &&
+        gesture != OperatorMapGesture.Tap
+
 internal fun mapPaneShouldReplayCachedArtifacts(
     presentationMode: MapPanePresentationMode,
     cachedFeatureCount: Int

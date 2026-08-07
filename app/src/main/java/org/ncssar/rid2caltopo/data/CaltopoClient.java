@@ -213,6 +213,7 @@ class ClientClassState {
     public String trackerApiKey;
     public String trackerUrlPfx;
     public String trackerFaaProxyUrl;
+    public String trackerEnrollmentUrl;
     public String coordinateDisplayFormat;
     public boolean captureVideoStreamsFlag;
     public boolean predictiveHeadEnabled;
@@ -269,6 +270,7 @@ class ClientClassState {
         trackerApiKey = "";
         trackerUrlPfx = "";
         trackerFaaProxyUrl = "";
+        trackerEnrollmentUrl = "";
         coordinateDisplayFormat = "decimal";
         captureVideoStreamsFlag = false;
         predictiveHeadEnabled = true;
@@ -287,7 +289,7 @@ class ClientClassState {
         landRestrictionsEnabled = true;
         landRestrictionsShowOnMap = true;
         landRestrictionsAutoRefresh = true;
-        landRestrictionsRadiusNm = 5;
+        landRestrictionsRadiusNm = 1;
         landRestrictionsLastUpdatedEpochMs = 0L;
         faaRemoteToken = "";
         faaConfigLabel = "";
@@ -625,6 +627,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ds;
     }
 
+    /** Reset active-flight aging when any RID message is associated with this aircraft.
+     * This deliberately does not update position freshness or create a new aircraft track. */
+    public static void NoteActiveAircraftMessageReceived(@NonNull String remoteId, long nowWallMsec) {
+        if (RejectNonCanonicalRemoteId("NoteActiveAircraftMessageReceived()", remoteId)) return;
+        CtDroneSpec ds = GetState().droneSpecTable.get(remoteId);
+        if (ds == null || !ds.isActive()) return;
+        ds.noteAircraftMessageReceived(nowWallMsec);
+    }
+
     @NonNull
     public static List<CtDroneSpec> GetPersistedDroneSpecs() {
         ClientClassState ccs = GetState();
@@ -690,6 +701,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         CtDroneSpec registeredDrone = GetDroneSpec(trimmedRemoteId);
         if (registeredDrone == null || registeredDrone.isLocalArchiveOnly()) return false;
+        if (!CurrentPeerConfirmedDroneRemoteIds.contains(trimmedRemoteId)) return false;
         return normalizedDroneOrg.equals(NormalizeOrgName(registeredDrone.getOrg()));
     }
 
@@ -760,6 +772,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @NonNull public CtDroneSpec getDroneSpec() {return droneSpec;}
 
     private static final Handler MainHandler = new Handler(Looper.getMainLooper());
+    private static final Runnable CaltopoProfileExpiryRunnable = () -> {
+        RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), true);
+        ScheduleCaltopoProfileExpiry();
+    };
     private static final long WAYPOINT_SIDE_EFFECT_SLOW_MS = 250L;
 
     private static void logWaypointSideEffectIfSlow(@NonNull String step,
@@ -1237,6 +1253,35 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return options;
     }
 
+    /** Non-secret profile metadata for credential selectors. */
+    @NonNull
+    public static List<String[]> GetOperationalProfileOptions() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        ArrayList<String[]> options = new ArrayList<>();
+        if (ccs.caltopoProfiles == null) return options;
+        long nowMs = System.currentTimeMillis();
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (HasExpired(profile, nowMs)) continue;
+            boolean mutualAid = "MUTUAL_AID".equals(profile.profileType);
+            String baseLabel = profile.sourceLabel != null ? profile.sourceLabel.trim() : "";
+            if (baseLabel.isEmpty() && profile.displayName != null) {
+                baseLabel = profile.displayName.trim();
+            }
+            if (baseLabel.isEmpty()) baseLabel = mutualAid ? "Mutual Aid" : "Home";
+            String credentialLabel = mutualAid && !baseLabel.toUpperCase(Locale.US).endsWith("-MA")
+                    ? baseLabel + "-MA"
+                    : baseLabel;
+            options.add(new String[] {
+                    profile.profileId != null ? profile.profileId : "",
+                    credentialLabel,
+                    mutualAid ? "Mutual Aid" : "Home organization",
+                    Long.toString(profile.expiresAtEpochMs)
+            });
+        }
+        return options;
+    }
+
     @Nullable
     public static CaltopoProfileRecord GetCaltopoProfileById(@NonNull String profileId) {
         ClientClassState ccs = GetState();
@@ -1308,6 +1353,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (makeActive && reconnect) {
             CaltopoMap.ResetMapConnection(0);
         }
+        ScheduleCaltopoProfileExpiry();
         NotifySettingsChanged();
     }
 
@@ -1356,6 +1402,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (removedActive && reconnect) {
             CaltopoMap.ResetMapConnection(0);
         }
+        ScheduleCaltopoProfileExpiry();
         NotifySettingsChanged();
         return true;
     }
@@ -1628,6 +1675,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
         }
         ArchiveState("expired caltopo profiles removed");
+        ScheduleCaltopoProfileExpiry();
         NotifySettingsChanged();
         return removed;
     }
@@ -1643,6 +1691,29 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static void ensureProfileStateFresh(@NonNull ClientClassState ccs, boolean disconnectIfActive) {
         if (ccs.caltopoProfiles == null || ccs.caltopoProfiles.isEmpty()) return;
         RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), disconnectIfActive);
+        ScheduleCaltopoProfileExpiry();
+    }
+
+    /**
+     * Schedule the next operational-profile cutoff against its absolute expiry.
+     * Lifecycle polling remains a safety net, but an active MA profile no longer
+     * retains CalTopo or tracker coordination until the next poll.
+     */
+    public static void ScheduleCaltopoProfileExpiry() {
+        MainHandler.removeCallbacks(CaltopoProfileExpiryRunnable);
+        ClientClassState ccs = Ccstate;
+        if (ccs == null || ccs.caltopoProfiles == null) return;
+        long nowMs = System.currentTimeMillis();
+        long nextExpiryMs = Long.MAX_VALUE;
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (profile == null || profile.expiresAtEpochMs <= 0L) continue;
+            nextExpiryMs = Math.min(nextExpiryMs, profile.expiresAtEpochMs);
+        }
+        if (nextExpiryMs == Long.MAX_VALUE) return;
+        MainHandler.postDelayed(
+                CaltopoProfileExpiryRunnable,
+                Math.max(1L, nextExpiryMs - nowMs)
+        );
     }
 
     public static void SetUsePeers(boolean flag) {
@@ -1927,6 +1998,21 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     @NonNull
+    public static String GetTrackerEnrollmentUrl() {
+        return GetState().trackerEnrollmentUrl;
+    }
+
+    public static void SetTrackerEnrollmentUrl(@NonNull String value) {
+        value = value.trim();
+        ClientClassState ccs = GetState();
+        if (!ccs.trackerEnrollmentUrl.equals(value)) {
+            ccs.trackerEnrollmentUrl = value;
+            NotifySettingsChanged();
+            ArchiveState("tracker enrollment locator changed");
+        }
+    }
+
+    @NonNull
     public static String GetMutualAidSourceLabel() {
         MutualAidTemplateRecord template = GetMutualAidTemplate();
         return template.sourceLabel != null ? template.sourceLabel : "";
@@ -2042,6 +2128,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String opPeriod = json.optString("op_period");
         String trackerApiKey = json.optString("tracker_api_key");
         String trackerUrlPfx = TrackerConfigCompat.readTrackerUrlPrefix(json);
+        String trackerFaaProxyUrl = json.optString("tracker_faa_proxy_url");
         boolean hasUsePeers = json.has("use_peers");
         boolean usePeers = json.optBoolean("use_peers", true);
         boolean predictiveHeadEnabled = json.optBoolean("predictive_head_enabled", true);
@@ -2064,6 +2151,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!opPeriod.isEmpty()) SetOpPeriod(opPeriod);
         if (!trackerApiKey.isEmpty()) SetTrackerApiKey(trackerApiKey);
         if (!trackerUrlPfx.isEmpty()) SetTrackerUrlPfx(trackerUrlPfx);
+        if (!trackerFaaProxyUrl.isEmpty()) SetTrackerFaaProxyUrl(trackerFaaProxyUrl);
         if (!domainAndPort.isEmpty()) SetCaltopoDomainAndPort(domainAndPort);
         if (hasUsePeers) SetUsePeers(usePeers);
         SetPredictiveHeadEnabled(predictiveHeadEnabled);
@@ -2271,7 +2359,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ClientClassState ccs = GetState();
             JSONObject bundle = new JSONObject();
             bundle.put("format", "rid2caltopo_org_config");
-            bundle.put("version", 1);
+            bundle.put("version", 2);
             bundle.put("org_name", orgName != null ? orgName : "");
             bundle.put("generated", TimeDatestampString(System.currentTimeMillis()));
 
@@ -2321,12 +2409,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 credentials.put("incident", ccs.incident);
             if (ccs.opPeriod != null && !ccs.opPeriod.isEmpty())
                 credentials.put("op_period", ccs.opPeriod);
-            if (ccs.trackerApiKey != null && !ccs.trackerApiKey.isEmpty())
-                credentials.put("tracker_api_key", ccs.trackerApiKey);
-            if (ccs.trackerUrlPfx != null && !ccs.trackerUrlPfx.isEmpty()) {
-                credentials.put("tracker_url_pfx", ccs.trackerUrlPfx);
-                credentials.put("tracker_url_prefix", ccs.trackerUrlPfx);
-            }
+            // R2C2 distributes the signed campaign locator, never the credential
+            // issued to the tablet creating this bundle. Each importing device
+            // redeems the locator for its own revocable r2c_dev_ credential.
+            if (ccs.trackerEnrollmentUrl != null && !ccs.trackerEnrollmentUrl.isEmpty())
+                credentials.put("tracker_enrollment_url", ccs.trackerEnrollmentUrl);
             credentials.put("use_peers", ccs.usePeersFlag);
             credentials.put("predictive_head_enabled",           ccs.predictiveHeadEnabled);
             credentials.put("proximity_alert_spacing_feet",      ccs.proximityAlertSpacingFeet);
@@ -2336,18 +2423,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             credentials.put("notam_auto_refresh",              ccs.notamAutoRefresh);
             credentials.put("notam_refresh_interval_seconds",  ccs.notamRefreshIntervalSeconds);
             credentials.put("notam_warn_inside_one_nm",        ccs.notamWarnInsideOneNm);
-            if (ccs.notamApiBaseUrl != null && !ccs.notamApiBaseUrl.isEmpty())
-                credentials.put("notam_api_base_url",   ccs.notamApiBaseUrl);
-            if (ccs.notamTokenUrl != null && !ccs.notamTokenUrl.isEmpty())
-                credentials.put("notam_token_url",      ccs.notamTokenUrl);
-            if (ccs.notamScope != null && !ccs.notamScope.isEmpty())
-                credentials.put("notam_scope",          ccs.notamScope);
             configs.put(credentials);
-
-            JSONObject faaRemoteConfig = FaaConfigManager.buildRemoteConfigObject();
-            if (faaRemoteConfig != null) {
-                configs.put(faaRemoteConfig);
-            }
 
             // ── ct_mutual_aid_credentials ───────────────────────────────────
             MutualAidTemplateRecord template = ccs.mutualAidTemplate;
@@ -2397,7 +2473,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         try {
             JSONObject bundle = new JSONObject(json);
             String format = bundle.optString("format");
-            if (!format.equals("rid2caltopo_org_config")) {
+            if (!format.equals("rid2caltopo_org_config") || bundle.optInt("version", 0) != 2) {
                 CTWarn(TAG, "ApplyOrgConfigBundle(): unexpected format: " + format);
                 return false;
             }

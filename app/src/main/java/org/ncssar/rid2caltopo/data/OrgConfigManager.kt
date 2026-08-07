@@ -43,6 +43,36 @@ object OrgConfigManager {
     // Type tags used in the bundle JSON to mark encrypted credential blocks.
     private const val TYPE_CREDENTIALS_ENC = "ct_credentials_enc"
     private const val TYPE_CREDENTIALS     = "ct_credentials"
+
+    internal fun trackerEnrollmentUrl(bundleJson: String): String? = runCatching {
+        val root = JSONObject(bundleJson)
+        if (root.optString("format") != "rid2caltopo_org_config" || root.optInt("version") != 2) {
+            return@runCatching null
+        }
+        val configs = root.optJSONArray("configs") ?: return@runCatching null
+        var enrollmentUrl: String? = null
+        for (index in 0 until configs.length()) {
+            val config = configs.optJSONObject(index) ?: continue
+            val type = config.optString("type").trim().lowercase()
+            if (type.startsWith("ct_faa_")) return@runCatching null
+            if (type == TYPE_CREDENTIALS) {
+                val forbiddenFields = listOf(
+                    "tracker_api_key",
+                    "tracker_url_pfx",
+                    "tracker_url_prefix",
+                    "tracker_faa_proxy_url",
+                    "notam_client_id",
+                    "notam_client_secret"
+                )
+                if (forbiddenFields.any { config.optString(it).isNotBlank() }) {
+                    return@runCatching null
+                }
+                enrollmentUrl = config.optString("tracker_enrollment_url")
+                    .takeIf(TrackerEnrollmentClient::isEnrollmentUrl)
+            }
+        }
+        enrollmentUrl
+    }.getOrNull()
     private const val TYPE_MUTUAL_AID_CREDENTIALS = "ct_mutual_aid_credentials"
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -150,6 +180,15 @@ object OrgConfigManager {
                 val orgName = CaltopoClient.GetHomeOrgName().ifBlank {
                     throw IllegalStateException("Set the organization designator in Settings before exporting organization config.")
                 }
+                val enrollmentUrl = CaltopoClient.GetTrackerEnrollmentUrl()
+                if (!CaltopoClient.GetHomeTrackerApiKey().startsWith("r2c_dev_") ||
+                    !TrackerEnrollmentClient.enrollmentOrganization(enrollmentUrl)
+                        .equals(orgName, ignoreCase = true)
+                ) {
+                    throw IllegalStateException(
+                        "Scan a current r2c-tracker device-enrollment QR before exporting R2C2."
+                    )
+                }
                 val rawBundle = CaltopoClient.BuildOrgConfigBundle(orgName)
                     ?: throw IllegalStateException("Failed to build org config bundle.")
                 val securedBundle = encryptCredentialsInBundle(rawBundle)
@@ -160,7 +199,8 @@ object OrgConfigManager {
                     OrgConfigToken.OrgConfig(
                         orgName     = orgName,
                         driveFileId = fileId,
-                        isPublic    = true
+                        isPublic    = true,
+                        version     = 2
                     )
                 )
                 storeToken(appContext, token)
@@ -201,11 +241,23 @@ object OrgConfigManager {
             val result = try {
                 val encJson = GoogleDriveConfigSync.downloadOrgConfigPublic(config.driveFileId)
                 val plainJson = decryptCredentialsInBundle(encJson)
+                val enrollmentUrl = trackerEnrollmentUrl(plainJson)
+                    ?: throw IllegalStateException("R2C2 bundle has no valid tracker enrollment locator.")
+                if (!TrackerEnrollmentClient.enrollmentOrganization(enrollmentUrl)
+                        .equals(config.orgName, ignoreCase = true)
+                ) {
+                    throw IllegalStateException("R2C2 tracker enrollment does not belong to ${config.orgName}.")
+                }
                 val success = CaltopoClient.ApplyOrgConfigBundle(plainJson)
                 if (success) {
+                    val enrollment = TrackerEnrollmentClient.redeemBlocking(appContext, enrollmentUrl)
+                    if (!enrollment.organization.equals(config.orgName, ignoreCase = true)) {
+                        throw IllegalStateException("Tracker enrolled a different organization than the R2C2 bundle.")
+                    }
+                    TrackerEnrollmentClient.apply(enrollment)
                     storeToken(appContext, trimmed)
-                    CaltopoClient.CTDebug(TAG, "joinFromToken(): joined org='${config.orgName}'")
-                    true to "Joined '${config.orgName}'. Org config applied."
+                    CaltopoClient.CTDebug(TAG, "joinFromToken(): joined R2C2 org='${config.orgName}' with per-device enrollment")
+                    true to "Joined '${config.orgName}'. Team config applied and device enrolled with r2c-tracker."
                 } else {
                     false to "Org config downloaded but could not be applied."
                 }

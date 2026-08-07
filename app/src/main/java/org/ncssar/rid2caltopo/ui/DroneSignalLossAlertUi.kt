@@ -140,7 +140,11 @@ private fun signalLossAlertSummary(flight: DroneSignalLossFlightUiState): String
         val distanceFeet = flight.distanceFromTabletFt ?: 0.0
         return String.format(
             Locale.US,
-            "No RID position updates for %.1f s at %.0f ft from tablet",
+            if (flight.bridgeRecentlySeen) {
+                "Bridge active; drone location stale for %.1f s at %.0f ft from tablet"
+            } else {
+                "Drone signal lost for %.1f s at %.0f ft from tablet"
+            },
             idleSeconds,
             distanceFeet
         )

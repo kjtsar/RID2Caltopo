@@ -107,6 +107,8 @@ message AppConfig {
     bool enabled = 1;
     bool show_on_map = 2;
     bool auto_refresh = 3;
+    // Legacy field name retained for wire compatibility. The value is now
+    // operator-facing statute miles and converted internally for agency queries.
     int32 radius_nm = 4;
     int64 last_updated_epoch_ms = 5;
   }
@@ -138,6 +140,7 @@ message AppConfig {
   string tracker_api_key = 52;
   string tracker_url_prefix = 53;
   string tracker_faa_proxy_url = 54;
+  string tracker_enrollment_url = 55;
 
   ArchiveLocation archive_location = 60;
   NotamConfig notam = 61;

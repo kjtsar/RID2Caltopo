@@ -243,16 +243,27 @@ final class AppleNotamCenter: ObservableObject {
         _ value: String,
         trackerURLPrefix: String
     ) -> URL? {
-        guard let proxy = URLComponents(
-            string: value.trimmingCharacters(in: .whitespacesAndNewlines)
-        ),
-        let tracker = URLComponents(
+        guard var tracker = URLComponents(
             string: trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
         ),
-        proxy.scheme?.lowercased() == "https",
         tracker.scheme?.lowercased() == "https",
-        let proxyHost = proxy.host?.lowercased(),
         let trackerHost = tracker.host?.lowercased(),
+        trackerHost == "r2c-tracker.com" || trackerHost.hasSuffix(".r2c-tracker.com")
+        else { return nil }
+        let explicit = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let proxy: URLComponents
+        if explicit.isEmpty {
+            tracker.path = "/faa/notams"
+            tracker.query = nil
+            tracker.fragment = nil
+            proxy = tracker
+        } else if let parsed = URLComponents(string: explicit) {
+            proxy = parsed
+        } else {
+            return nil
+        }
+        guard proxy.scheme?.lowercased() == "https",
+        let proxyHost = proxy.host?.lowercased(),
         proxyHost == trackerHost,
         proxy.port == tracker.port,
         proxy.path == "/faa/notams",

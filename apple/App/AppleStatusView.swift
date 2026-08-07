@@ -10,6 +10,8 @@ struct AppleStatusSnapshot {
     let locationStatus: String
     let configSource: String
     let organization: String
+    let hasManagedTrackerEnrollment: Bool
+    let notamProxyStatus: String
     let incident: String
     let operationalPeriod: String
     let trackerStatus: String
@@ -20,6 +22,11 @@ struct AppleStatusSnapshot {
     let activeAircraft: Int
     let acceptedTrackPoints: Int
     let filteredObservations: Int
+    let duplicatePositionFilters: Int
+    let minimumDistanceFilters: Int
+    let implausibleSpeedFilters: Int
+    let horizontalAccuracyFilters: Int
+    let invalidObservationFilters: Int
     let archivedTracks: Int
     let mediaMTXStatus: String
     let videoStatus: String
@@ -53,7 +60,7 @@ struct AppleStatusSnapshot {
             "Wi-Fi Remote ID bridge: DS110 to Bluetooth",
             "Location: \(locationStatus)",
             "",
-            "Loaded Configuration",
+            "Loaded Configuration (not an access grant)",
             "Source: \(configSource)",
             "Organization: \(display(organization))",
             "Incident: \(display(incident))",
@@ -64,10 +71,20 @@ struct AppleStatusSnapshot {
             "Peer zones: \(peerCount)",
             "CalTopo: \(caltopoStatus)",
             "",
+            "FAA / Tracker Access",
+            "Teams configuration: \(display(organization)) (operational identity only)",
+            "Managed device enrollment: \(hasManagedTrackerEnrollment ? "Present" : "Not present")",
+            "Latest NOTAM proxy result: \(notamProxyStatus)",
+            "",
             "Runtime",
             "Active aircraft: \(activeAircraft)",
             "Accepted track points: \(acceptedTrackPoints)",
             "Filtered observations: \(filteredObservations)",
+            "  Duplicate position: \(duplicatePositionFilters)",
+            "  Under minimum distance: \(minimumDistanceFilters)",
+            "  Implausible speed: \(implausibleSpeedFilters)",
+            "  Horizontal accuracy: \(horizontalAccuracyFilters)",
+            "  Invalid observation: \(invalidObservationFilters)",
             "Archived tracks: \(archivedTracks)",
             "MediaMTX: \(mediaMTXStatus)",
             "Video decoder: \(videoStatus)",
@@ -109,7 +126,7 @@ struct AppleStatusView: View {
                 LabeledContent("Location", value: snapshot.locationStatus)
             }
 
-            Section("Loaded Configuration") {
+            Section("Loaded Configuration (not an access grant)") {
                 LabeledContent("Source", value: snapshot.configSource)
                 LabeledContent("Organization", value: display(snapshot.organization))
                 LabeledContent("Incident", value: display(snapshot.incident))
@@ -125,10 +142,26 @@ struct AppleStatusView: View {
                 LabeledContent("CalTopo", value: snapshot.caltopoStatus)
             }
 
+            Section("FAA / Tracker Access") {
+                LabeledContent("Teams configuration", value: "\(display(snapshot.organization)) (operational identity only)")
+                LabeledContent(
+                    "Managed device enrollment",
+                    value: snapshot.hasManagedTrackerEnrollment ? "Present" : "Not present"
+                )
+                Text("Latest NOTAM proxy result: \(snapshot.notamProxyStatus)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Runtime") {
                 LabeledContent("Active aircraft", value: "\(snapshot.activeAircraft)")
                 LabeledContent("Accepted track points", value: "\(snapshot.acceptedTrackPoints)")
                 LabeledContent("Filtered observations", value: "\(snapshot.filteredObservations)")
+                LabeledContent("Duplicate position", value: "\(snapshot.duplicatePositionFilters)")
+                LabeledContent("Under minimum distance", value: "\(snapshot.minimumDistanceFilters)")
+                LabeledContent("Implausible speed", value: "\(snapshot.implausibleSpeedFilters)")
+                LabeledContent("Horizontal accuracy", value: "\(snapshot.horizontalAccuracyFilters)")
+                LabeledContent("Invalid observation", value: "\(snapshot.invalidObservationFilters)")
                 LabeledContent("Archived tracks", value: "\(snapshot.archivedTracks)")
                 LabeledContent("MediaMTX", value: snapshot.mediaMTXStatus)
                 LabeledContent("Video decoder", value: snapshot.videoStatus)

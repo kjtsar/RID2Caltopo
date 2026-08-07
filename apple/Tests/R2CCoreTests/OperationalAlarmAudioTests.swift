@@ -17,6 +17,7 @@ struct OperationalAlarmAudioTests {
             "Altitude",
             "Proximity",
             "Controller Signal Strength",
+            "Bridge Not Detected",
         ])
     }
 }

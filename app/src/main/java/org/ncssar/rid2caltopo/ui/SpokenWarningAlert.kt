@@ -22,6 +22,7 @@ enum class SpokenWarningKind(val phrase: String) {
     Altitude("Altitude"),
     Proximity("Proximity"),
     ControllerSignalStrength("Controller Signal Strength"),
+    BridgeNotDetected("Bridge Not Detected"),
     VideoStreamRequest("Video Stream Request"),
 }
 
@@ -90,7 +91,8 @@ object SpokenWarningCenter {
                 SpokenWarningKind.DroneTelemetry,
                 SpokenWarningKind.Altitude,
                 SpokenWarningKind.Proximity,
-                SpokenWarningKind.ControllerSignalStrength
+                SpokenWarningKind.ControllerSignalStrength,
+                SpokenWarningKind.BridgeNotDetected
             ),
             sourceKey = "audio-alarm-test",
             nowMs = nowMs,

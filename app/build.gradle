@@ -10,6 +10,11 @@ plugins {
 def generatedReleaseNotesAssetsDir = layout.buildDirectory.dir("generated/release-notes/assets")
 def generatedLegalAssetsDir = layout.buildDirectory.dir("generated/legal/assets/legal")
 def generatedAppConfigProtoDir = layout.buildDirectory.dir("generated/source/proto/main/java")
+def versionMajor = 2
+def versionMinor = 0
+def versionPatch = 1
+def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
+def canonicalReleaseNotesFile = rootProject.file("release-notes/${appVersionName}/whats_new.txt")
 def runProcess = { File workingDirectory, List command, Map environmentOverrides = [:], boolean ignoreExitValue = false ->
     def stdout = new ByteArrayOutputStream()
     def stderr = new ByteArrayOutputStream()
@@ -39,26 +44,23 @@ def runProcess = { File workingDirectory, List command, Map environmentOverrides
 
 def generateReleaseNotes = tasks.register("generateReleaseNotes") {
     def outputFile = generatedReleaseNotesAssetsDir.map { it.file("release_notes.txt") }
+    inputs.file(canonicalReleaseNotesFile)
     outputs.file(outputFile)
-    outputs.upToDateWhen { false }
 
     doLast {
         def releaseNotesFile = outputFile.get().asFile
         releaseNotesFile.parentFile.mkdirs()
 
-        def result = runProcess(rootDir, [
-                "git",
-                "log",
-                "-10",
-                "--pretty=format:%h%x09%ad%x09%B%x1E",
-                "--date=format:%Y-%m-%d %H:%M:%S %z"
-        ], [:], true)
-
-        def notes = result.exitValue == 0 ? result.stdout.trim() : ""
-        if (notes.isEmpty()) {
-            notes = "Release notes unavailable for this build."
+        if (!canonicalReleaseNotesFile.isFile() || canonicalReleaseNotesFile.length() == 0) {
+            throw new GradleException("Missing canonical release notes for ${appVersionName}: ${canonicalReleaseNotesFile}")
         }
-        releaseNotesFile.text = notes + System.lineSeparator()
+        def notes = canonicalReleaseNotesFile.getText("UTF-8")
+        ["Latest changes:", "Platform-specific changes:", "Known platform differences:"].each { heading ->
+            if (!notes.readLines().contains(heading)) {
+                throw new GradleException("Canonical release notes are missing '${heading}': ${canonicalReleaseNotesFile}")
+            }
+        }
+        releaseNotesFile.bytes = canonicalReleaseNotesFile.bytes
     }
 }
 
@@ -205,10 +207,6 @@ tasks.matching { task ->
 android {
     namespace = "org.ncssar.rid2caltopo"
     compileSdk = 36
-    def versionMajor = 2
-    def versionMinor = 0
-    def versionPatch = 0
-
     signingConfigs {
         register("release") {
             keyAlias = keystoreProperties["keyAlias"] as String
@@ -222,8 +220,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 117
-        def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
+        versionCode = 123
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
@@ -415,9 +412,10 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert:2.1.5")
     implementation("org.osmdroid:osmdroid-android:6.1.20")
     implementation("mil.nga:tiff:3.0.0")
-    // QR code generation for org-config join tokens (core only — no camera/Activity dependency)
+    // QR code generation plus a bundled scanner that remains available offline.
     implementation("com.google.zxing:core:3.5.3")
-    // QR code scanning in the Join Org dialog (no camera permission required)
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // Permissionless scanner retained for the RID aircraft-mapping panel.
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     // On-device OCR fallback for printed aircraft serial numbers.
     implementation("com.google.mlkit:text-recognition:16.0.1")

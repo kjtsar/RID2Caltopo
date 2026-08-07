@@ -6,6 +6,7 @@ import UIKit
 
 enum AppleTrackerCoordinationStatus: String, Sendable {
     case unconfigured = "Not configured"
+    case unavailable = "Unavailable"
     case standalone = "Standalone"
     case connecting = "Connecting"
     case healthy = "Healthy"
@@ -136,6 +137,16 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
     }
 
+    var videoStreamRequestReadyForApproval: AppleVideoStreamViewRequest? {
+        guard ManagedVideoQualityPolicy.shouldPresentApproval(
+            routeKind: videoPreflightRouteKind,
+            failure: videoPreflightFailure
+        ) else {
+            return nil
+        }
+        return pendingVideoStreamRequest
+    }
+
     private var usePeers = false
     private var standaloneR2CCoordinationEnabled = false
     private var trackerURLPrefix = ""
@@ -152,6 +163,7 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var generation = UUID()
     private var connected = false
     private var helloAcknowledged = false
+    private var trackerKnownUnavailable = false
     private var reconnectDelay: Duration = .seconds(2)
     private var receiveTask: Task<Void, Never>?
     private var receiveFailureTask: Task<Void, Never>?
@@ -246,7 +258,7 @@ final class AppleTrackerCoordinator: ObservableObject {
 
     var localDeviceStatusLines: [String] {
         var lines = [statusDetail]
-        if coordinationRequired {
+        if coordinationRequired && status != .unavailable {
             lines.append(
                 helloAcknowledgedAtMilliseconds > 0
                     ? "Hello ack \(Self.elapsedText(since: helloAcknowledgedAtMilliseconds)) ago"
@@ -272,6 +284,9 @@ final class AppleTrackerCoordinator: ObservableObject {
         let normalizedURL = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKey = trackerAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedMapID = mapID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trackerConfigurationChanged = self.trackerURLPrefix != normalizedURL
+            || self.trackerAPIKey != normalizedKey
+        let previouslyConfigured = !self.trackerURLPrefix.isEmpty && !self.trackerAPIKey.isEmpty
         let unchanged = self.usePeers == usePeers
             && self.standaloneR2CCoordinationEnabled == standaloneR2CCoordinationEnabled
             && self.trackerURLPrefix == normalizedURL
@@ -284,6 +299,11 @@ final class AppleTrackerCoordinator: ObservableObject {
         self.trackerURLPrefix = normalizedURL
         self.trackerAPIKey = normalizedKey
         self.mapID = normalizedMapID
+        if trackerConfigurationChanged && !normalizedURL.isEmpty && !normalizedKey.isEmpty {
+            trackerKnownUnavailable = false
+        } else if previouslyConfigured && (normalizedURL.isEmpty || normalizedKey.isEmpty) {
+            trackerKnownUnavailable = true
+        }
         client = Self.makeClient(mapID: normalizedMapID, zoneID: zoneID, zoneName: zoneName)
         protocolState = TrackerCoordinationProtocolState(localZoneID: zoneID)
         resetAcknowledgements()
@@ -298,8 +318,15 @@ final class AppleTrackerCoordinator: ObservableObject {
             return
         }
         guard coordinationRequired else {
-            status = .unconfigured
-            statusDetail = missingConfigurationDescription
+            if trackerKnownUnavailable || normalizedURL.isEmpty || normalizedKey.isEmpty {
+                status = .unavailable
+                statusDetail = trackerKnownUnavailable
+                    ? "Tracker unavailable"
+                    : "Tracker unavailable: URL or API key missing"
+            } else {
+                status = .unconfigured
+                statusDetail = missingConfigurationDescription
+            }
             return
         }
         if normalizedMapID.isEmpty {
@@ -411,6 +438,15 @@ final class AppleTrackerCoordinator: ObservableObject {
             onClose: { [weak self] code, reason in
                 Task { @MainActor [weak self] in
                     self?.socketClosed(generation: currentGeneration, detail: "Closed \(code): \(reason)")
+                }
+            },
+            onFailure: { [weak self] responseCode, detail in
+                Task { @MainActor [weak self] in
+                    self?.socketFailed(
+                        generation: currentGeneration,
+                        responseCode: responseCode,
+                        detail: detail
+                    )
                 }
             }
         )
@@ -561,6 +597,12 @@ final class AppleTrackerCoordinator: ObservableObject {
                 $0.id == selectedVideoQualityID && $0.capacity != "insufficient"
             })
         else { return }
+        AppleLog.info(
+            "VideoApproval",
+            "Start selected request=\(request.requestId) "
+                + "quality=\(choice.width)x\(choice.height)@\(choice.fps) "
+                + "bitrate=\(choice.bitrateBps)"
+        )
         sendVideoStreamDecision(
             requestID: request.requestId,
             approved: true,
@@ -829,6 +871,10 @@ final class AppleTrackerCoordinator: ObservableObject {
             AppleSpokenWarningCenter.shared.speak(
                 "Video Stream Request from, "
                     + Self.spokenEmailAddress(request.requesterEmail)
+            )
+            AppleLog.info(
+                "VideoApproval",
+                "Preparing routed request=\(request.requestId); confirmation deferred"
             )
             AppleLog.info(
                 "TrackerPeer",
@@ -1106,6 +1152,12 @@ final class AppleTrackerCoordinator: ObservableObject {
             selectedVideoQualityID = videoQualityChoices.first(where: {
                 $0.capacity != "insufficient"
             })?.id
+            AppleLog.info(
+                "VideoApproval",
+                "Approval ready request=\(requestID) route=\(routeKind) "
+                    + "usableBps=\(estimatedUplinkBps) choices=\(videoQualityChoices.count) "
+                    + "selected=\(selectedVideoQualityID ?? "none")"
+            )
         }
         let payload: [String: Any] = [
             "type": "video_preflight_result",
@@ -1221,6 +1273,19 @@ final class AppleTrackerCoordinator: ObservableObject {
         statusDetail = detail
         AppleLog.error("TrackerPeer", detail)
         scheduleReconnect()
+    }
+
+    private func socketFailed(generation: UUID, responseCode: Int?, detail: String) {
+        guard generation == self.generation, coordinationRequired else { return }
+        if responseCode == 401 || responseCode == 403 {
+            trackerKnownUnavailable = true
+            stopSocketOnly()
+            status = .unavailable
+            statusDetail = "Tracker unavailable (\(detail))"
+            AppleLog.error("TrackerPeer", statusDetail)
+            return
+        }
+        socketClosed(generation: generation, detail: detail)
     }
 
     private func reconnect(reason: String) {
@@ -1452,10 +1517,18 @@ final class AppleTrackerCoordinator: ObservableObject {
 private final class AppleTrackerWebSocketDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
     private let onOpen: @Sendable () -> Void
     private let onClose: @Sendable (Int, String) -> Void
+    private let onFailure: @Sendable (Int?, String) -> Void
+    private let terminalLock = NSLock()
+    private var terminalDelivered = false
 
-    init(onOpen: @escaping @Sendable () -> Void, onClose: @escaping @Sendable (Int, String) -> Void) {
+    init(
+        onOpen: @escaping @Sendable () -> Void,
+        onClose: @escaping @Sendable (Int, String) -> Void,
+        onFailure: @escaping @Sendable (Int?, String) -> Void
+    ) {
         self.onOpen = onOpen
         self.onClose = onClose
+        self.onFailure = onFailure
     }
 
     func urlSession(
@@ -1472,6 +1545,37 @@ private final class AppleTrackerWebSocketDelegate: NSObject, URLSessionWebSocket
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason: Data?
     ) {
+        guard claimTerminalCallback() else { return }
         onClose(Int(closeCode.rawValue), reason.flatMap { String(data: $0, encoding: .utf8) } ?? "")
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        let responseCode = (task.response as? HTTPURLResponse)?.statusCode
+        guard error != nil || (responseCode != nil && responseCode != 101),
+              claimTerminalCallback()
+        else { return }
+        let detail: String
+        if let responseCode {
+            let reason = HTTPURLResponse.localizedString(forStatusCode: responseCode)
+            detail = "HTTP \(responseCode) \(reason)"
+        } else if let error {
+            let value = error as NSError
+            detail = "\(value.localizedDescription) [\(value.domain) \(value.code)]"
+        } else {
+            detail = "Tracker connection failed"
+        }
+        onFailure(responseCode, detail)
+    }
+
+    private func claimTerminalCallback() -> Bool {
+        terminalLock.lock()
+        defer { terminalLock.unlock() }
+        guard !terminalDelivered else { return false }
+        terminalDelivered = true
+        return true
     }
 }

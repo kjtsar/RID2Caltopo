@@ -2,6 +2,7 @@ import Foundation
 import R2CCore
 import Security
 import SwiftUI
+import UniformTypeIdentifiers
 import Vision
 import VisionKit
 
@@ -27,12 +28,20 @@ struct AppleStoredOperationalProfile: Codable {
     let quietRemoveOnExpiry: Bool
 }
 
+struct AppleOperationalProfileOption: Identifiable, Equatable {
+    let id: String
+    let credentialLabel: String
+    let description: String
+    let expiresAt: Date?
+}
+
 @MainActor
 final class AppleCaltopoProfileLifecycle: ObservableObject {
     static let shared = AppleCaltopoProfileLifecycle()
     @Published private(set) var activeProfileID: String
     @Published private(set) var mutualAidDisplayName: String?
     @Published private(set) var mutualAidExpiresAt: Date?
+    @Published private(set) var availableProfiles: [AppleOperationalProfileOption] = []
 
     private let defaults: UserDefaults
     private static let service = "org.ncssar.RID2CaltopoApple.caltopo-profiles"
@@ -49,6 +58,12 @@ final class AppleCaltopoProfileLifecycle: ObservableObject {
                 ? Date(timeIntervalSince1970: Double(profile.expiresAtEpochMilliseconds) / 1_000)
                 : nil
         }
+        refreshPublishedProfiles()
+    }
+
+    var activeCredentialLabel: String {
+        availableProfiles.first(where: { $0.id == activeProfileID })?.credentialLabel
+            ?? "No Teams credentials"
     }
 
     func captureHome(
@@ -79,6 +94,7 @@ final class AppleCaltopoProfileLifecycle: ObservableObject {
         )
         try Self.store(profile, account: Self.homeAccount)
         setActive("home")
+        refreshPublishedProfiles()
     }
 
     func install(
@@ -120,7 +136,37 @@ final class AppleCaltopoProfileLifecycle: ObservableObject {
         if unexpired {
             setActive(stored.profileID)
         }
+        refreshPublishedProfiles()
         return unexpired
+    }
+
+    @discardableResult
+    func activate(
+        profileID: String,
+        org: AppleOrgConfigSettings,
+        caltopo: AppleCaltopoSettings,
+        now: Date = Date()
+    ) throws -> Bool {
+        let account = profileID == "home" ? Self.homeAccount : Self.mutualAidAccount
+        let profile = try Self.load(account: account)
+        guard profile.profileID == profileID else { return false }
+        if profile.expiresAtEpochMilliseconds > 0,
+           Int64(now.timeIntervalSince1970 * 1_000) >= profile.expiresAtEpochMilliseconds {
+            _ = try removeExpired(org: org, caltopo: caltopo, now: now)
+            return false
+        }
+        try org.apply(storedProfile: profile)
+        try caltopo.apply(
+            storedProfile: profile,
+            connectMap: profile.profileType == "MUTUAL_AID"
+        )
+        setActive(profile.profileID)
+        refreshPublishedProfiles(now: now)
+        AppleLog.info(
+            "OrgConfig",
+            "Activated operational profile id='\(profile.profileID)' type='\(profile.profileType)'"
+        )
+        return true
     }
 
     @discardableResult
@@ -161,6 +207,7 @@ final class AppleCaltopoProfileLifecycle: ObservableObject {
             try caltopo.apply(storedProfile: home, connectMap: false)
             setActive(home.profileID)
         }
+        refreshPublishedProfiles(now: now)
         AppleLog.info(
             "OrgConfig",
             "Removed expired mutual-aid profile id='\(mutualAid.profileID)' quiet=\(mutualAid.quietRemoveOnExpiry)"
@@ -171,6 +218,38 @@ final class AppleCaltopoProfileLifecycle: ObservableObject {
     private func setActive(_ profileID: String) {
         activeProfileID = profileID
         defaults.set(profileID, forKey: Self.activeKey)
+    }
+
+    private func refreshPublishedProfiles(now: Date = Date()) {
+        var options: [AppleOperationalProfileOption] = []
+        if let home = try? Self.load(account: Self.homeAccount) {
+            options.append(Self.option(for: home))
+        }
+        if let mutualAid = try? Self.load(account: Self.mutualAidAccount),
+           mutualAid.expiresAtEpochMilliseconds <= 0
+            || Int64(now.timeIntervalSince1970 * 1_000) < mutualAid.expiresAtEpochMilliseconds {
+            options.append(Self.option(for: mutualAid))
+        }
+        availableProfiles = options
+    }
+
+    private static func option(for profile: AppleStoredOperationalProfile) -> AppleOperationalProfileOption {
+        let fallback = profile.profileType == "HOME" ? "Home" : "Mutual Aid"
+        let base = [profile.organizationName, profile.displayName]
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? fallback
+        let label = profile.profileType == "MUTUAL_AID" && !base.uppercased().hasSuffix("-MA")
+            ? "\(base)-MA"
+            : base
+        let expiry = profile.expiresAtEpochMilliseconds > 0
+            ? Date(timeIntervalSince1970: Double(profile.expiresAtEpochMilliseconds) / 1_000)
+            : nil
+        return AppleOperationalProfileOption(
+            id: profile.profileID,
+            credentialLabel: label,
+            description: profile.profileType == "MUTUAL_AID" ? "Mutual Aid" : "Home organization",
+            expiresAt: expiry
+        )
     }
 
     private static func load(account: String) throws -> AppleStoredOperationalProfile {
@@ -231,6 +310,7 @@ final class AppleOrgConfigSettings: ObservableObject {
     @Published private(set) var teamID: String
     @Published private(set) var trackerURLPrefix: String
     @Published private(set) var faaProxyURL: String
+    @Published private(set) var trackerEnrollmentURL: String
     @Published private(set) var usePeers: Bool
     @Published private(set) var standaloneR2CCoordinationEnabled: Bool
     @Published private(set) var predictiveHeadEnabled: Bool
@@ -263,6 +343,7 @@ final class AppleOrgConfigSettings: ObservableObject {
         teamID = defaults.string(forKey: "org.teamID") ?? ""
         trackerURLPrefix = defaults.string(forKey: "org.trackerURLPrefix") ?? ""
         faaProxyURL = defaults.string(forKey: "org.faaProxyURL") ?? ""
+        trackerEnrollmentURL = defaults.string(forKey: "org.trackerEnrollmentURL") ?? ""
         usePeers = defaults.object(forKey: "org.usePeers") as? Bool ?? true
         standaloneR2CCoordinationEnabled =
             defaults.object(forKey: "org.standaloneR2CCoordination") as? Bool ?? false
@@ -306,7 +387,7 @@ final class AppleOrgConfigSettings: ObservableObject {
     }
 
     var hasNotamAdminConfiguration: Bool {
-        hasManagedTrackerEnrollment
+        !trackerURLPrefix.isEmpty && !trackerAPIKey.isEmpty && !faaProxyURL.isEmpty
     }
 
     func setOrganizationNameForRidMappings(_ organization: String) {
@@ -325,9 +406,11 @@ final class AppleOrgConfigSettings: ObservableObject {
     ) throws {
         self.trackerURLPrefix = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
         faaProxyURL = ""
+        trackerEnrollmentURL = ""
         sourceDescription = "Manual Settings"
         defaults.set(self.trackerURLPrefix, forKey: "org.trackerURLPrefix")
         defaults.removeObject(forKey: "org.faaProxyURL")
+        defaults.removeObject(forKey: "org.trackerEnrollmentURL")
         defaults.set(sourceDescription, forKey: "org.sourceDescription")
         try Self.storeTrackerAPIKey(trackerAPIKey.trimmingCharacters(in: .whitespacesAndNewlines))
         objectWillChange.send()
@@ -337,7 +420,8 @@ final class AppleOrgConfigSettings: ObservableObject {
         organization: String,
         trackerURLPrefix: String,
         trackerAPIKey: String,
-        faaProxyURL: String
+        faaProxyURL: String,
+        enrollmentURL: String
     ) throws {
         organizationName = organization.trimmingCharacters(in: .whitespacesAndNewlines)
         self.trackerURLPrefix = TrackerCoordinationEndpoint.organizationScopedPrefix(
@@ -345,12 +429,14 @@ final class AppleOrgConfigSettings: ObservableObject {
             organization: organizationName
         )
         self.faaProxyURL = faaProxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        trackerEnrollmentURL = enrollmentURL.trimmingCharacters(in: .whitespacesAndNewlines)
         usePeers = true
         standaloneR2CCoordinationEnabled = true
         sourceDescription = "Managed r2c-tracker enrollment"
         defaults.set(organizationName, forKey: "org.name")
         defaults.set(self.trackerURLPrefix, forKey: "org.trackerURLPrefix")
         defaults.set(self.faaProxyURL, forKey: "org.faaProxyURL")
+        defaults.set(trackerEnrollmentURL, forKey: "org.trackerEnrollmentURL")
         defaults.set(usePeers, forKey: "org.usePeers")
         defaults.set(
             standaloneR2CCoordinationEnabled,
@@ -398,11 +484,13 @@ final class AppleOrgConfigSettings: ObservableObject {
         operationalPeriod = credentials?.operationalPeriod ?? ""
         trackFolder = Self.normalizedTrackFolder(credentials?.trackFolder)
         teamID = credentials?.teamID ?? ""
-        trackerURLPrefix = credentials?.trackerURLPrefix ?? ""
+        trackerURLPrefix = ""
+        faaProxyURL = ""
+        trackerEnrollmentURL = ""
         usePeers = credentials?.usePeers ?? true
         predictiveHeadEnabled = credentials?.predictiveHeadEnabled ?? true
         proximityAlertSpacingFeet = credentials?.proximityAlertSpacingFeet ?? 40
-        sourceDescription = "Android QR • \(organizationName.isEmpty ? "Unnamed org" : organizationName)"
+        sourceDescription = "R2C2 • \(organizationName.isEmpty ? "Unnamed org" : organizationName)"
 
         defaults.set(organizationName, forKey: "org.name")
         defaults.set(incident, forKey: "org.incident")
@@ -410,13 +498,38 @@ final class AppleOrgConfigSettings: ObservableObject {
         defaults.set(trackFolder, forKey: "org.trackFolder")
         defaults.set(teamID, forKey: "org.teamID")
         defaults.set(trackerURLPrefix, forKey: "org.trackerURLPrefix")
+        defaults.removeObject(forKey: "org.trackerEnrollmentURL")
+        if faaProxyURL.isEmpty {
+            defaults.removeObject(forKey: "org.faaProxyURL")
+        } else {
+            defaults.set(faaProxyURL, forKey: "org.faaProxyURL")
+        }
         defaults.set(usePeers, forKey: "org.usePeers")
         defaults.set(standaloneR2CCoordinationEnabled, forKey: "org.standaloneR2CCoordination")
         defaults.set(predictiveHeadEnabled, forKey: "org.predictiveHead")
         defaults.set(proximityAlertSpacingFeet, forKey: "org.proximityFeet")
         defaults.set(sourceDescription, forKey: "org.sourceDescription")
         defaults.set(normalizedToken, forKey: "org.joinToken")
-        try Self.storeTrackerAPIKey(credentials?.trackerAPIKey ?? "")
+        try Self.storeTrackerAPIKey("")
+    }
+
+    private static func resolvedFaaProxyURL(
+        explicit: String,
+        trackerURLPrefix: String
+    ) -> String {
+        let trimmed = explicit.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        guard var tracker = URLComponents(
+            string: trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        ),
+        tracker.scheme?.lowercased() == "https",
+        let host = tracker.host?.lowercased(),
+        host == "r2c-tracker.com" || host.hasSuffix(".r2c-tracker.com")
+        else { return "" }
+        tracker.path = "/faa/notams"
+        tracker.query = nil
+        tracker.fragment = nil
+        return tracker.url?.absoluteString ?? ""
     }
 
     func apply(mutualAid profile: MutualAidSharedProfile, normalizedToken: String) throws {
@@ -742,6 +855,7 @@ final class AppleOrgConfigImporter: ObservableObject {
     @Published private(set) var state: State = .idle
     let profileLifecycle = AppleCaltopoProfileLifecycle.shared
     var caltopoConfigurationHandler: ((AppleCaltopoConfiguration) -> Void)?
+    var notamEnrollmentAppliedHandler: ((String, String, String) -> Void)?
 
     var statusText: String {
         switch state {
@@ -751,20 +865,36 @@ final class AppleOrgConfigImporter: ObservableObject {
         }
     }
 
+    func prepareForImport() {
+        guard state != .downloading else { return }
+        state = .idle
+    }
+
     func importTrackerEnrollment(
         _ rawURL: String,
         orgSettings: AppleOrgConfigSettings
     ) async {
         state = .downloading
+        let deviceName = AppleDeviceIdentity.displayName
+        AppleLog.info("OrgConfig", "Redeeming managed tracker enrollment")
         do {
-            let result = try await AppleTrackerEnrollmentClient.redeem(rawURL)
+            let result = try await AppleTrackerEnrollmentClient.redeem(
+                rawURL,
+                deviceName: deviceName
+            )
             try orgSettings.applyTrackerEnrollment(
                 organization: result.organization,
                 trackerURLPrefix: result.trackerBaseURL,
                 trackerAPIKey: result.deviceToken,
-                faaProxyURL: result.faaProxyURL
+                faaProxyURL: result.faaProxyURL,
+                enrollmentURL: rawURL
             )
             AppleNotamCenter.shared.enabled = true
+            notamEnrollmentAppliedHandler?(
+                orgSettings.faaProxyURL,
+                orgSettings.trackerURLPrefix,
+                orgSettings.trackerAPIKey
+            )
             state = .applied("Joined \(result.organization) on r2c-tracker.")
             AppleLog.info(
                 "OrgConfig",
@@ -772,6 +902,10 @@ final class AppleOrgConfigImporter: ObservableObject {
             )
         } catch {
             state = .failed(error.localizedDescription)
+            AppleLog.error(
+                "OrgConfig",
+                "Managed tracker enrollment failed: \(error.localizedDescription)"
+            )
         }
     }
 
@@ -782,7 +916,7 @@ final class AppleOrgConfigImporter: ObservableObject {
         identityStore: AppleDroneConfirmationStore
     ) async {
         let normalized = AndroidConfigTokenCodec.normalize(rawToken)
-        guard let token = AndroidConfigTokenCodec.decode(normalized), token.version == 1 else {
+        guard let token = AndroidConfigTokenCodec.decode(normalized), token.version == 2 else {
             state = .failed("Token not recognised or unsupported.")
             return
         }
@@ -805,24 +939,46 @@ final class AppleOrgConfigImporter: ObservableObject {
             switch token.kind {
             case .organization:
                 let bundle = try OrgConfigTokenCodec.parseBundle(data)
+                let name = bundle.organizationName.isEmpty ? token.displayName : bundle.organizationName
                 try orgSettings.apply(bundle: bundle, normalizedToken: normalized)
                 try caltopoSettings.applyImported(credentials: bundle.credentials)
-                try profileLifecycle.captureHome(org: orgSettings, caltopo: caltopoSettings)
                 caltopoConfigurationHandler?(caltopoSettings.configuration)
                 identityStore.applyImportedMappings(bundle.mappings)
-                if let faaConfig = bundle.faaConfig {
-                    try orgSettings.applyEmbedded(faa: faaConfig)
-                }
                 if let mutualAidTemplate = bundle.mutualAidTemplate {
                     try orgSettings.apply(mutualAidTemplate: mutualAidTemplate)
                 }
-                let name = bundle.organizationName.isEmpty ? token.displayName : bundle.organizationName
+                guard AppleTrackerEnrollmentClient.isEnrollmentURL(bundle.trackerEnrollmentURL) else {
+                    throw OrgConfigInteropError.invalidBundle
+                }
+                let enrollment = try await AppleTrackerEnrollmentClient.redeem(
+                    bundle.trackerEnrollmentURL,
+                    deviceName: AppleDeviceIdentity.displayName
+                )
+                guard enrollment.organization.caseInsensitiveCompare(name) == .orderedSame else {
+                    throw OrgConfigInteropError.invalidBundle
+                }
+                try orgSettings.applyTrackerEnrollment(
+                    organization: enrollment.organization,
+                    trackerURLPrefix: enrollment.trackerBaseURL,
+                    trackerAPIKey: enrollment.deviceToken,
+                    faaProxyURL: enrollment.faaProxyURL,
+                    enrollmentURL: bundle.trackerEnrollmentURL
+                )
+                try profileLifecycle.captureHome(org: orgSettings, caltopo: caltopoSettings)
+                AppleNotamCenter.shared.enabled = true
+                notamEnrollmentAppliedHandler?(
+                    orgSettings.faaProxyURL,
+                    orgSettings.trackerURLPrefix,
+                    orgSettings.trackerAPIKey
+                )
                 let extras = [
-                    bundle.faaConfig == nil ? nil : "FAA",
                     bundle.mutualAidTemplate == nil ? nil : "mutual-aid template",
                 ].compactMap { $0 }
                 let extraMessage = extras.isEmpty ? "" : " Included \(extras.joined(separator: " and "))."
-                state = .applied("Joined '\(name)'. Applied \(bundle.mappings.count) RID mappings.\(extraMessage)")
+                state = .applied(
+                    "\(name) R2C2 configuration loaded and this device enrolled with r2c-tracker. "
+                        + "Applied \(bundle.mappings.count) RID mappings.\(extraMessage)"
+                )
                 AppleLog.info(
                     "OrgConfig",
                     "Applied Android org QR config org='\(name)' mappings=\(bundle.mappings.count) ignored=\(bundle.ignoredConfigTypes.joined(separator: ","))"
@@ -871,31 +1027,43 @@ final class AppleOrgConfigImporter: ObservableObject {
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw OrgConfigInteropError.invalidBundle
             }
-            let bundleData: Data
-            if root["format"] as? String == "rid2caltopo_org_config" {
-                bundleData = data
-            } else {
-                bundleData = try JSONSerialization.data(withJSONObject: [
-                    "format": "rid2caltopo_org_config",
-                    "version": 1,
-                    "org_name": root["org_name"] as? String ?? "",
-                    "configs": [root],
-                ])
+            guard root["format"] as? String == "rid2caltopo_org_config" else {
+                throw OrgConfigInteropError.invalidBundle
             }
-            let bundle = try OrgConfigTokenCodec.parseBundle(bundleData)
+            let bundle = try OrgConfigTokenCodec.parseBundle(data)
             try orgSettings.apply(bundle: bundle, normalizedToken: "local-file:\(url.lastPathComponent)")
             try caltopoSettings.applyImported(credentials: bundle.credentials)
-            try profileLifecycle.captureHome(org: orgSettings, caltopo: caltopoSettings)
             caltopoConfigurationHandler?(caltopoSettings.configuration)
             if !bundle.mappings.isEmpty {
                 identityStore.applyImportedMappings(bundle.mappings)
             }
-            if let faaConfig = bundle.faaConfig {
-                try orgSettings.applyEmbedded(faa: faaConfig)
-            }
             if let mutualAidTemplate = bundle.mutualAidTemplate {
                 try orgSettings.apply(mutualAidTemplate: mutualAidTemplate)
             }
+            guard AppleTrackerEnrollmentClient.isEnrollmentURL(bundle.trackerEnrollmentURL) else {
+                throw OrgConfigInteropError.invalidBundle
+            }
+            let enrollment = try await AppleTrackerEnrollmentClient.redeem(
+                bundle.trackerEnrollmentURL,
+                deviceName: AppleDeviceIdentity.displayName
+            )
+            guard enrollment.organization.caseInsensitiveCompare(bundle.organizationName) == .orderedSame else {
+                throw OrgConfigInteropError.invalidBundle
+            }
+            try orgSettings.applyTrackerEnrollment(
+                organization: enrollment.organization,
+                trackerURLPrefix: enrollment.trackerBaseURL,
+                trackerAPIKey: enrollment.deviceToken,
+                faaProxyURL: enrollment.faaProxyURL,
+                enrollmentURL: bundle.trackerEnrollmentURL
+            )
+            try profileLifecycle.captureHome(org: orgSettings, caltopo: caltopoSettings)
+            AppleNotamCenter.shared.enabled = true
+            notamEnrollmentAppliedHandler?(
+                orgSettings.faaProxyURL,
+                orgSettings.trackerURLPrefix,
+                orgSettings.trackerAPIKey
+            )
             state = .applied(
                 "Loaded \(url.lastPathComponent): \(bundle.mappings.count) RID mapping(s)."
             )
@@ -906,6 +1074,30 @@ final class AppleOrgConfigImporter: ObservableObject {
         } catch {
             state = .failed("Config file import failed: \(error.localizedDescription)")
             AppleLog.error("OrgConfig", "Local config import failed: \(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func activateProfile(
+        _ profileID: String,
+        caltopoSettings: AppleCaltopoSettings,
+        orgSettings: AppleOrgConfigSettings
+    ) -> Bool {
+        do {
+            let activated = try profileLifecycle.activate(
+                profileID: profileID,
+                org: orgSettings,
+                caltopo: caltopoSettings
+            )
+            if activated {
+                caltopoConfigurationHandler?(caltopoSettings.configuration)
+                state = .applied("Selected \(profileLifecycle.activeCredentialLabel) Teams credentials.")
+            }
+            return activated
+        } catch {
+            AppleLog.error("OrgConfig", "Profile activation failed: \(error.localizedDescription)")
+            state = .failed("Could not switch Teams credentials: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -947,86 +1139,103 @@ final class AppleOrgConfigImporter: ObservableObject {
     }
 }
 
+struct ConfigImportNotice: Identifiable, Equatable {
+    let id = UUID()
+    let succeeded: Bool
+    let message: String
+
+    var title: String {
+        succeeded ? "Configuration imported" : "Import failed"
+    }
+}
+
 struct ConfigImportView: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var importer: AppleOrgConfigImporter
     @ObservedObject var caltopoSettings: AppleCaltopoSettings
     @ObservedObject var orgSettings: AppleOrgConfigSettings
     @ObservedObject var identityStore: AppleDroneConfirmationStore
+    let onFinished: (ConfigImportNotice) -> Void
     @State private var tokenText: String
     @State private var showScanner = false
+    @State private var showFileImporter = false
+    @State private var submitting = false
+    @State private var prepared = false
 
     init(
         initialToken: String,
         importer: AppleOrgConfigImporter,
         caltopoSettings: AppleCaltopoSettings,
         orgSettings: AppleOrgConfigSettings,
-        identityStore: AppleDroneConfirmationStore
+        identityStore: AppleDroneConfirmationStore,
+        onFinished: @escaping (ConfigImportNotice) -> Void = { _ in }
     ) {
         self.importer = importer
         self.caltopoSettings = caltopoSettings
         self.orgSettings = orgSettings
         self.identityStore = identityStore
+        self.onFinished = onFinished
         _tokenText = State(initialValue: initialToken)
     }
 
     var body: some View {
         Form {
-            Section("Import Config") {
-                Text("Scan an r2c-tracker enrollment QR. Legacy R2C1 tokens remain available for migration.")
+            Section {
+                Text("Scan an R2C2 organization QR or a direct r2c-tracker enrollment QR. R2C1 organization tokens are no longer accepted.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                TextEditor(text: $tokenText)
-                    .font(.caption.monospaced())
-                    .frame(minHeight: 100)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                if isTrackerEnrollment {
-                    LabeledContent("Type", value: "Managed tracker enrollment")
-                } else if let decodedToken {
-                    LabeledContent("Type", value: tokenKindName(decodedToken.kind))
-                    LabeledContent("Label", value: decodedToken.displayName.isEmpty ? "Unnamed" : decodedToken.displayName)
-                    LabeledContent("Token version", value: "\(decodedToken.version)")
-                } else if !tokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("Token not recognised")
-                        .foregroundStyle(.red)
-                }
-                Button("Scan QR Code", systemImage: "qrcode.viewfinder") { showScanner = true }
-                    .disabled(!DataScannerViewController.isSupported || !DataScannerViewController.isAvailable)
-                Button("Import Config") {
-                    Task {
-                        if isTrackerEnrollment {
-                            await importer.importTrackerEnrollment(
-                                tokenText,
-                                orgSettings: orgSettings
-                            )
-                        } else {
-                            await importer.importToken(
-                                tokenText,
-                                caltopoSettings: caltopoSettings,
-                                orgSettings: orgSettings,
-                                identityStore: identityStore
-                            )
-                        }
+                HStack(alignment: .top, spacing: 10) {
+                    TextField("Import token", text: $tokenText, axis: .vertical)
+                        .font(.caption.monospaced())
+                        .lineLimit(2 ... 4)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        showScanner = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                            .frame(width: 28, height: 28)
                     }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Scan QR code")
+                    .disabled(
+                        submitting
+                            || !DataScannerViewController.isSupported
+                            || !DataScannerViewController.isAvailable
+                    )
                 }
-                .disabled((decodedToken == nil && !isTrackerEnrollment) || importer.state == .downloading)
-            }
-            Section("Status") {
-                if importer.state == .downloading { ProgressView() }
-                Text(importer.statusText)
-                    .foregroundStyle(statusColor)
-                if !orgSettings.organizationName.isEmpty {
-                    LabeledContent("Loaded organization", value: orgSettings.organizationName)
-                    LabeledContent("Source", value: orgSettings.sourceDescription)
-                }
+                Text(recognitionText)
+                    .font(.footnote)
+                    .foregroundStyle(recognitionColor)
             }
             Section {
-                Text("The downloaded bundle can contain CalTopo and tracker credentials. Secrets are stored in the Apple Keychain; the QR token and non-secret incident settings are stored in app preferences.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Button("Choose File", systemImage: "doc.badge.arrow.up") {
+                        showFileImporter = true
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(submitting)
+
+                    Spacer()
+
+                    Button("Cancel", role: .cancel) { dismiss() }
+                        .buttonStyle(.bordered)
+                        .disabled(submitting)
+
+                    Button("Import") { submitToken() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canImport)
+                }
             }
         }
         .navigationTitle("Import Config")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            guard !prepared else { return }
+            prepared = true
+            importer.prepareForImport()
+        }
         .sheet(isPresented: $showScanner) {
             QRCodeScannerView { value in
                 tokenText = value
@@ -1034,11 +1243,93 @@ struct ConfigImportView: View {
             }
             .ignoresSafeArea()
         }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.json, .plainText, .data]
+        ) { result in
+            guard case let .success(url) = result else { return }
+            submitFile(url)
+        }
     }
 
     private var decodedToken: AndroidConfigJoinToken? { AndroidConfigTokenCodec.decode(tokenText) }
     private var isTrackerEnrollment: Bool {
         AppleTrackerEnrollmentClient.isEnrollmentURL(tokenText)
+    }
+
+    private var canImport: Bool {
+        !submitting
+            && importer.state != .downloading
+            && (isTrackerEnrollment || decodedToken != nil)
+    }
+
+    private var recognitionText: String {
+        if tokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Scan QR, paste token, or choose a JSON config file"
+        }
+        if isTrackerEnrollment { return "Managed r2c-tracker enrollment identified"
+        }
+        if let decodedToken {
+            let label = decodedToken.displayName.isEmpty ? "Unnamed" : decodedToken.displayName
+            if decodedToken.kind == .organization {
+                return "Organization Teams config: \(label) (tracker access verified after import)"
+            }
+            return "\(tokenKindName(decodedToken.kind)): \(label)"
+        }
+        return "Token not recognised"
+    }
+
+    private var recognitionColor: Color {
+        tokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || canImport
+            ? .secondary
+            : .red
+    }
+
+    private func submitToken() {
+        guard canImport else { return }
+        submitting = true
+        let value = tokenText
+        let trackerEnrollment = isTrackerEnrollment
+        Task { @MainActor in
+            if trackerEnrollment {
+                await importer.importTrackerEnrollment(value, orgSettings: orgSettings)
+            } else {
+                await importer.importToken(
+                    value,
+                    caltopoSettings: caltopoSettings,
+                    orgSettings: orgSettings,
+                    identityStore: identityStore
+                )
+            }
+            reportResult()
+        }
+        dismiss()
+    }
+
+    private func submitFile(_ url: URL) {
+        guard !submitting else { return }
+        submitting = true
+        Task { @MainActor in
+            await importer.importFile(
+                url,
+                caltopoSettings: caltopoSettings,
+                orgSettings: orgSettings,
+                identityStore: identityStore
+            )
+            reportResult()
+        }
+        dismiss()
+    }
+
+    private func reportResult() {
+        switch importer.state {
+        case let .applied(message):
+            onFinished(.init(succeeded: true, message: message))
+        case let .failed(message):
+            onFinished(.init(succeeded: false, message: message))
+        case .idle, .downloading:
+            onFinished(.init(succeeded: false, message: "The configuration import did not complete."))
+        }
     }
 
     private func tokenKindName(_ kind: AndroidConfigTokenKind) -> String {
@@ -1049,10 +1340,6 @@ struct ConfigImportView: View {
         }
     }
 
-    private var statusColor: Color {
-        if case .failed = importer.state { return .red }
-        return .secondary
-    }
 }
 
 private struct QRCodeScannerView: UIViewControllerRepresentable {

@@ -92,8 +92,10 @@ import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.ComplianceAlertHost
 import org.ncssar.rid2caltopo.ui.ControllerSignalStrengthAlertHost
+import org.ncssar.rid2caltopo.ui.DroneScoutBridgeAlertHost
 import org.ncssar.rid2caltopo.ui.DroneSignalLossAlertHost
 import org.ncssar.rid2caltopo.ui.DroneSpecConfirmationDialog
+import org.ncssar.rid2caltopo.ui.LaunchDisclaimerScreen
 import org.ncssar.rid2caltopo.ui.MainScreen
 import org.ncssar.rid2caltopo.ui.MutualAidPackageImportDialog
 import org.ncssar.rid2caltopo.ui.ProximityAlertCenter
@@ -298,6 +300,11 @@ internal data class VideoQualityChoice(
     val capacity: LinkCapacity,
 )
 
+internal fun shouldPresentVideoApproval(
+    routeKind: String?,
+    failure: String?,
+): Boolean = !routeKind.isNullOrBlank() || !failure.isNullOrBlank()
+
 internal fun videoQualityChoices(
     request: VideoStreamViewRequest,
     usableUplinkBps: Long?,
@@ -402,6 +409,7 @@ class R2CActivity :
     private var externalDisplayPresentation: ExternalDisplayPresentation? = null
     private var displayManager: DisplayManager? = null
     private var bluetoothDisabled by mutableStateOf(false)
+    private var launchDisclaimerAccepted by mutableStateOf(false)
     private var pendingVideoStreamRequest by mutableStateOf<VideoStreamViewRequest?>(null)
     private var pendingVideoPreflightRouteKind by mutableStateOf<String?>(null)
     private var pendingVideoPreflightBps by mutableStateOf<Long?>(null)
@@ -620,19 +628,23 @@ class R2CActivity :
     }
 
     /**
-     * Handle an r2c1:// URI that was fired by the OS camera after scanning an
-     * org-config QR code.  Reconstructs the R2C1: token, downloads the bundle
-     * from Drive (no sign-in required), and shows a toast with the result.
+     * Handle an r2c2:// URI fired by the OS camera. The R2C2 bundle applies
+     * team configuration and redeems a per-device tracker enrollment.
      */
     private fun handleR2cIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
         when (uri.scheme) {
-            "r2c1" -> {
-                val token = OrgConfigToken.MAGIC_PREFIX + uri.toString().removePrefix("r2c1://")
-                CTDebug(TAG, "handleR2cIntent(): joining org from scanned QR")
-                OrgConfigManager.joinFromToken(this, token) { _, message ->
+            OrgConfigToken.QR_SCHEME -> {
+                val token = OrgConfigToken.MAGIC_PREFIX +
+                    uri.toString().removePrefix("${OrgConfigToken.QR_SCHEME}://")
+                CTDebug(TAG, "handleR2cIntent(): joining R2C2 org from scanned QR")
+                OrgConfigManager.joinFromToken(this, token) { success, message ->
                     Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+                    if (success) {
+                        NotamCenter.requestImmediateRefresh()
+                        AirspaceCenter.requestImmediateRefresh()
+                    }
                 }
             }
             "r2cma1" -> {
@@ -670,8 +682,11 @@ class R2CActivity :
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleR2cIntent(intent)
-        handleStreamsQualificationIntent(intent)
+        setIntent(intent)
+        if (launchDisclaimerAccepted) {
+            handleR2cIntent(intent)
+            handleStreamsQualificationIntent(intent)
+        }
     }
 
     override fun onResume() {
@@ -710,21 +725,8 @@ class R2CActivity :
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
         streamsViewModel = ViewModelProvider(this)[StreamsViewModel::class.java]
-        handleStreamsQualificationIntent(intent)
         CaltopoClient.AddDroneSpecsChangedListener(localViewModel)
         CaltopoClient.AddDroneConfirmationCandidateListener(localViewModel)
-        CaltopoClient.CheckIdle()
-        if (CaltopoClient.IsExitRequested()) {
-            CTDebug(TAG, "onCreate(): idle check requested app exit; skipping remaining initialization.")
-            if (!isFinishing) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    finishAndRemoveTask()
-                } else {
-                    finish()
-                }
-            }
-            return
-        }
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         displayManager?.registerDisplayListener(displayListener, null)
         reloadExternalDisplayConfig()
@@ -732,8 +734,15 @@ class R2CActivity :
         refreshBluetoothDisabledState("startup")
 
         setContent {
-            RID2CaltopoTheme() {
-                val localContext =  LocalContext.current
+            RID2CaltopoTheme content@ {
+                if (!launchDisclaimerAccepted) {
+                    LaunchDisclaimerScreen(
+                        onAgree = ::acceptLaunchDisclaimer,
+                        onDisagree = ::declineLaunchDisclaimer,
+                    )
+                    return@content
+                }
+                val localContext = LocalContext.current
                 val activeScreen by localViewModel
                     .activeScreen
                     .collectAsState()
@@ -892,14 +901,26 @@ class R2CActivity :
                 ComplianceAlertHost()
                 DroneSignalLossAlertHost()
                 ControllerSignalStrengthAlertHost()
+                DroneScoutBridgeAlertHost()
                 SpokenWarningAlertHost()
-                pendingVideoStreamRequest?.let { request ->
+                pendingVideoStreamRequest?.takeIf {
+                    shouldPresentVideoApproval(
+                        pendingVideoPreflightRouteKind,
+                        pendingVideoPreflightFailure,
+                    )
+                }?.let { request ->
                     VideoStreamRequestDialog(
                         request = request,
                         preflightRouteKind = pendingVideoPreflightRouteKind,
                         estimatedUplinkBps = pendingVideoPreflightBps,
                         preflightFailure = pendingVideoPreflightFailure,
                         onApprove = { choice ->
+                            CaltopoClient.CTDebug(
+                                "ManagedVideoApproval",
+                                "Start selected request=${request.requestId} " +
+                                    "quality=${choice.width}x${choice.height}@${choice.fps} " +
+                                    "bitrate=${choice.bitrateBps}",
+                            )
                             approvedVideoSelections[request.requestId] =
                                 ApprovedVideoSelection(request, choice)
                             R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
@@ -943,9 +964,28 @@ class R2CActivity :
                 }
             }
         }
+    }
+
+    private fun acceptLaunchDisclaimer() {
+        if (launchDisclaimerAccepted) return
+        CTDebug(TAG, "Launch disclaimer accepted")
+        CaltopoClient.CheckIdle()
+        if (CaltopoClient.IsExitRequested()) {
+            CTDebug(TAG, "Launch acceptance idle check requested app exit")
+            if (!isFinishing) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    finishAndRemoveTask()
+                } else {
+                    finish()
+                }
+            }
+            return
+        }
+        launchDisclaimerAccepted = true
         refreshExternalDisplay()
         // Handle org-config QR scan that launched or re-launched this activity.
         handleR2cIntent(intent)
+        handleStreamsQualificationIntent(intent)
         if (!InitializedCalled) {
 
 
@@ -973,6 +1013,11 @@ class R2CActivity :
                 initialize()
             }
         }
+    }
+
+    private fun declineLaunchDisclaimer() {
+        CTDebug(TAG, "Launch disclaimer declined; exiting")
+        CaltopoClient.QuitApplication()
     }
 
     fun openUri(uriString : String?, mimeType: String? = null) {
@@ -1426,6 +1471,11 @@ class R2CActivity :
                 sourceKey = request.requestId,
                 phrase = "Video Stream Request from ${request.requesterEmail}",
             )
+            Toast.makeText(
+                this,
+                "Preparing routed video request from ${request.requesterEmail}",
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
@@ -1439,6 +1489,18 @@ class R2CActivity :
                 pendingVideoPreflightRouteKind = routeKind
                 pendingVideoPreflightBps = estimatedUplinkBps
                 pendingVideoPreflightFailure = null
+                val choices = videoQualityChoices(
+                    pendingVideoStreamRequest!!,
+                    estimatedUplinkBps,
+                )
+                CaltopoClient.CTDebug(
+                    "ManagedVideoApproval",
+                    "Approval ready request=$requestId route=$routeKind " +
+                        "usableBps=$estimatedUplinkBps choices=${choices.size} " +
+                        "selected=${choices.firstOrNull {
+                            it.capacity != LinkCapacity.INSUFFICIENT
+                        }?.preset.orEmpty()}",
+                )
             }
         }
     }

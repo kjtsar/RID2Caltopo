@@ -5,6 +5,7 @@ public enum OperationalSpokenWarningKind: String, CaseIterable, Sendable {
     case altitude = "Altitude"
     case proximity = "Proximity"
     case controllerSignalStrength = "Controller Signal Strength"
+    case bridgeNotDetected = "Bridge Not Detected"
 
     public var phrase: String { rawValue }
 }
@@ -16,6 +17,7 @@ public enum OperationalAlarmAudioPolicy {
         .altitude,
         .proximity,
         .controllerSignalStrength,
+        .bridgeNotDetected,
     ]
 
     public static func normalizedVolumePercent(_ value: Int) -> Int {

@@ -14,6 +14,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
+import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
 import kotlin.math.max
 
 private const val SIGNAL_LOSS_ALERT_TAG = "DroneSignalLossAlert"
@@ -32,7 +33,10 @@ private data class DroneSignalLossCandidate(
     val lossObservedWhileFar: Boolean,
     val hasExceededDistanceThreshold: Boolean,
     val distanceFromTabletFt: Double,
-    val distanceFromTakeoffFt: Double?
+    val distanceFromTakeoffFt: Double?,
+    val strongestRssiDbm: Int?,
+    val strongestRssiTransport: CtDroneSpec.TransportTypeEnum,
+    val bridgeRecentlySeen: Boolean,
 )
 
 data class DroneSignalLossAlertUiState(
@@ -41,7 +45,8 @@ data class DroneSignalLossAlertUiState(
     val mappedId: String,
     val signalIdleMs: Long,
     val distanceFromTabletFt: Double,
-    val volumeFraction: Float
+    val volumeFraction: Float,
+    val bridgeRecentlySeen: Boolean,
 )
 
 data class DroneSignalLossFlightUiState(
@@ -51,7 +56,8 @@ data class DroneSignalLossFlightUiState(
     val muted: Boolean,
     val alerting: Boolean,
     val signalIdleMs: Long?,
-    val distanceFromTabletFt: Double?
+    val distanceFromTabletFt: Double?,
+    val bridgeRecentlySeen: Boolean,
 )
 
 internal class DroneSignalLossSpokenWarningGate(initialFlightKey: String?) {
@@ -130,6 +136,12 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         flightMonitorState.keys.retainAll(activeFlights.keys)
 
         val nowMs = System.currentTimeMillis()
+        val nowMonotonicMs = System.nanoTime() / 1_000_000L
+        val bridgeRecentlySeen = isBridgeRecentlySeen(
+            lastSeenMonotonicMs = DroneScoutBridgeMonitor.signal.value?.lastSeenMonotonicMs,
+            nowMonotonicMs = nowMonotonicMs,
+            freshnessMs = DroneScoutBridgeMonitor.SIGNAL_STALE_AFTER_MS
+        )
         val newTrackDelayMs = CaltopoClient.GetNewTrackDelayInSeconds() * 1000L
         val bridgeCheckDistanceFt = CaltopoClient.GetBridgeCheckDistanceFeet().toDouble()
         val outOfRangeDistanceFt = CaltopoClient.OUT_OF_RANGE_DISTANCE_FEET.toDouble()
@@ -317,7 +329,10 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                     lossObservedWhileFar = nextState.lossObservedWhileFar,
                     hasExceededDistanceThreshold = nextState.hasExceededDistanceThreshold,
                     distanceFromTabletFt = distanceFt,
-                    distanceFromTakeoffFt = takeoffDistanceFt
+                    distanceFromTakeoffFt = takeoffDistanceFt,
+                    strongestRssiDbm = spec.lastRssi.takeIf { it != 0 },
+                    strongestRssiTransport = spec.lastRssiTransport,
+                    bridgeRecentlySeen = bridgeRecentlySeen,
                 )
             }
         } else {
@@ -343,7 +358,8 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                 muted = flightKey in mutedFlightKeys,
                 alerting = candidate != null,
                 signalIdleMs = candidate?.signalIdleMs,
-                distanceFromTabletFt = candidate?.distanceFromTabletFt
+                distanceFromTabletFt = candidate?.distanceFromTabletFt,
+                bridgeRecentlySeen = candidate?.bridgeRecentlySeen == true
             )
         }
 
@@ -370,6 +386,9 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                         "bridgeCheckDistanceFt=${"%.1f".format(chosen.bridgeCheckDistanceFt)} " +
                         "distanceFt=${"%.1f".format(chosen.distanceFromTabletFt)} " +
                         "takeoffDistanceFt=${chosen.distanceFromTakeoffFt?.let { "%.1f".format(it) } ?: "unknown"} " +
+                        "strongestRssiDbm=${chosen.strongestRssiDbm ?: "unavailable"} " +
+                        "strongestRssiTransport=${chosen.strongestRssiTransport} " +
+                        "bridgeRecentlySeen=${chosen.bridgeRecentlySeen} " +
                         "outOfRange=${chosen.outOfRange} " +
                         "hasExceededDistance=${chosen.hasExceededDistanceThreshold} " +
                         "lossObservedWhileFar=${chosen.lossObservedWhileFar}"
@@ -404,7 +423,8 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
             mappedId = mappedId,
             signalIdleMs = signalIdleMs,
             distanceFromTabletFt = distanceFromTabletFt,
-            volumeFraction = adjustedVolumeFraction
+            volumeFraction = adjustedVolumeFraction,
+            bridgeRecentlySeen = bridgeRecentlySeen
         )
     }
 
@@ -459,6 +479,15 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         thresholdMs: Long
     ): Boolean = signalIdleMs > thresholdMs && trackTelemetryIdleMs <= thresholdMs
 
+    private fun isBridgeRecentlySeen(
+        lastSeenMonotonicMs: Long?,
+        nowMonotonicMs: Long,
+        freshnessMs: Long
+    ): Boolean {
+        val lastSeen = lastSeenMonotonicMs ?: return false
+        return nowMonotonicMs - lastSeen in 0..freshnessMs
+    }
+
     internal fun isReturnedToBridgeForTests(
         bridgeVerified: Boolean,
         distanceFt: Double,
@@ -502,6 +531,12 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         learnedSamples: Int,
         maxTrackDelayMs: Long
     ): Long = effectiveIdleThresholdMs(learnedIntervalMs, learnedSamples, maxTrackDelayMs)
+
+    internal fun isBridgeRecentlySeenForTests(
+        lastSeenMonotonicMs: Long?,
+        nowMonotonicMs: Long,
+        freshnessMs: Long
+    ): Boolean = isBridgeRecentlySeen(lastSeenMonotonicMs, nowMonotonicMs, freshnessMs)
 
     private fun distanceFeetFromTablet(
         spec: CtDroneSpec,
@@ -566,9 +601,14 @@ fun DroneSignalLossAlertHost() {
         val currentFlightKey = alert?.flightKey
         if (!spokenWarningGate.shouldRequestWarning(currentFlightKey)) return@LaunchedEffect
         val currentAlert = alert ?: return@LaunchedEffect
-        SpokenWarningCenter.requestWarning(
+        SpokenWarningCenter.requestSpokenPhrase(
             kind = SpokenWarningKind.DroneTelemetry,
             sourceKey = currentAlert.flightKey,
+            phrase = if (currentAlert.bridgeRecentlySeen) {
+                "Drone Location Stale"
+            } else {
+                "Drone Signal Lost"
+            },
             nowMs = System.currentTimeMillis(),
             cooldownMs = CaltopoClient.LOSS_OF_SIGNAL_TONE_DURATION_SECONDS * 1000L
         )

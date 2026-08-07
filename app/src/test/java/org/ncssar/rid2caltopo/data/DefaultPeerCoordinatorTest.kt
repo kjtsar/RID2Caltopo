@@ -50,6 +50,7 @@ class DefaultPeerCoordinatorTest {
 
     @Before
     fun setUp() {
+        CaltopoClient.ResetPersistedClientState()
         transport = FakeTransport()
         mqttFallback = FakePeerCoordinator("mqtt-fallback")
         TrackerPeerCoordinator.setTransportFactoryForTesting { transport }
@@ -142,6 +143,9 @@ class DefaultPeerCoordinatorTest {
             override fun getRemoteId(): String = "DRONE1"
             override fun setLocalOwner(isOwner: Boolean) = Unit
         }
+        CaltopoClient.SaveDroneSpecConfirmation(
+            "DRONE1", "NCSSAR", "DJI Mini 4 Pro", "1SAR7", "1SAR7Mn4pr"
+        )
         coordinator.onLiveTrackCreated(track, drone, 42.0, 1234L)
 
         transport.fail(403, "Forbidden")
@@ -149,6 +153,52 @@ class DefaultPeerCoordinatorTest {
         assertTrue(mqttFallback.isStarted())
         assertEquals("MAP1", mqttFallback.getStartedMapId())
         assertEquals(1, mqttFallback.countEvents("onLiveTrackCreated"))
+        assertEquals(
+            PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED,
+            coordinator.coordinationIndicatorState
+        )
+        assertEquals("Coordinator unavailable", coordinator.coordinationStatusText)
+        assertTrue(
+            coordinator.coordinationDiagnosticLines.toString(),
+            coordinator.coordinationDiagnosticLines.any {
+                it == "Tracker unavailable: HTTP 403 Forbidden"
+            }
+        )
+    }
+
+    @Test
+    fun unconfirmedTrackIsBufferedUntilOperatorConfirmation() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+        CaltopoClient.SetTrackerApiKey("")
+        CaltopoClient.SetTrackerUrlPfx("")
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val remoteId = "DRONEPENDING"
+        val drone = CtDroneSpec(remoteId)
+        var localOwner = true
+        val track = object : LiveTrackOwnerDelegate {
+            override fun getRemoteId(): String = remoteId
+            override fun setLocalOwner(isOwner: Boolean) {
+                localOwner = isOwner
+            }
+        }
+
+        coordinator.onLiveTrackCreated(track, drone, 42.0, 1234L)
+        coordinator.onWaypointReceived(drone, 39.1, -121.2, 120.0, 42.0, 2345L, null)
+
+        assertFalse(localOwner)
+        assertEquals(0, mqttFallback.countEvents("onLiveTrackCreated"))
+        assertEquals(0, mqttFallback.countEvents("onWaypointReceived"))
+
+        CaltopoClient.SaveDroneSpecConfirmation(
+            remoteId, "NCSSAR", "DJI Mini 4 Pro", "1SAR7", "1SAR7Mn4pr"
+        )
+        coordinator.onDroneConfirmed(
+            remoteId, "NCSSAR", "DJI Mini 4 Pro", "1SAR7", "1SAR7Mn4pr"
+        )
+        coordinator.onWaypointReceived(drone, 39.2, -121.3, 121.0, 40.0, 3456L, null)
+
+        assertEquals(1, mqttFallback.countEvents("onLiveTrackCreated"))
+        assertEquals(1, mqttFallback.countEvents("onWaypointReceived"))
     }
 
     @Test
@@ -193,6 +243,22 @@ class DefaultPeerCoordinatorTest {
                 !message.has("flight" + "StartMsec")
         })
         assertEquals(null, mqttFallback.latestEventOfKind("onDroneConfirmed"))
+    }
+
+    @Test
+    fun missingTrackerConfiguration_isReportedUnavailableInsteadOfMqttHealthy() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+        CaltopoClient.SetTrackerApiKey("")
+        CaltopoClient.SetTrackerUrlPfx("")
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        assertEquals(
+            PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED,
+            coordinator.coordinationIndicatorState
+        )
+        assertEquals("Coordinator unavailable", coordinator.coordinationStatusText)
+        assertTrue(coordinator.coordinationDiagnosticLines.contains("Tracker not configured"))
     }
 
     @Test

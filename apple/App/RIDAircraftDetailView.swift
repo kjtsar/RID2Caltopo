@@ -14,7 +14,7 @@ struct RIDAircraftSummaryRow: View {
                 Text(identity?.mappedID ?? track.aircraftID)
                     .font(.headline.monospaced())
                 Spacer()
-                RIDSignalStrengthBars(rssi: track.lastSignalStrengthDbm)
+                RIDSignalStrengthBars(rssi: track.lastDirectSignalStrengthDbm)
                     .frame(width: 38, height: 18)
                 Text(rssiText)
                     .font(.caption.monospacedDigit())
@@ -63,7 +63,12 @@ struct RIDAircraftSummaryRow: View {
     }
 
     private var rssiText: String {
-        track.lastSignalStrengthDbm.map { "\($0) dBm" } ?? "n/a"
+        "D→Device \(rssiValue(track.lastDirectSignalStrengthDbm)) • "
+            + "D→Bridge \(rssiValue(track.lastDroneToBridgeSignalStrengthDbm)) dBm"
+    }
+
+    private func rssiValue(_ rssi: Int?) -> String {
+        rssi.map(String.init) ?? "—"
     }
 
     private var relativePosition: RidRelativePosition? {
@@ -114,13 +119,18 @@ struct RIDAircraftDetailView: View {
                 }
                 LabeledContent("Last transport", value: sourceName(track.lastObservation.source))
                 HStack {
-                    Text("Signal")
+                    Text("Drone → device")
                     Spacer()
-                    RIDSignalStrengthBars(rssi: track.lastSignalStrengthDbm)
+                    RIDSignalStrengthBars(rssi: track.lastDirectSignalStrengthDbm)
                         .frame(width: 48, height: 20)
-                    Text(track.lastSignalStrengthDbm.map { "\($0) dBm" } ?? "Unavailable")
+                    Text(track.lastDirectSignalStrengthDbm.map { "\($0) dBm" } ?? "Unavailable")
                         .foregroundStyle(.secondary)
                 }
+                LabeledContent(
+                    "Drone → bridge",
+                    value: track.lastDroneToBridgeSignalStrengthDbm.map { "\($0) dBm" }
+                        ?? "Unavailable"
+                )
                 LabeledContent("Last received", value: track.lastSignalAt.formatted(date: .omitted, time: .standard))
             }
 
@@ -222,25 +232,31 @@ final class AppleDroneConfirmationStore: ObservableObject {
     private var promptedRemoteIDs: Set<String> = []
     private var ignoredRemoteIDs: Set<String> = []
     private let defaults = UserDefaults.standard
+    private static let ignoredRemoteIDsDefaultsKey = "org.ignoredRemoteIDs"
 
     init() {
-        guard let entries = defaults.array(forKey: "org.ridMappings") as? [[String: String]] else { return }
-        importedIdentities = Dictionary(uniqueKeysWithValues: entries.compactMap { entry in
-            guard let remoteID = entry["remoteID"], !remoteID.isEmpty else { return nil }
-            let identity = RidAircraftIdentity(
-                remoteID: remoteID,
-                organization: entry["organization"] ?? "",
-                ownerName: entry["ownerName"] ?? entry["owner"] ?? "",
-                pilotCallsign: entry["ownerCallsign"] ?? Self.importedPilotCallsign(
-                    mappedID: entry["mappedID"] ?? "",
-                    model: entry["model"] ?? "",
-                    remoteID: remoteID
-                ),
-                droneDescription: entry["model"] ?? "",
-                mappedIDOverride: entry["mappedID"]
-            )
-            return (remoteID, identity)
-        })
+        if let entries = defaults.array(forKey: "org.ridMappings") as? [[String: String]] {
+            importedIdentities = Dictionary(uniqueKeysWithValues: entries.compactMap { entry in
+                guard let remoteID = entry["remoteID"], !remoteID.isEmpty else { return nil }
+                let identity = RidAircraftIdentity(
+                    remoteID: remoteID,
+                    organization: entry["organization"] ?? "",
+                    ownerName: entry["ownerName"] ?? entry["owner"] ?? "",
+                    pilotCallsign: entry["ownerCallsign"] ?? Self.importedPilotCallsign(
+                        mappedID: entry["mappedID"] ?? "",
+                        model: entry["model"] ?? "",
+                        remoteID: remoteID
+                    ),
+                    droneDescription: entry["model"] ?? "",
+                    mappedIDOverride: entry["mappedID"]
+                )
+                return (remoteID, identity)
+            })
+        }
+        ignoredRemoteIDs = Set(
+            defaults.stringArray(forKey: Self.ignoredRemoteIDsDefaultsKey)?
+                .filter { !$0.isEmpty } ?? []
+        )
     }
 
     func identity(for remoteID: String) -> RidAircraftIdentity? {
@@ -260,7 +276,6 @@ final class AppleDroneConfirmationStore: ObservableObject {
         for remoteID in endedRemoteIDs {
             sessionIdentities.removeValue(forKey: remoteID)
             promptedRemoteIDs.remove(remoteID)
-            ignoredRemoteIDs.remove(remoteID)
         }
         activeRemoteIDs = currentRemoteIDs
 
@@ -275,10 +290,17 @@ final class AppleDroneConfirmationStore: ObservableObject {
         return candidate
     }
 
-    func ignoreForCurrentFlight(_ remoteID: String) {
+    func isIgnored(_ remoteID: String) -> Bool {
+        ignoredRemoteIDs.contains(remoteID)
+    }
+
+    func ignore(_ remoteID: String) {
         guard !remoteID.isEmpty else { return }
         ignoredRemoteIDs.insert(remoteID)
-        AppleLog.info("DroneConfirmation", "Ignored active flight remoteId=\(remoteID) sessionOnly=true")
+        sessionIdentities.removeValue(forKey: remoteID)
+        peerIdentities.removeValue(forKey: remoteID)
+        persistIgnoredRemoteIDs()
+        AppleLog.info("DroneConfirmation", "Ignored remoteId=\(remoteID) persisted=true caltopoSuppressed=true")
     }
 
     var importedMappingCount: Int { importedIdentities.count }
@@ -289,6 +311,9 @@ final class AppleDroneConfirmationStore: ObservableObject {
 
     func confirm(_ identity: RidAircraftIdentity) {
         guard identity.isComplete else { return }
+        if ignoredRemoteIDs.remove(identity.remoteID) != nil {
+            persistIgnoredRemoteIDs()
+        }
         sessionIdentities[identity.remoteID] = identity
         AppleLog.info(
             "DroneConfirmation",
@@ -373,6 +398,11 @@ final class AppleDroneConfirmationStore: ObservableObject {
         promptedRemoteIDs.removeAll()
         ignoredRemoteIDs.removeAll()
         defaults.removeObject(forKey: "org.ridMappings")
+        defaults.removeObject(forKey: Self.ignoredRemoteIDsDefaultsKey)
+    }
+
+    private func persistIgnoredRemoteIDs() {
+        defaults.set(ignoredRemoteIDs.sorted(), forKey: Self.ignoredRemoteIDsDefaultsKey)
     }
 
     private static func importedPilotCallsign(mappedID: String, model: String, remoteID: String) -> String {
@@ -411,12 +441,24 @@ struct DroneConfirmationView: View {
             Form {
                 Section("Confirm Drone") {
                     LabeledContent("Remote ID", value: remoteID)
-                    TextField("Organization", text: $organization)
-                    TextField("Pilot Callsign", text: $pilotCallsign)
-                    TextField("Drone Description", text: $droneDescription)
+                    LabeledContent("Organization") {
+                        TextField("Required", text: $organization)
+                            .multilineTextAlignment(.trailing)
+                            .accessibilityLabel("Organization")
+                    }
+                    LabeledContent("Pilot Callsign") {
+                        TextField("Required", text: $pilotCallsign)
+                            .multilineTextAlignment(.trailing)
+                            .accessibilityLabel("Pilot Callsign")
+                    }
+                    LabeledContent("Drone Description") {
+                        TextField("Required", text: $droneDescription)
+                            .multilineTextAlignment(.trailing)
+                            .accessibilityLabel("Drone Description")
+                    }
                 }
                 Section {
-                    Text("Matching Android, all three fields are required. Save keeps the local identity for this session and broadcasts it when tracker coordination is configured.")
+                    Text("Matching Android, all three fields are required. Save keeps the local identity for this session and broadcasts it when tracker coordination is configured. Ignore remembers this Remote ID on this device and suppresses its CalTopo track until it is explicitly saved later or app data is reset.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

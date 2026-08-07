@@ -33,14 +33,14 @@ class LandRestrictionRepository(
         cacheDirectory.mkdirs()
     }
 
-    suspend fun fetch(location: Location, radiusNm: Int): LandRestrictionFetchResult = withContext(Dispatchers.IO) {
+    suspend fun fetch(location: Location, radiusStatuteMiles: Int): LandRestrictionFetchResult = withContext(Dispatchers.IO) {
         val center = LandCoordinate(location.latitude, location.longitude)
         val areas = mutableListOf<LandRestrictionArea>()
         val errors = mutableListOf<String>()
         val dataTimes = mutableListOf<Long>()
         sources.forEach { source ->
             try {
-                val payload = fetchPayload(buildQueryUrl(source, center, radiusNm.toDouble()))
+                val payload = fetchPayload(buildQueryUrl(source, center, radiusStatuteMiles.toDouble()))
                 val now = System.currentTimeMillis()
                 writeCache(source, payload, now)
                 areas += LandRestrictionParser.parse(payload, source, center, OperatingArea.radiusNm)
@@ -161,8 +161,9 @@ class LandRestrictionRepository(
         fun buildQueryUrl(
             source: LandRestrictionSource,
             center: LandCoordinate,
-            radiusNm: Double
+            radiusStatuteMiles: Double
         ): HttpUrl {
+            val radiusNm = OperatingArea.statuteMilesToNauticalMiles(radiusStatuteMiles)
             val latitudeDelta = radiusNm / 60.0
             val longitudeDelta = radiusNm / (60.0 * kotlin.math.cos(Math.toRadians(center.latitude))).coerceAtLeast(1.0)
             val envelope = listOf(

@@ -657,6 +657,7 @@ fun StreamsScreen(
                 if (allowModalDialogs) viewModel.pendingClue?.let {
                     ClueSubmissionSheet(
                         pendingClue = it,
+                        coordinateDisplayFormat = viewModel.coordinateDisplayFormat,
                         onTitleChanged = viewModel::updateClueTitle,
                         onDescriptionChanged = viewModel::updateClueDescription,
                         onGimbalAngleChanged = viewModel::updateClueGimbalAngle,

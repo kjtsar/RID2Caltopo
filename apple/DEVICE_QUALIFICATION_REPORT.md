@@ -26,7 +26,7 @@ bundle, GeoJSON file, or measurement in Evidence.
 | Area | Required observation | Result | Evidence / measurements / notes |
 | --- | --- | --- | --- |
 | Install and permissions | TestFlight install succeeds; Bluetooth, Local Network, Location, and Camera prompts are understandable and the accepted state appears in Status. |  |  |
-| Organization QR | Android-produced `R2C1` scans by camera and imports the expected organization, incident, operational period, and mappings. |  |  |
+| Organization QR | Android-produced `R2C2` scans by camera, imports team configuration, and redeems a unique tracker credential. |  |  |
 | FAA QR | Android-produced `R2CFAA1` scans and imports the expected FAA configuration or records why it is not applicable. |  |  |
 | Mutual-aid QR | Android-produced `R2CMA1` scans and imports the expected mutual-aid configuration or records why it is not applicable. |  |  |
 | Drive bundle | One real public Drive-hosted configuration bundle imports without exposing its token in Status or shared logs. |  |  |

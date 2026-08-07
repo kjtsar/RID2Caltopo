@@ -44,6 +44,41 @@ public struct MapScreenPoint: Sendable, Equatable {
 }
 
 public enum OperationalMapGeometry {
+    public static let minimumTravelBearingDisplacementMeters = 2.0
+
+    /// Uses the latest displacement an operator can also see in the marker
+    /// track. Duplicate/stationary samples retain the last movement course.
+    public static func travelBearingDegrees(
+        points: [RidTrackPoint],
+        minimumDisplacementMeters: Double = minimumTravelBearingDisplacementMeters
+    ) -> Double? {
+        guard minimumDisplacementMeters.isFinite,
+              minimumDisplacementMeters > 0
+        else { return nil }
+
+        guard let latest = points.last,
+              latest.latitude.isFinite,
+              latest.longitude.isFinite
+        else { return nil }
+        for earlier in points.dropLast().reversed() {
+            guard earlier.latitude.isFinite, earlier.longitude.isFinite else { continue }
+            let distance = distanceMeters(
+                fromLatitude: earlier.latitude,
+                longitude: earlier.longitude,
+                toLatitude: latest.latitude,
+                longitude: latest.longitude
+            )
+            guard distance >= minimumDisplacementMeters else { continue }
+            return initialBearingDegrees(
+                fromLatitude: earlier.latitude,
+                longitude: earlier.longitude,
+                toLatitude: latest.latitude,
+                longitude: latest.longitude
+            )
+        }
+        return nil
+    }
+
     public static func bearingLineToViewportEdge(
         start: MapScreenPoint,
         headingDegrees: Double?,
@@ -70,4 +105,39 @@ public enum OperationalMapGeometry {
             y: min(max(start.y + dy * distance, 0), viewportHeight)
         )
     }
+
+    private static func distanceMeters(
+        fromLatitude latitude1: Double,
+        longitude longitude1: Double,
+        toLatitude latitude2: Double,
+        longitude longitude2: Double
+    ) -> Double {
+        let earthRadiusMeters = 6_371_008.8
+        let lat1 = latitude1 * .pi / 180
+        let lat2 = latitude2 * .pi / 180
+        let deltaLat = (latitude2 - latitude1) * .pi / 180
+        let deltaLongitude = (longitude2 - longitude1) * .pi / 180
+        let a = sin(deltaLat / 2) * sin(deltaLat / 2)
+            + cos(lat1) * cos(lat2)
+            * sin(deltaLongitude / 2) * sin(deltaLongitude / 2)
+        return earthRadiusMeters * 2 * atan2(sqrt(a), sqrt(max(0, 1 - a)))
+    }
+
+    private static func initialBearingDegrees(
+        fromLatitude latitude1: Double,
+        longitude longitude1: Double,
+        toLatitude latitude2: Double,
+        longitude longitude2: Double
+    ) -> Double? {
+        let lat1 = latitude1 * .pi / 180
+        let lat2 = latitude2 * .pi / 180
+        let deltaLongitude = (longitude2 - longitude1) * .pi / 180
+        let y = sin(deltaLongitude) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(deltaLongitude)
+        guard x != 0 || y != 0 else { return nil }
+        let degrees = atan2(y, x) * 180 / .pi
+        let remainder = degrees.truncatingRemainder(dividingBy: 360)
+        return remainder >= 0 ? remainder : remainder + 360
+    }
+
 }

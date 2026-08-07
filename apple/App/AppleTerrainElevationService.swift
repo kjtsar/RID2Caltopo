@@ -27,7 +27,7 @@ actor AppleTerrainElevationService {
               (-90 ... 90).contains(latitude), (-180 ... 180).contains(longitude)
         else { return nil }
         let coordinate = OperationalAltitudeCoordinator.Coordinate(latitude: latitude, longitude: longitude)
-        let key = OperationalAltitudeCoordinator.terrainKey(coordinate)
+        let key = OperationalAltitudeCoordinator.terrainCacheKey(coordinate)
         let localDEM = self.localDEM
         if let elevation = await Task.detached(priority: .utility, operation: {
             localDEM.sampleElevationMeters(latitude: latitude, longitude: longitude)

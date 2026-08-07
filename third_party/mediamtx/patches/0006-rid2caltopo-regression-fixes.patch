@@ -1,0 +1,55 @@
+diff --git a/internal/conf/conf_test.go b/internal/conf/conf_test.go
+index f52b9aa1..0bf0df0d 100644
+--- a/internal/conf/conf_test.go
++++ b/internal/conf/conf_test.go
+@@ -776,6 +776,8 @@ func TestSampleConfFile(t *testing.T) {
+ 		conf2, confPath2, err := Load("", nil, nil)
+ 		require.NoError(t, err)
+ 		require.Equal(t, "", confPath2)
++		// RID2Caltopo intentionally ships the sample configuration at debug level.
++		conf2.LogLevel = conf1.LogLevel
+ 
+ 		require.Equal(t, conf1, conf2)
+ 	}()
+diff --git a/internal/core/path_test.go b/internal/core/path_test.go
+index 5ac89fc4..eec92590 100644
+--- a/internal/core/path_test.go
++++ b/internal/core/path_test.go
+@@ -1144,10 +1144,11 @@ func TestPathOverridePublisherAcceptsAudioOnlyReplacement(t *testing.T) {
+ 	err = reader.SetupAll(desc.BaseURL, desc.Medias)
+ 	require.NoError(t, err)
+ 
++	audioRTPPayload := []byte{0, 16, 0, 32, 1, 2, 3, 4}
+ 	audioPacketReceived := make(chan struct{})
+ 
+ 	reader.OnPacketRTP(desc.Medias[1], desc.Medias[1].Formats[0], func(pkt *rtp.Packet) {
+-		require.Equal(t, []byte{1, 2, 3, 4}, pkt.Payload)
++		require.Equal(t, audioRTPPayload, pkt.Payload)
+ 		close(audioPacketReceived)
+ 	})
+ 
+@@ -1174,7 +1175,7 @@ func TestPathOverridePublisherAcceptsAudioOnlyReplacement(t *testing.T) {
+ 			SSRC:           978651231,
+ 			Marker:         true,
+ 		},
+-		Payload: []byte{1, 2, 3, 4},
++		Payload: audioRTPPayload,
+ 	})
+ 	require.NoError(t, err)
+ 
+diff --git a/internal/stream/sub_stream.go b/internal/stream/sub_stream.go
+index 8df14ead..7106eecd 100644
+--- a/internal/stream/sub_stream.go
++++ b/internal/stream/sub_stream.go
+@@ -124,11 +124,6 @@ func matchStreamMedias(
+ 			mediasToCodecs(curMedias), mediasToCodecs(streamMedias))
+ 	}
+ 
+-	if len(curMedias) == 0 {
+-		return nil, fmt.Errorf("wants to publish %v, but stream expects %v",
+-			mediasToCodecs(curMedias), mediasToCodecs(streamMedias))
+-	}
+-
+ 	matched := make([]*description.Media, len(curMedias))
+ 
+ 	if !allowSubset {

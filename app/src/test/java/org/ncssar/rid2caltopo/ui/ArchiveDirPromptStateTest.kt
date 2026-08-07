@@ -6,6 +6,35 @@ import org.junit.Test
 
 class ArchiveDirPromptStateTest {
     @Test
+    fun persistentResetImmediatelyRequestsRequiredSetupAndSafetyRefresh() {
+        val calls = mutableListOf<String>()
+
+        resetPersistedStateAndRequestRequiredSetup(
+            resetState = { calls += "reset" },
+            requestArchiveSelection = { calls += "archive" },
+            requestNotamRefresh = { calls += "notam" },
+            requestAirspaceRefresh = { calls += "airspace" }
+        )
+
+        assertTrue(calls == listOf("reset", "notam", "airspace", "archive"))
+    }
+
+    @Test
+    fun forcedArchiveSetupDoesNotWaitForDriveRestoreEligibility() {
+        assertTrue(
+            shouldLaunchArchiveDirPicker(
+                archiveUriMissing = true,
+                sessionArchiveDirAvailable = false,
+                forceArchiveDirPrompt = true,
+                driveRestoreEligibilityLoaded = false,
+                showDriveRestoreDialog = false,
+                driveSyncInProgress = false,
+                archiveDirPickerOpen = false
+            )
+        )
+    }
+
+    @Test
     fun missingArchiveUriDoesNotLaunchAgainWhilePickerIsOpen() {
         assertTrue(
             shouldLaunchArchiveDirPicker(

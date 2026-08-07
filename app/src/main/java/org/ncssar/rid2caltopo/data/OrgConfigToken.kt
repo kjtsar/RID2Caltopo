@@ -7,13 +7,13 @@
 
 package org.ncssar.rid2caltopo.data
 
-import android.util.Base64
 import org.json.JSONObject
+import java.util.Base64
 
 /**
  * Encodes and decodes org-config join tokens for the QR-based org join flow.
  *
- * Token format:  R2C1:<obfuscated_payload>
+ * Token format:  R2C2:<obfuscated_payload>
  *
  * Two-layer obfuscation (not encryption — the goal is opacity to casual readers,
  * not cryptographic security):
@@ -21,7 +21,7 @@ import org.json.JSONObject
  *   2. Base64-encode the result, then substitute each character through a
  *      shuffled alphabet so standard decoders produce garbage.
  *
- * A standard QR scanner shows "R2C1:r2cXXX..." — recognisably a custom
+ * A standard QR scanner shows "R2C2:r2cXXX..." — recognisably a custom
  * format, but completely opaque without the app.
  *
  * The same XOR key is also used to obfuscate the ct_credentials block inside
@@ -31,7 +31,8 @@ import org.json.JSONObject
 object OrgConfigToken {
 
     /** Magic prefix used to identify a valid join token. */
-    const val MAGIC_PREFIX = "R2C1:"
+    const val MAGIC_PREFIX = "R2C2:"
+    const val QR_SCHEME = "r2c2"
 
     /** XOR key — 13 bytes, cycles across payload via index mod 13. */
     internal val XOR_KEY = "RID2CaltopoQR".toByteArray(Charsets.UTF_8)
@@ -65,7 +66,7 @@ object OrgConfigToken {
         val orgName: String,
         val driveFileId: String,
         val isPublic: Boolean = true,
-        val version: Int = 1
+        val version: Int = 2
     )
 
     /** Encode an [OrgConfig] into an opaque join token string. */
@@ -77,7 +78,7 @@ object OrgConfigToken {
             .put("v", config.version)
             .toString()
         val xored = xorBytes(json.toByteArray(Charsets.UTF_8))
-        val b64 = Base64.encodeToString(xored, Base64.NO_WRAP)
+        val b64 = Base64.getEncoder().encodeToString(xored)
         val remapped = buildString(b64.length) {
             for (c in b64) {
                 val idx = STD_ALPHABET.indexOf(c)
@@ -98,14 +99,14 @@ object OrgConfigToken {
                     append(if (idx >= 0) STD_ALPHABET[idx] else c)
                 }
             }
-            val xored = Base64.decode(remapped, Base64.NO_WRAP)
+            val xored = Base64.getDecoder().decode(remapped)
             val json = JSONObject(String(xorBytes(xored), Charsets.UTF_8))
             OrgConfig(
                 orgName     = json.optString("o", ""),
                 driveFileId = json.optString("f", ""),
                 isPublic    = json.optInt("p", 1) != 0,
                 version     = json.optInt("v", 1)
-            ).takeIf { it.driveFileId.isNotBlank() }
+            ).takeIf { it.driveFileId.isNotBlank() && it.version == 2 }
         } catch (_: Exception) {
             null
         }
@@ -121,7 +122,7 @@ object OrgConfigToken {
     @JvmStatic
     fun encryptPayload(plaintext: String): String {
         val xored = xorBytes(plaintext.toByteArray(Charsets.UTF_8))
-        return Base64.encodeToString(xored, Base64.NO_WRAP)
+        return Base64.getEncoder().encodeToString(xored)
     }
 
     /**
@@ -129,7 +130,7 @@ object OrgConfigToken {
      */
     @JvmStatic
     fun decryptPayload(encoded: String): String {
-        val xored = Base64.decode(encoded, Base64.NO_WRAP)
+        val xored = Base64.getDecoder().decode(encoded)
         return String(xorBytes(xored), Charsets.UTF_8)
     }
 

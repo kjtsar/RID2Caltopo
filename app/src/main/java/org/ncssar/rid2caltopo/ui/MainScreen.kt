@@ -15,6 +15,7 @@ import android.net.Uri
 import android.location.Location
 import android.os.Build
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
@@ -40,6 +41,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -55,6 +58,7 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.BuildConfig
@@ -70,6 +74,7 @@ import org.ncssar.rid2caltopo.data.AppUpdateAdvisory
 import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
+import org.ncssar.rid2caltopo.data.TrackerEnrollmentResult
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoMap
@@ -80,6 +85,7 @@ import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.data.MutualAidPackageManager
 import org.ncssar.rid2caltopo.data.OrgConfigManager
+import org.ncssar.rid2caltopo.data.OrgConfigToken
 import org.ncssar.rid2caltopo.data.WaypointTrack
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
@@ -99,6 +105,28 @@ private fun showConfigImportToast(context: Context, message: String) {
         message,
         Toast.LENGTH_LONG
     ).show()
+}
+
+internal fun applyTrackerEnrollmentAndRefreshNotams(
+    result: TrackerEnrollmentResult,
+    requestNotamRefresh: () -> Unit = NotamCenter::requestImmediateRefresh,
+    requestAirspaceRefresh: () -> Unit = AirspaceCenter::requestImmediateRefresh
+) {
+    TrackerEnrollmentClient.apply(result)
+    requestNotamRefresh()
+    requestAirspaceRefresh()
+}
+
+internal fun resetPersistedStateAndRequestRequiredSetup(
+    resetState: () -> Unit = CaltopoClient::ResetPersistedClientState,
+    requestArchiveSelection: () -> Unit,
+    requestNotamRefresh: () -> Unit = NotamCenter::requestImmediateRefresh,
+    requestAirspaceRefresh: () -> Unit = AirspaceCenter::requestImmediateRefresh
+) {
+    resetState()
+    requestNotamRefresh()
+    requestAirspaceRefresh()
+    requestArchiveSelection()
 }
 
 private fun parseCsvTags(csv: String): List<String> {
@@ -121,6 +149,11 @@ private fun formatLocationOverride(location: Location?): String {
     if (location == null) return "Device GPS"
     return "%.6f, %.6f".format(location.latitude, location.longitude)
 }
+
+private fun formatOperationalProfileExpiry(epochMs: Long): String =
+    DateTimeFormatter.ofPattern("MMM d, HH:mm")
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.ofEpochMilli(epochMs))
 
 private fun parseLocationOverride(input: String): Location? {
     val trimmed = input.trim()
@@ -187,6 +220,43 @@ internal suspend fun <T> readMutualAidPackagePreviewOffMain(
     readPreview: () -> T
 ): T = withContext(dispatcher) {
     readPreview()
+}
+
+internal enum class ImportConfigFileKind {
+    JSON_CONFIG,
+    MUTUAL_AID_PACKAGE,
+    UNSUPPORTED
+}
+
+internal fun classifyImportConfigFile(
+    displayName: String?,
+    mimeType: String?
+): ImportConfigFileKind {
+    val normalizedName = displayName?.trim()?.lowercase().orEmpty()
+    if (normalizedName.endsWith(".json")) return ImportConfigFileKind.JSON_CONFIG
+    if (normalizedName.endsWith(".zip")) return ImportConfigFileKind.MUTUAL_AID_PACKAGE
+
+    return when (mimeType?.substringBefore(';')?.trim()?.lowercase()) {
+        "application/json", "text/json", "text/plain" -> ImportConfigFileKind.JSON_CONFIG
+        "application/zip", "application/x-zip-compressed" -> ImportConfigFileKind.MUTUAL_AID_PACKAGE
+        else -> ImportConfigFileKind.UNSUPPORTED
+    }
+}
+
+private fun resolveImportConfigDisplayName(context: Context, uri: Uri): String? {
+    return runCatching {
+        context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) cursor.getString(nameIndex) else null
+        }
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
 }
 
 // Try to bust thru Google Drive's cache to get the latest version of requested
@@ -290,6 +360,7 @@ fun MainScreen(
         ScrollState(0)
     }
     var menuExpanded by remember { mutableStateOf(false) }
+    var credentialMenuExpanded by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showConfirmExitDialog by remember { mutableStateOf(false) }
     var showDebugTagDialog by remember { mutableStateOf(false) }
@@ -351,6 +422,21 @@ fun MainScreen(
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
     val appUpdateAdvisory by AppUpdateAdvisory.state.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
+    val operationalProfiles = localViewModel.operationalProfiles
+    val selectedOperationalProfile = operationalProfiles.firstOrNull {
+        it.profileId == localViewModel.selectedOperationalProfileId
+    }
+    val nextProfileExpiry = operationalProfiles
+        .mapNotNull { it.expiresAtEpochMs.takeIf { expiry -> expiry > 0L } }
+        .minOrNull()
+
+    LaunchedEffect(nextProfileExpiry) {
+        CaltopoClient.ScheduleCaltopoProfileExpiry()
+        val expiry = nextProfileExpiry ?: return@LaunchedEffect
+        delay((expiry - System.currentTimeMillis()).coerceAtLeast(1L) + 50L)
+        CaltopoClient.RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), true)
+        localViewModel.refreshOperationalProfiles()
+    }
 
     fun refreshDriveState() {
         coroutineScope.launch {
@@ -439,12 +525,69 @@ fun MainScreen(
         }
     )
 
-    val importMutualAidPackageLauncher = rememberLauncherForActivityResult(
+    var isPickerOpen by remember { mutableStateOf(false) }
+    val loadConfigFileLauncher = rememberLauncherForActivityResult(
+        contract = FreshOpenDocument(),
+        onResult = { uri ->
+            isPickerOpen = false
+            if (uri != null) {
+                CTDebug(tag, "loadConfigFileLauncher() returned '${uri}'")
+                try {
+                    val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    context.contentResolver.takePersistableUriPermission(uri, takeFlags)
+                    CTDebug(tag, "loadConfigFileLauncher() secured URI read permission.")
+                    if (CaltopoClient.LoadConfigFile(uri)) {
+                        localViewModel.onUIEvent(UIEvent.ConfigFileLoaded)
+                    } else {
+                        localViewModel.onUIEvent(UIEvent.NotAbleToReadConfigFile)
+                    }
+                } catch (e: Exception) {
+                    CTError(tag, "loadConfigFileLauncher(): read failed: ", e)
+                    localViewModel.onUIEvent(UIEvent.NotAbleToReadConfigFile)
+                }
+            } else {
+                CTDebug(tag, "loadConfigFileLauncher() picker closed w/o selection.")
+            }
+        }
+    )
+
+    val importConfigFileLauncher = rememberLauncherForActivityResult(
         contract = FreshOpenDocument(),
         onResult = { uri ->
             mutualAidPreviewRequestId += 1L
             val requestId = mutualAidPreviewRequestId
             if (uri == null) return@rememberLauncherForActivityResult
+            val displayName = resolveImportConfigDisplayName(context, uri)
+            val mimeType = context.contentResolver.getType(uri)
+            when (classifyImportConfigFile(displayName, mimeType)) {
+                ImportConfigFileKind.JSON_CONFIG -> {
+                    CTDebug(tag, "importConfigFileLauncher(): routing '$displayName' ($mimeType) to JSON loader")
+                    try {
+                        context.contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                        if (CaltopoClient.LoadConfigFile(uri)) {
+                            localViewModel.onUIEvent(UIEvent.ConfigFileLoaded)
+                            CaltopoClient.ShowToast("JSON config imported.")
+                        } else {
+                            localViewModel.onUIEvent(UIEvent.NotAbleToReadConfigFile)
+                        }
+                    } catch (e: Exception) {
+                        CTError(tag, "importConfigFileLauncher(): JSON import failed: ", e)
+                        localViewModel.onUIEvent(UIEvent.NotAbleToReadConfigFile)
+                    }
+                    return@rememberLauncherForActivityResult
+                }
+                ImportConfigFileKind.MUTUAL_AID_PACKAGE -> {
+                    CTDebug(tag, "importConfigFileLauncher(): routing '$displayName' ($mimeType) to MA package importer")
+                }
+                ImportConfigFileKind.UNSUPPORTED -> {
+                    CTError(tag, "importConfigFileLauncher(): unsupported file '$displayName' ($mimeType)")
+                    CaltopoClient.ShowToast("Choose a .json config or .zip MA package.")
+                    return@rememberLauncherForActivityResult
+                }
+            }
             pendingMutualAidImportUri = null
             pendingMutualAidImportPreview = null
             coroutineScope.launch {
@@ -610,8 +753,12 @@ fun MainScreen(
             onDismiss = { showImportConfigDialog = false },
             onJoin = { token ->
                 showImportConfigDialog = false
-                OrgConfigManager.joinFromToken(context, token) { _, message ->
+                OrgConfigManager.joinFromToken(context, token) { success, message ->
                     showConfigImportToast(context, message)
+                    if (success) {
+                        NotamCenter.requestImmediateRefresh()
+                        AirspaceCenter.requestImmediateRefresh()
+                    }
                 }
             },
             onFaaJoin = { token ->
@@ -631,9 +778,9 @@ fun MainScreen(
                 showImportConfigDialog = false
                 coroutineScope.launch {
                     runCatching {
-                        TrackerEnrollmentClient.redeem(context, enrollmentUrl).also(
-                            TrackerEnrollmentClient::apply
-                        )
+                        TrackerEnrollmentClient.redeem(context, enrollmentUrl).also {
+                            applyTrackerEnrollmentAndRefreshNotams(it)
+                        }
                     }.onSuccess { result ->
                         showConfigImportToast(
                             context,
@@ -649,7 +796,14 @@ fun MainScreen(
             },
             onPickFile = {
                 showImportConfigDialog = false
-                importMutualAidPackageLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+                importConfigFileLauncher.launch(
+                    arrayOf(
+                        "application/json",
+                        "text/plain",
+                        "application/zip",
+                        "application/octet-stream"
+                    )
+                )
             }
         )
     }
@@ -953,35 +1107,6 @@ fun MainScreen(
             }
         )
     }
-    var isPickerOpen by remember { mutableStateOf(false) }
-    // Launcher for loading a config file
-    val loadConfigFileLauncher = rememberLauncherForActivityResult(
-        contract = FreshOpenDocument(),
-        onResult = { uri ->
-            isPickerOpen = false
-            if (uri != null) {
-                CTDebug(tag, "loadConfigFileLauncher() returned '${uri}'")
-                try {
-                    val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    context.contentResolver.takePersistableUriPermission(
-                        uri, takeFlags
-                    )
-                    CTDebug(tag, "loadConfigFileLauncher() secured URI read permission.")
-                    if (CaltopoClient.LoadConfigFile(uri)) {
-                        localViewModel.onUIEvent((UIEvent.ConfigFileLoaded))
-                    } else {
-                        localViewModel.onUIEvent(UIEvent.NotAbleToReadConfigFile)
-                    }
-                } catch (e: Exception) {
-                    CTError(tag, "loadConfigFileLauncher(): read failed: ", e)
-                }
-            } else {
-                CTDebug(tag, "loadConfigFileLauncher() picker closed w/o selection.")
-                localViewModel.onUIEvent(UIEvent.NotAbleToReadConfigFile)
-            }
-        }
-    )
-
     LaunchedEffect(localViewModel.overlay) {
         if (localViewModel.overlay == OverlayState.RequestConfigFile && !isPickerOpen) {
             CTDebug(tag, "LaunchedEffect(): requesting config file...")
@@ -1013,7 +1138,8 @@ fun MainScreen(
         showDriveRestoreDialog,
         driveSyncInProgress,
         forceArchiveDirPrompt,
-        driveRestoreEligibilityLoaded
+        driveRestoreEligibilityLoaded,
+        archiveDirPickerOpen
     ) {
         val archiveUriMissing = withContext(Dispatchers.IO) {
             null == CaltopoClient.GetArchiveUri()
@@ -1043,10 +1169,9 @@ fun MainScreen(
     }
     pendingArchiveDirPromptMessage?.let { message ->
         AlertDialog(
-            onDismissRequest = {
-                pendingArchiveDirPromptMessage = null
-                pendingArchiveDirInitialUri = null
-            },
+            // Required setup can only continue through Select or the explicit
+            // session-temporary Not now fallback.
+            onDismissRequest = {},
             title = { Text("Archive directory") },
             text = { Text(message) },
             confirmButton = {
@@ -1100,7 +1225,7 @@ fun MainScreen(
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
-            TopAppBar(
+            CenterAlignedTopAppBar(
                 modifier = Modifier.pointerInput(localViewModel) {
                     detectTapGestures(
                         onDoubleTap = {
@@ -1109,9 +1234,58 @@ fun MainScreen(
                     )
                 },
                 title = {
-                    Text(
-                        "RID-2-Caltopo"
-                    )
+                    Box {
+                        TextButton(onClick = { credentialMenuExpanded = true }) {
+                            Column {
+                                Text("RID-2-Caltopo", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    "Teams: ${selectedOperationalProfile?.credentialLabel ?: "None"}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (
+                                        selectedOperationalProfile?.expiresAtEpochMs?.let {
+                                            it - System.currentTimeMillis() in 1..3_600_000L
+                                        } == true
+                                    ) MaterialTheme.colorScheme.tertiary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = "Select Teams credentials")
+                        }
+                        DropdownMenu(
+                            expanded = credentialMenuExpanded,
+                            onDismissRequest = { credentialMenuExpanded = false }
+                        ) {
+                            operationalProfiles.forEach { profile ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(profile.credentialLabel)
+                                            Text(
+                                                buildString {
+                                                    append(profile.description)
+                                                    if (profile.expiresAtEpochMs > 0L) {
+                                                        append(" • expires ")
+                                                        append(formatOperationalProfileExpiry(profile.expiresAtEpochMs))
+                                                    }
+                                                },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    },
+                                    trailingIcon = {
+                                        if (profile.profileId == localViewModel.selectedOperationalProfileId) {
+                                            Icon(Icons.Default.Check, contentDescription = "Selected")
+                                        }
+                                    },
+                                    onClick = {
+                                        credentialMenuExpanded = false
+                                        localViewModel.selectOperationalProfile(profile.profileId)
+                                    }
+                                )
+                            }
+                        }
+                    }
                 },
                 actions = {
                     val allOverLimitMuted = overLimitDrones.isNotEmpty() && overLimitDrones.all { it.muted }
@@ -1825,8 +1999,12 @@ fun MainScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        CaltopoClient.ResetPersistedClientState()
-                        CaltopoClient.ShowToast("Persisted app state reset and backup state updated.")
+                        resetPersistedStateAndRequestRequiredSetup(
+                            requestArchiveSelection = { forceArchiveDirPrompt = true }
+                        )
+                        CaltopoClient.ShowToast(
+                            "Persisted app state reset. Select an archive directory to continue setup."
+                        )
                         showResetPersistentStateDialog = false
                     }
                 ) {

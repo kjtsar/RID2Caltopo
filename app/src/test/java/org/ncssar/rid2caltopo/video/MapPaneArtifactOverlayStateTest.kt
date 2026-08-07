@@ -42,6 +42,15 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun replaceTileCompletionCallback_replacesStaleCallbacksWithRedrawCallback() {
+        val callbacks = linkedSetOf<String?>(null, "stale-map")
+
+        replaceTileCompletionCallback(callbacks, "active-map-redraw")
+
+        assertEquals(listOf("active-map-redraw"), callbacks.toList())
+    }
+
+    @Test
     fun needsBaseTileProviderRestart_detectsLayerSourceMismatch() {
         assertEquals(
             true,
@@ -553,6 +562,59 @@ class MapPaneArtifactOverlayStateTest {
 
         assertEquals(false, result.folderDefaults.single().initiallyVisible)
         assertEquals(emptyList<String>(), result.overlayState.points.map { it.id })
+    }
+
+    @Test
+    fun buildArtifactHydrationResult_operatorShowOverridesServerHiddenFolder() {
+        val hiddenFolder = folderFeature("folder-hidden", "Hidden Clues")
+            .also { it.getJSONObject("properties").put("visible", false) }
+        val marker = markerFeature("clue-marker", "Clue", "folder-hidden")
+
+        val result = buildArtifactHydrationResult(
+            snapshot = listOf(hiddenFolder, marker),
+            hiddenFolderIds = emptySet(),
+            hiddenItemIds = emptySet(),
+            folderVisibilityOverrides = mapOf("folder-hidden" to true)
+        )
+
+        assertEquals(listOf("clue-marker"), result.overlayState.points.map { it.id })
+    }
+
+    @Test
+    fun resolveHiddenFolderIds_operatorChoicesWinWithoutDroppingOtherLocalHides() {
+        val resolved = resolveHiddenFolderIds(
+            localHiddenFolderIds = setOf("local-hidden", "operator-shown"),
+            defaultHiddenFolderIds = setOf("server-hidden", "operator-shown"),
+            operatorVisibilityOverrides = mapOf(
+                "operator-shown" to true,
+                "operator-hidden" to false
+            )
+        )
+
+        assertEquals(
+            setOf("local-hidden", "server-hidden", "operator-hidden"),
+            resolved
+        )
+    }
+
+    @Test
+    fun folderHiddenAfterDefault_preservesOperatorShowAcrossRepeatedHiddenDefaults() {
+        assertEquals(
+            false,
+            folderHiddenAfterDefault(
+                currentlyHidden = false,
+                defaultVisible = false,
+                operatorVisibilityOverride = true
+            )
+        )
+        assertEquals(
+            true,
+            folderHiddenAfterDefault(
+                currentlyHidden = false,
+                defaultVisible = false,
+                operatorVisibilityOverride = null
+            )
+        )
     }
 
     @Test

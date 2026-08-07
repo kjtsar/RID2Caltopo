@@ -39,7 +39,21 @@ enum AppleTrackerEnrollmentClient {
         return true
     }
 
-    static func redeem(_ value: String) async throws -> AppleTrackerEnrollmentResult {
+    static func enrollmentOrganization(_ value: String) -> String? {
+        guard isEnrollmentURL(value),
+              let components = URLComponents(
+                  string: value.trimmingCharacters(in: .whitespacesAndNewlines)
+              )
+        else { return nil }
+        let segments = components.path.split(separator: "/").map(String.init)
+        guard segments.count >= 2 else { return nil }
+        return segments[segments.count - 2]
+    }
+
+    static func redeem(
+        _ value: String,
+        deviceName: String
+    ) async throws -> AppleTrackerEnrollmentResult {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isEnrollmentURL(trimmed),
               let enrollment = URLComponents(string: trimmed),
@@ -59,7 +73,7 @@ enum AppleTrackerEnrollmentClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "token": token,
-            "device_name": AppleDeviceIdentity.displayName,
+            "device_name": deviceName,
             "platform": "ios",
         ])
         let (data, response) = try await URLSession.shared.data(for: request)

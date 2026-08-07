@@ -69,11 +69,7 @@ object LandRestrictionCenter {
     private suspend fun refresh(force: Boolean) {
         val enabled = CaltopoClient.GetLandRestrictionsEnabled()
         if (!enabled) {
-            _uiState.value = LandRestrictionUiState(
-                enabled = false,
-                chipLabel = "Land rules off",
-                statusLine = "Protected-land checks are disabled."
-            )
+            _uiState.value = disabledLandRestrictionUiState()
             return
         }
         val location = CaltopoMap.GetMyLocation()

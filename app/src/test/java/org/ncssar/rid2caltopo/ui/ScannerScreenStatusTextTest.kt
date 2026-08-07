@@ -3,6 +3,8 @@ package org.ncssar.rid2caltopo.ui
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.ncssar.rid2caltopo.BuildConfig
+import org.junit.Assert.assertTrue
+import org.ncssar.rid2caltopo.notam.NotamAuthManager
 
 class ScannerScreenStatusTextTest {
     @Test
@@ -21,6 +23,21 @@ class ScannerScreenStatusTextTest {
             "unknown",
             buildConfigString("BUILD_VERSION", BuildConfigWithoutVersion::class.java)
         )
+    }
+
+    @Test
+    fun faaTrackerStatusSeparatesLoadedRemoteConfigFromDeviceEnrollment() {
+        val status = buildFaaTrackerAccessStatus(
+            organization = "NCSSAR",
+            credentialSource = NotamAuthManager.CredentialSource.ORGANIZATION_CONFIG_CREDENTIAL,
+            faaRemoteConfigLoaded = true,
+            latestNotamResult = "FAA proxy rejected the credential (HTTP 403)."
+        )
+
+        assertTrue(status.contains("NCSSAR (operational identity only)"))
+        assertTrue(status.contains("not a tracker device access grant"))
+        assertTrue(status.contains("Tracker credential source: Organization-config credential"))
+        assertTrue(status.contains("HTTP 403"))
     }
 
     private class BuildConfigWithoutVersion

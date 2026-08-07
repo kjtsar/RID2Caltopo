@@ -180,9 +180,10 @@ public struct OperationalAltitudeCoordinator: Sendable {
                 longitude: currentCoordinate.longitude
             )?.distanceMeters
         }()
+        let nonNegativeAGLMeters = aglMeters.map { max(0, $0) }
         return OperationalAircraftAltitudeDisplay(
             atoFeet: atoMeters.map { $0 * Self.metersToFeet },
-            aglFeet: aglMeters.map { $0 * Self.metersToFeet },
+            aglFeet: nonNegativeAGLMeters.map { $0 * Self.metersToFeet },
             aglStale: usesTerrain && (currentTerrain?.stale == true || !terrainMatchesPosition),
             aglUsesTerrain: usesTerrain,
             rangeFeet: rangeMeters.map { $0 * Self.metersToFeet }
@@ -190,6 +191,14 @@ public struct OperationalAltitudeCoordinator: Sendable {
     }
 
     public static func terrainKey(_ coordinate: Coordinate) -> String {
+        // Schedule local DEM sampling at roughly one-metre position changes. The GeoTIFF
+        // source bilinearly interpolates its surrounding pixels, so retaining a 1-arc-second
+        // key here would hide that interpolation behind visible terrain steps.
+        "\(Int((coordinate.latitude * 100_000).rounded()))|\(Int((coordinate.longitude * 100_000).rounded()))"
+    }
+
+    public static func terrainCacheKey(_ coordinate: Coordinate) -> String {
+        // EPQS results remain cached at their native one-arc-second resolution.
         "\(Int((coordinate.latitude * 3_600).rounded()))|\(Int((coordinate.longitude * 3_600).rounded()))"
     }
 

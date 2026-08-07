@@ -439,7 +439,7 @@ fun CaltopoSettingsScreen(
                     onValueChange = { settingsViewModel.onLandRestrictionsRadiusNmChanged(it.filter(Char::isDigit)) },
                     enabled = landRestrictionsEnabled,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Boundary query radius (1–50 NM)") }
+                    label = { Text("Boundary query radius (1–50 statute miles)") }
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))

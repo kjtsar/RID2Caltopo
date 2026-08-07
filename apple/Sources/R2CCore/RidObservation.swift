@@ -33,6 +33,7 @@ public struct RidObservation: Sendable, Equatable {
     public let operatorLatitude: Double?
     public let operatorLongitude: Double?
     public let signalStrengthDbm: Int?
+    public let droneScoutRelay: DroneScoutRelayMetadata?
 
     public init(
         source: Source,
@@ -48,7 +49,8 @@ public struct RidObservation: Sendable, Equatable {
         speedMetersPerSecond: Double? = nil,
         operatorLatitude: Double? = nil,
         operatorLongitude: Double? = nil,
-        signalStrengthDbm: Int? = nil
+        signalStrengthDbm: Int? = nil,
+        droneScoutRelay: DroneScoutRelayMetadata? = nil
     ) {
         self.source = source
         self.aircraftId = aircraftId
@@ -64,5 +66,21 @@ public struct RidObservation: Sendable, Equatable {
         self.operatorLatitude = operatorLatitude
         self.operatorLongitude = operatorLongitude
         self.signalStrengthDbm = signalStrengthDbm
+        self.droneScoutRelay = droneScoutRelay
+    }
+}
+
+/// A decoded RID packet that can be associated with an aircraft, whether or not the
+/// packet contains a fresh Location message. Tracking uses this only for flight lifecycle
+/// presence; position freshness and stale-location alerting remain observation-based.
+public struct RidAircraftMessage: Sendable, Equatable {
+    public let source: RidObservation.Source
+    public let aircraftID: String
+    public let receivedAt: Date
+
+    public init(source: RidObservation.Source, aircraftID: String, receivedAt: Date) {
+        self.source = source
+        self.aircraftID = aircraftID
+        self.receivedAt = receivedAt
     }
 }

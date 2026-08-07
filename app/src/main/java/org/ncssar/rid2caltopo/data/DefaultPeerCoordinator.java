@@ -24,6 +24,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         @NonNull final CtDroneSpec droneSpec;
         final double distMeters;
         final long firstSeenTs;
+        volatile boolean coordinatorActivated;
 
         ActiveTrackRegistration(@NonNull LiveTrackOwnerDelegate liveTrack,
                                 @NonNull CtDroneSpec droneSpec,
@@ -33,6 +34,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             this.droneSpec = droneSpec;
             this.distMeters = distMeters;
             this.firstSeenTs = firstSeenTs;
+            this.coordinatorActivated = false;
         }
     }
 
@@ -48,6 +50,8 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     @Nullable private volatile String startedName;
     @Nullable private volatile String startedBrokerUri;
     private volatile boolean trackerSelected;
+    private volatile boolean trackerFallbackActive;
+    @NonNull private volatile String trackerUnavailableDetail = "";
     private volatile double myLat;
     private volatile double myLon;
     private volatile long myCaltopoRttMs = 2_000L;
@@ -97,6 +101,8 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         startedName = name;
         startedBrokerUri = brokerUri;
         trackerSelected = nextTrackerSelected;
+        trackerFallbackActive = false;
+        trackerUnavailableDetail = "";
         activeCoordinator = nextCoordinator;
         if (trackerSelected) {
             TrackerPeerCoordinator.getInstance().setHardFailureListener(this::handleTrackerHardFailure);
@@ -135,6 +141,8 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         activeCoordinator.stop();
         activeCoordinator.setCoordinationIndicatorListener(null);
         trackerSelected = false;
+        trackerFallbackActive = false;
+        trackerUnavailableDetail = "";
         startedMapId = null;
         startedGuid = null;
         startedName = null;
@@ -153,9 +161,19 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             activeTracks.remove(droneSpec.getRemoteId());
             return;
         }
-        activeTracks.put(droneSpec.getRemoteId(),
-                new ActiveTrackRegistration(liveTrack, droneSpec, distMeters, firstSeenTs));
-        activeCoordinator.onLiveTrackCreated(liveTrack, droneSpec, distMeters, firstSeenTs);
+        ActiveTrackRegistration registration =
+                new ActiveTrackRegistration(liveTrack, droneSpec, distMeters, firstSeenTs);
+        activeTracks.put(droneSpec.getRemoteId(), registration);
+        if (!CaltopoClient.IsCurrentPeerDroneConfirmed(droneSpec.getRemoteId())) {
+            liveTrack.setLocalOwner(false);
+            CaltopoClient.CTInfo(
+                    "DefaultPeerCoord",
+                    "onLiveTrackCreated(): buffering remoteId=" + droneSpec.getRemoteId() +
+                            " pending operator confirmation."
+            );
+            return;
+        }
+        activateRegistration(registration);
     }
 
     @Override
@@ -166,6 +184,12 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                                    double distMeters,
                                    long timestampMsec,
                                    @Nullable CtDroneSpec.PositionTelemetry telemetry) {
+        ActiveTrackRegistration registration = activeTracks.get(droneSpec.getRemoteId());
+        if (registration == null ||
+                !registration.coordinatorActivated ||
+                !CaltopoClient.IsCurrentPeerDroneConfirmed(droneSpec.getRemoteId())) {
+            return;
+        }
         activeCoordinator.onWaypointReceived(
                 droneSpec,
                 droneLat,
@@ -180,7 +204,8 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     @Override
     public void onDroneLost(@NonNull String remoteId) {
         ActiveTrackRegistration registration = activeTracks.remove(remoteId);
-        if (registration != null && registration.droneSpec.isLocalArchiveOnly()) return;
+        if (registration != null &&
+                (registration.droneSpec.isLocalArchiveOnly() || !registration.coordinatorActivated)) return;
         activeCoordinator.onDroneLost(remoteId);
     }
 
@@ -206,10 +231,19 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                 owner,
                 mappedId
         );
+        ActiveTrackRegistration registration = activeTracks.get(remoteId);
+        if (registration != null &&
+                !registration.coordinatorActivated &&
+                !registration.droneSpec.isLocalArchiveOnly() &&
+                CaltopoClient.IsCurrentPeerDroneConfirmed(remoteId)) {
+            activateRegistration(registration);
+        }
     }
 
     @Override
     public boolean isLocalOwner(@NonNull String remoteId) {
+        ActiveTrackRegistration registration = activeTracks.get(remoteId);
+        if (registration != null && !registration.coordinatorActivated) return false;
         return activeCoordinator.isLocalOwner(remoteId);
     }
 
@@ -322,6 +356,10 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             return CoordinationIndicatorState.UNCONFIGURED;
         }
 
+        if (isCoordinatorUnavailable()) {
+            return CoordinationIndicatorState.UNCONFIGURED;
+        }
+
         CoordinationIndicatorState activeState = activeCoordinator.getCoordinationIndicatorState();
         if (activeState == CoordinationIndicatorState.HEALTHY ||
                 activeState == CoordinationIndicatorState.IDLE) {
@@ -338,6 +376,9 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     @NonNull
     @Override
     public String getCoordinationStatusText() {
+        if (isCoordinatorUnavailable()) {
+            return "Coordinator unavailable";
+        }
         if (isStandaloneTrackerCoordinationDisabled()) {
             return "Tracker link disabled";
         }
@@ -357,6 +398,14 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     @NonNull
     @Override
     public List<String> getCoordinationDiagnosticLines() {
+        if (isCoordinatorUnavailable()) {
+            ArrayList<String> unavailableLines = new ArrayList<>();
+            unavailableLines.add(trackerUnavailableDetail.isEmpty()
+                    ? "Tracker not configured"
+                    : trackerUnavailableDetail);
+            unavailableLines.add(describePeers(getPeerList()));
+            return unavailableLines;
+        }
         ArrayList<String> lines = new ArrayList<>(activeCoordinator.getCoordinationDiagnosticLines());
         if (isStandaloneTrackerCoordinationDisabled()) {
             lines.add("Standalone tracker coordination disabled");
@@ -417,12 +466,21 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     private boolean isStandaloneTrackerCoordinationDisabled() {
         return isTrackerConfiguredForCoordination()
+                && !trackerFallbackActive
                 && !trackerSelected
                 && !CaltopoClient.GetStandaloneR2cCoordinationEnabled();
     }
 
+    private boolean isCoordinatorUnavailable() {
+        return CaltopoClient.GetUsePeersFlag()
+                && (trackerFallbackActive || !isTrackerConfiguredForCoordination());
+    }
+
     private void handleTrackerHardFailure(int responseCode, @Nullable String responseMessage) {
         if (!trackerSelected) return;
+        trackerFallbackActive = true;
+        trackerUnavailableDetail = "Tracker unavailable: HTTP " + responseCode +
+                (responseMessage == null || responseMessage.isEmpty() ? "" : " " + responseMessage);
         CaltopoClient.CTWarn(
                 "DefaultPeerCoord",
                 String.format("Tracker coordination hard-failed with code=%d message='%s'; falling back to MQTT.",
@@ -448,6 +506,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         activeCoordinator.updateCaltopoRtt(myCaltopoRttMs);
         activeCoordinator.updateMyPosition(myLat, myLon);
         for (ActiveTrackRegistration registration : activeTracks.values()) {
+            if (!registration.coordinatorActivated) continue;
             activeCoordinator.onLiveTrackCreated(
                     registration.liveTrack,
                     registration.droneSpec,
@@ -456,6 +515,22 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             );
         }
         emitCoordinationIndicatorIfChanged();
+    }
+
+    private void activateRegistration(@NonNull ActiveTrackRegistration registration) {
+        if (registration.coordinatorActivated) return;
+        registration.coordinatorActivated = true;
+        CaltopoClient.CTInfo(
+                "DefaultPeerCoord",
+                "activateRegistration(): operator-confirmed remoteId=" +
+                        registration.droneSpec.getRemoteId()
+        );
+        activeCoordinator.onLiveTrackCreated(
+                registration.liveTrack,
+                registration.droneSpec,
+                registration.distMeters,
+                registration.firstSeenTs
+        );
     }
 
     @NonNull

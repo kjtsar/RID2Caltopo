@@ -11,6 +11,7 @@ import org.junit.Before
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
+import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
@@ -468,6 +469,10 @@ class R2CViewModelDroneConfirmationTest {
                 isAccessible = true
                 (get(null) as MutableCollection<*>).clear()
             }
+        }
+        CaltopoMap::class.java.getDeclaredField("MapListeners").apply {
+            isAccessible = true
+            (get(null) as MutableCollection<*>).clear()
         }
     }
 }

@@ -7,6 +7,15 @@ import org.junit.Test
 
 class LandRestrictionParserTest {
     @Test
+    fun disabledLandRestrictionState_keepsOffChipVisible() {
+        val state = disabledLandRestrictionUiState()
+
+        assertEquals(true, state.visible)
+        assertEquals(false, state.enabled)
+        assertEquals("Land rules off", conciseLandStatusLabel(state))
+    }
+
+    @Test
     fun toolbarUsesBriefLandLabelWhileStateRetainsAreaDetails() {
         assertEquals(
             "Land rules nearby",

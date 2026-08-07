@@ -1,11 +1,38 @@
 import Foundation
 
+public enum OpenDroneIDTrackAssemblyDisposition: String, Sendable, Equatable {
+    case observation
+    case noFreshLocation
+    case missingIdentity
+    case invalidLocation
+}
+
+public struct OpenDroneIDTrackAssemblyResult: Sendable, Equatable {
+    public let observation: RidObservation?
+    public let disposition: OpenDroneIDTrackAssemblyDisposition
+    public let aircraftID: String?
+    public let droneScoutRelay: DroneScoutRelayMetadata?
+
+    public init(
+        observation: RidObservation?,
+        disposition: OpenDroneIDTrackAssemblyDisposition,
+        aircraftID: String? = nil,
+        droneScoutRelay: DroneScoutRelayMetadata? = nil
+    ) {
+        self.observation = observation
+        self.disposition = disposition
+        self.aircraftID = aircraftID
+        self.droneScoutRelay = droneScoutRelay
+    }
+}
+
 public actor OpenDroneIDTrackAssembler {
     private struct State: Sendable {
         var primaryID: OpenDroneIDBasicID?
         var serialID: OpenDroneIDBasicID?
         var location: OpenDroneIDLocation?
         var system: OpenDroneIDSystem?
+        var droneScoutRelay: DroneScoutRelayMetadata?
     }
 
     private var transmitters: [UUID: State] = [:]
@@ -19,7 +46,24 @@ public actor OpenDroneIDTrackAssembler {
         receivedAt: Date,
         signalStrengthDbm: Int?
     ) -> RidObservation? {
+        ingestWithResult(
+            advertisement,
+            transmitterID: transmitterID,
+            source: source,
+            receivedAt: receivedAt,
+            signalStrengthDbm: signalStrengthDbm
+        ).observation
+    }
+
+    public func ingestWithResult(
+        _ advertisement: OpenDroneIDAdvertisement,
+        transmitterID: UUID,
+        source: RidObservation.Source,
+        receivedAt: Date,
+        signalStrengthDbm: Int?
+    ) -> OpenDroneIDTrackAssemblyResult {
         var state = transmitters[transmitterID, default: State()]
+        var receivedFreshLocation = false
 
         for message in advertisement.messages {
             switch message.payload {
@@ -32,26 +76,51 @@ public actor OpenDroneIDTrackAssembler {
                 }
             case let .location(location):
                 state.location = location
+                receivedFreshLocation = true
             case let .system(system):
                 state.system = system
+            case let .selfID(selfID):
+                state.droneScoutRelay = DroneScoutRelayMetadata.parse(selfID.operationDescription)
             case .messagePack, .opaque:
                 break
             }
         }
 
         transmitters[transmitterID] = state
-        guard let identity = state.serialID ?? state.primaryID,
-              !identity.uasID.isEmpty,
-              let location = state.location,
+        let aircraftID = (state.serialID ?? state.primaryID).map {
+            RidTrackStore.canonicalAircraftID($0.uasID)
+        }.flatMap { $0.isEmpty ? nil : $0 }
+        guard receivedFreshLocation else {
+            return OpenDroneIDTrackAssemblyResult(
+                observation: nil,
+                disposition: .noFreshLocation,
+                aircraftID: aircraftID,
+                droneScoutRelay: state.droneScoutRelay
+            )
+        }
+        guard let aircraftID
+        else {
+            return OpenDroneIDTrackAssemblyResult(
+                observation: nil,
+                disposition: .missingIdentity,
+                droneScoutRelay: state.droneScoutRelay
+            )
+        }
+        guard let location = state.location,
               location.latitude != 0,
               location.longitude != 0
         else {
-            return nil
+            return OpenDroneIDTrackAssemblyResult(
+                observation: nil,
+                disposition: .invalidLocation,
+                aircraftID: aircraftID,
+                droneScoutRelay: state.droneScoutRelay
+            )
         }
 
-        return RidObservation(
+        let observation = RidObservation(
             source: source,
-            aircraftId: RidTrackStore.canonicalAircraftID(identity.uasID),
+            aircraftId: aircraftID,
             receivedAt: receivedAt,
             latitude: location.latitude,
             longitude: location.longitude,
@@ -65,7 +134,14 @@ public actor OpenDroneIDTrackAssembler {
             speedMetersPerSecond: location.horizontalSpeedMetersPerSecond,
             operatorLatitude: state.system?.operatorLatitude,
             operatorLongitude: state.system?.operatorLongitude,
-            signalStrengthDbm: signalStrengthDbm
+            signalStrengthDbm: signalStrengthDbm,
+            droneScoutRelay: state.droneScoutRelay
+        )
+        return OpenDroneIDTrackAssemblyResult(
+            observation: observation,
+            disposition: .observation,
+            aircraftID: aircraftID,
+            droneScoutRelay: state.droneScoutRelay
         )
     }
 

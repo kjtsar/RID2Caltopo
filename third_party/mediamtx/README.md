@@ -11,10 +11,17 @@ module depends on `github.com/wlynxg/anet`; `0002-anet-v0.0.5-android.patch`
 removes two Android link-name declarations that are incompatible with the
 pinned Go toolchain. `0003-gortmplib-v0.3.0-rid2caltopo.patch` contains the
 RTMP parsing, video-only publishing, and connection-diagnostics changes used
-by the MediaMTX patch. The preparation script pins both dependencies, applies
-their patches, and installs local module replacements before compilation.
+by the MediaMTX patch. The preparation script recreates the vendor hierarchy
+used by the known-good `mediamtx-1.16.2h` build before applying dependency
+patches.
 `0004-rid2caltopo-mediamtx-tests-tools.patch` preserves the focused idle-ping
 tests and RTMP capture-analysis utility developed alongside those changes.
+`0005-rid2caltopo-nonempty-rtsp-session-name.patch` restores the known-good
+gortsplib behavior that serializes an empty publisher title as `s=MediaMTX`,
+which Android Media3 can parse.
+`0006-rid2caltopo-regression-fixes.patch` restores empty-description stream
+compatibility and corrects the RID2Caltopo configuration and audio-replacement
+regression tests uncovered during the source-reproducibility audit.
 
 Prepare a fresh patched checkout:
 
@@ -27,6 +34,12 @@ Build and install the Android arm64 executable:
 ```sh
 tools/build_mediamtx_android_arm64.sh
 ```
+
+The default build intentionally matches the known-good untrimmed build command.
+Set `MEDIAMTX_TRIMPATH=1` only when explicitly evaluating a trimmed build.
+The manifest records both the byte-identical historical untrimmed binary hash
+and the path-independent corrected trimpath binary hash. Trimpath builds are
+rejected when their SHA-256 differs from the pinned reference.
 
 The build runs MediaMTX's standard generators. Those generators download
 checksum-verified HLS and Raspberry Pi camera release assets into the ignored

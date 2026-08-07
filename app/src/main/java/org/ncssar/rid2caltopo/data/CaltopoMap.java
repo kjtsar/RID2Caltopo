@@ -333,9 +333,15 @@ public class CaltopoMap {
     }
 
     @NonNull
-    private static String buildMyDeviceMarkerDescription() {
+    static String buildMyDeviceMarkerDescription() {
         if (!CaltopoClient.GetUsePeersFlag()) {
             return "Drone/zone arbitration disabled";
+        }
+        String coordinationStatus = getCurrentRuntime()
+                .getPeerCoordinator()
+                .getCoordinationStatusText();
+        if (coordinationStatus.equals("Coordinator unavailable")) {
+            return "Drone/zone arbitration unavailable; tracker unavailable";
         }
         String trackerUrl = CaltopoClient.GetTrackerCoordinationUrlPfx().trim();
         if (!trackerUrl.isEmpty()) {

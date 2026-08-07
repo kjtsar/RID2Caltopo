@@ -1,5 +1,14 @@
 import Foundation
 
+public enum OperationalMapFocusPolicy {
+    public static func shouldReleaseFocus(
+        hasFocusedAircraft: Bool,
+        isOperatorGesture: Bool
+    ) -> Bool {
+        hasFocusedAircraft && isOperatorGesture
+    }
+}
+
 public enum OperationalMapBaseLayer: String, CaseIterable, Codable, Sendable, Equatable {
     case openStreetMap
     case imagery
@@ -269,6 +278,26 @@ public struct CaltopoArtifactSnapshot: Codable, Sendable, Equatable {
             totalFeatureCount: totalFeatureCount,
             ignoredTrackCount: ignoredTrackCount
         )
+    }
+}
+
+public enum CaltopoArtifactVisibilityPolicy {
+    /// Combines local/server hidden state while keeping explicit operator choices
+    /// authoritative for the active map session.
+    public static func hiddenFolderIDs(
+        localHidden: Set<String>,
+        defaultHidden: Set<String>,
+        operatorVisibilityOverrides: [String: Bool]
+    ) -> Set<String> {
+        var resolved = localHidden.union(defaultHidden)
+        for (folderID, visible) in operatorVisibilityOverrides {
+            if visible {
+                resolved.remove(folderID)
+            } else {
+                resolved.insert(folderID)
+            }
+        }
+        return resolved
     }
 }
 

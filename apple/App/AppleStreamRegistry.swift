@@ -128,7 +128,20 @@ final class AppleStreamRegistry: ObservableObject {
             sessions.removeAll { $0.id == id }
             if focusedID == id { focusedID = sessions.first?.id ?? Self.placeholderID }
         }
-        AppleLog.info("Streams", "Operator closed stream \(session.sourcePath)")
+        AppleLog.info(
+            "Streams",
+            "Operator closed stream \(session.sourcePath) networkSnapshotId=\(AppleNetworkDiagnosticCenter.shared.currentSnapshotID)"
+        )
+    }
+
+    func shutdown() {
+        sessions.forEach { $0.model.stop() }
+        presenceSubscriptions.values.forEach { $0.cancel() }
+        presenceSubscriptions.removeAll()
+        presenceEligibility.removeAll()
+        rejectedPaths.removeAll()
+        sessions = [AppleLiveStreamSession(path: "demo", model: primaryModel, state: .stopped)]
+        focusedID = "demo"
     }
 
     @discardableResult
@@ -145,7 +158,11 @@ final class AppleStreamRegistry: ObservableObject {
         let active = sessions.filter { $0.state != .stopped }
         if active.count >= Self.maximumStreams {
             if rejectedPaths.insert(path).inserted {
-                AppleLog.warning("Streams", "Rejected stream '\(path)': maximum \(Self.maximumStreams) active streams")
+                AppleLog.warning(
+                    "Streams",
+                    "Rejected stream '\(path)': maximum \(Self.maximumStreams) active streams " +
+                        "networkSnapshotId=\(AppleNetworkDiagnosticCenter.shared.currentSnapshotID)"
+                )
             }
             return nil
         }
@@ -170,7 +187,11 @@ final class AppleStreamRegistry: ObservableObject {
             }
         }
         rejectedPaths.remove(path)
-        AppleLog.info("Streams", "Admitted \(session.sourcePath) as \(session.id) profile=\(session.controllerProfile)")
+        AppleLog.info(
+            "Streams",
+            "Admitted \(session.sourcePath) as \(session.id) profile=\(session.controllerProfile) " +
+                "networkSnapshotId=\(AppleNetworkDiagnosticCenter.shared.currentSnapshotID)"
+        )
         return session
     }
 

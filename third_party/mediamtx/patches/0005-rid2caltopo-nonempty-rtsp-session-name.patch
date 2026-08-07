@@ -1,0 +1,46 @@
+diff --git a/vendor/github.com/bluenviron/gortsplib/v5/pkg/description/session.go b/vendor/github.com/bluenviron/gortsplib/v5/pkg/description/session.go
+index 15d9b337..b8711e68 100644
+--- a/vendor/github.com/bluenviron/gortsplib/v5/pkg/description/session.go
++++ b/vendor/github.com/bluenviron/gortsplib/v5/pkg/description/session.go
+@@ -173,9 +173,10 @@ func (d Session) Marshal() ([]byte, error) {
+ 	if d.Title != "" {
+ 		sessionName = psdp.SessionName(d.Title)
+ 	} else {
+-		// RFC 4566: If a session has no meaningful name, the
+-		// value "s= " SHOULD be used (i.e., a single space as the session name).
+-		sessionName = psdp.SessionName(" ")
++		// RFC 4566 suggests "s= " when no title is available, but ExoPlayer's
++		// RTSP parser rejects a space-only session name. Use a stable non-empty
++		// fallback so Android hardware decode can consume the SDP.
++		sessionName = psdp.SessionName("MediaMTX")
+ 	}
+ 
+ 	var address string
+diff --git a/vendor/github.com/bluenviron/gortsplib/v5/pkg/description/session_test.go b/vendor/github.com/bluenviron/gortsplib/v5/pkg/description/session_test.go
+new file mode 100644
+index 00000000..25a66fd0
+--- /dev/null
++++ b/vendor/github.com/bluenviron/gortsplib/v5/pkg/description/session_test.go
+@@ -0,0 +1,22 @@
++package description
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestSessionMarshalFallbackTitle(t *testing.T) {
++	byts, err := Session{}.Marshal()
++	require.NoError(t, err)
++	require.Contains(t, string(byts), "\r\ns=MediaMTX\r\n")
++	require.NotContains(t, string(byts), "\r\ns= \r\n")
++}
++
++func TestSessionMarshalExplicitTitle(t *testing.T) {
++	byts, err := Session{Title: "Drone Feed"}.Marshal()
++	require.NoError(t, err)
++	require.Contains(t, string(byts), "\r\ns=Drone Feed\r\n")
++	require.False(t, strings.Contains(string(byts), "\r\ns=MediaMTX\r\n"))
++}

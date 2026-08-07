@@ -11,7 +11,7 @@ class LandRestrictionRepositoryTest {
         val url = LandRestrictionRepository.buildQueryUrl(
             source,
             LandCoordinate(39.7392, -104.9903),
-            radiusNm = 5.0
+            radiusStatuteMiles = 1.0
         )
 
         assertEquals("geojson", url.queryParameter("f"))
@@ -19,6 +19,9 @@ class LandRestrictionRepositoryTest {
         assertEquals("4326", url.queryParameter("outSR"))
         assertEquals("1=1", url.queryParameter("where"))
         assertTrue(url.queryParameter("geometry").orEmpty().split(',').size == 4)
+        val bounds = url.queryParameter("geometry").orEmpty().split(',').map(String::toDouble)
+        val latitudeRadius = bounds[3] - 39.7392
+        assertEquals(0.868976 / 60.0, latitudeRadius, 0.0000002)
     }
 
     @Test

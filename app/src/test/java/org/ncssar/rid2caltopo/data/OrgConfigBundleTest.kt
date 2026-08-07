@@ -13,18 +13,30 @@ class OrgConfigBundleTest {
     }
 
     @Test
-    fun buildOrgConfigBundle_includesOrgNameInCredentialsChild() {
+    fun buildR2C2BundleIncludesEnrollmentLocatorButNeverIssuedDeviceCredential() {
         CaltopoClient.ResetPersistedClientState()
         CaltopoClient.SetHomeOrgName("NCSSAR")
         CaltopoClient.SetCaltopoCredentials(CaltopoCredentials("team", "cred", "secret"))
         CaltopoClient.SetTrackerApiKey("tracker-token")
         CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+        CaltopoClient.SetTrackerFaaProxyUrl("https://tracker.example.org/faa/notams")
+        CaltopoClient.SetTrackerEnrollmentUrl(
+            "https://r2c-tracker.com/ncssar/enroll?token=campaign-token"
+        )
 
         val bundle = JSONObject(CaltopoClient.BuildOrgConfigBundle("NCSSAR"))
         val credentials = findConfig(bundle, "ct_credentials")
 
         assertEquals("NCSSAR", bundle.getString("org_name"))
         assertEquals("NCSSAR", credentials.getString("org_name"))
+        assertEquals(2, bundle.getInt("version"))
+        assertEquals(
+            "https://r2c-tracker.com/ncssar/enroll?token=campaign-token",
+            credentials.getString("tracker_enrollment_url")
+        )
+        assertTrue(!credentials.has("tracker_api_key"))
+        assertTrue(!credentials.has("tracker_faa_proxy_url"))
+        assertTrue(!credentials.has("notam_client_secret"))
     }
 
     @Test
@@ -52,6 +64,32 @@ class OrgConfigBundleTest {
 
         assertTrue(CaltopoClient.ApplyOrgConfigBundle(json.toString()))
         assertEquals("NCSSAR", CaltopoClient.GetHomeOrgName())
+    }
+
+    @Test
+    fun applyR2C2BundleDoesNotCloneSourceDeviceCredential() {
+        CaltopoClient.ResetPersistedClientState()
+        CaltopoClient.SetTrackerApiKey("tracker-token")
+        CaltopoClient.SetTrackerUrlPfx("https://r2c-tracker.com/ncssar")
+        CaltopoClient.SetTrackerFaaProxyUrl("https://r2c-tracker.com/faa/notams")
+        CaltopoClient.SetTrackerEnrollmentUrl(
+            "https://r2c-tracker.com/ncssar/enroll?token=campaign-token"
+        )
+        val bundle = CaltopoClient.BuildOrgConfigBundle("NCSSAR")
+        checkNotNull(bundle)
+        val bundleJson = JSONObject(bundle)
+        val configs = bundleJson.getJSONArray("configs")
+        for (index in configs.length() - 1 downTo 0) {
+            if (configs.getJSONObject(index).optString("type") == "ct_mutual_aid_credentials") {
+                configs.remove(index)
+            }
+        }
+
+        CaltopoClient.ResetPersistedClientState()
+
+        assertTrue(CaltopoClient.ApplyOrgConfigBundle(bundleJson.toString()))
+        assertEquals("", CaltopoClient.GetHomeTrackerApiKey())
+        assertEquals("", CaltopoClient.GetTrackerFaaProxyUrl())
     }
 
     private fun findConfig(bundle: JSONObject, type: String): JSONObject {

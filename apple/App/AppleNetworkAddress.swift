@@ -1,5 +1,8 @@
 import Darwin
+import Combine
+import CryptoKit
 import Foundation
+import Network
 import NetworkExtension
 import R2CCore
 import UIKit
@@ -65,13 +68,107 @@ enum AppleNetworkAddress {
     }
 }
 
+/// Event-driven network diagnostics. NWPathMonitor supplies changes; no polling or probes are used.
+@MainActor
+final class AppleNetworkDiagnosticCenter: ObservableObject {
+    static let shared = AppleNetworkDiagnosticCenter()
+
+    @Published private(set) var currentSnapshotID = "none"
+    @Published private(set) var currentWiFiSSID: String?
+
+    private var monitor: NWPathMonitor?
+    private let monitorQueue = DispatchQueue(label: "org.ncssar.rid2caltopo.network-diagnostics")
+    private var previousTransitionKey: String?
+    private var nextSnapshotNumber = 1
+
+    func start() {
+        guard monitor == nil else { return }
+        let pathMonitor = NWPathMonitor()
+        monitor = pathMonitor
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                await self?.record(path: path)
+            }
+        }
+        pathMonitor.start(queue: monitorQueue)
+    }
+
+    func stop() {
+        monitor?.cancel()
+        monitor = nil
+    }
+
+    private func record(path: NWPath) async {
+        let ssid = await AppleNetworkAddress.currentWiFiSSID()
+        let interfaces = Self.interfaceSummary(path)
+        let ipv4 = AppleNetworkAddress.ipv4DiagnosticSummary()
+        let status = Self.statusSummary(path.status)
+        let bssidHash = await Self.currentBSSIDHash()
+        let transitionKey = [
+            ssid ?? "unavailable",
+            bssidHash,
+            ipv4,
+            status,
+            interfaces,
+            String(path.isExpensive),
+            String(path.isConstrained),
+        ].joined(separator: "|")
+        guard transitionKey != previousTransitionKey else { return }
+
+        let reason = previousTransitionKey == nil ? "startup" : "path_changed"
+        previousTransitionKey = transitionKey
+        currentWiFiSSID = ssid
+        currentSnapshotID = "net-\(nextSnapshotNumber)"
+        nextSnapshotNumber += 1
+        AppleLog.info(
+            "NetworkDiagnostics",
+            "Network snapshotId=\(currentSnapshotID) reason=\(reason) " +
+                "ssid=\(ssid ?? "unavailable") bssidHash=\(bssidHash) ipv4=\(ipv4) " +
+                "wifiRssiDbm=unavailable status=\(status) interfaces=\(interfaces) " +
+                "expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
+        )
+    }
+
+    private static func currentBSSIDHash() async -> String {
+        await withCheckedContinuation { continuation in
+            NEHotspotNetwork.fetchCurrent { network in
+                guard let bssid = network?.bssid, !bssid.isEmpty else {
+                    continuation.resume(returning: "unavailable")
+                    return
+                }
+                let digest = SHA256.hash(data: Data(bssid.utf8))
+                continuation.resume(returning: digest.prefix(6).map { String(format: "%02x", $0) }.joined())
+            }
+        }
+    }
+
+    private static func interfaceSummary(_ path: NWPath) -> String {
+        let types: [(NWInterface.InterfaceType, String)] = [
+            (.wifi, "wifi"), (.wiredEthernet, "ethernet"), (.cellular, "cellular"),
+            (.loopback, "loopback"), (.other, "other"),
+        ]
+        let active = types.compactMap { path.usesInterfaceType($0.0) ? $0.1 : nil }
+        return active.isEmpty ? "none" : active.joined(separator: ",")
+    }
+
+    private static func statusSummary(_ status: NWPath.Status) -> String {
+        switch status {
+        case .satisfied: "satisfied"
+        case .unsatisfied: "unsatisfied"
+        case .requiresConnection: "requires_connection"
+        @unknown default: "unknown"
+        }
+    }
+}
+
 enum AppleDeviceIdentity {
     static let storedNameKey = "device.stableDisplayName"
 
+    @MainActor
     static var displayName: String {
         let defaults = UserDefaults.standard
         let stored = defaults.string(forKey: storedNameKey)
-        let userAssignedName = MainActor.assumeIsolated { UIDevice.current.name }
+        let userAssignedName = UIDevice.current.name
         let resolved = OperationalDeviceName.preferredDisplayName(
             stored: stored,
             userAssigned: userAssignedName,

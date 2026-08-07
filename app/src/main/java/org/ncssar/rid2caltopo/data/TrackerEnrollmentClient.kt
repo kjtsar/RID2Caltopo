@@ -13,7 +13,8 @@ data class TrackerEnrollmentResult(
     val organization: String,
     val trackerBaseUrl: String,
     val deviceToken: String,
-    val faaProxyUrl: String
+    val faaProxyUrl: String,
+    val enrollmentUrl: String
 )
 
 object TrackerEnrollmentClient {
@@ -27,7 +28,17 @@ object TrackerEnrollmentClient {
             !url.queryParameter("token").isNullOrBlank()
     }
 
+    fun enrollmentOrganization(value: String): String? {
+        val url = value.trim().toHttpUrlOrNull()?.takeIf { isEnrollmentUrl(value) } ?: return null
+        val segments = url.pathSegments.filter { it.isNotBlank() }
+        return segments.takeIf { it.size >= 2 }?.get(segments.lastIndex - 1)
+    }
+
     suspend fun redeem(context: Context, value: String): TrackerEnrollmentResult = withContext(Dispatchers.IO) {
+        redeemBlocking(context, value)
+    }
+
+    fun redeemBlocking(context: Context, value: String): TrackerEnrollmentResult {
         val enrollmentUrl = value.trim().toHttpUrlOrNull()
             ?: throw IllegalArgumentException("Enrollment QR is not a valid URL.")
         if (!isEnrollmentUrl(value)) {
@@ -50,7 +61,7 @@ object TrackerEnrollmentClient {
             .header("Accept", "application/json")
             .post(payload.toRequestBody(jsonMediaType))
             .build()
-        CaltopoSession.MyOkHttpClient.newCall(request).execute().use { response ->
+        return CaltopoSession.MyOkHttpClient.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 val detail = runCatching { JSONObject(body).optString("detail") }.getOrNull()
@@ -64,7 +75,8 @@ object TrackerEnrollmentClient {
                     .ifBlank { organization.getString("name") },
                 trackerBaseUrl = tracker.getString("base_url"),
                 deviceToken = tracker.getString("api_key"),
-                faaProxyUrl = tracker.getString("faa_proxy_url")
+                faaProxyUrl = tracker.getString("faa_proxy_url"),
+                enrollmentUrl = value.trim()
             )
         }
     }
@@ -78,6 +90,7 @@ object TrackerEnrollmentClient {
         CaltopoClient.SetUsePeers(true)
         CaltopoClient.SetStandaloneR2cCoordinationEnabled(true)
         CaltopoClient.SetTrackerFaaProxyUrl(result.faaProxyUrl)
+        CaltopoClient.SetTrackerEnrollmentUrl(result.enrollmentUrl)
         CaltopoClient.SetNotamEnabled(true)
     }
 

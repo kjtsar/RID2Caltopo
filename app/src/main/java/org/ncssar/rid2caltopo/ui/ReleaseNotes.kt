@@ -9,7 +9,7 @@ internal val RELEASE_NOTES_FALLBACK_ENTRY = ReleaseNoteEntry(
     hash = "",
     date = "",
     title = "Release notes unavailable",
-    detail = "This build did not include generated git history."
+    detail = "This build did not include versioned release notes."
 )
 
 internal data class ReleaseNoteEntry(
@@ -26,6 +26,9 @@ internal data class ReleaseNoteEntry(
 }
 
 internal fun parseReleaseNotes(raw: String?): List<ReleaseNoteEntry> {
+    val unifiedEntries = parseUnifiedReleaseNotes(raw)
+    if (unifiedEntries.isNotEmpty()) return unifiedEntries
+
     val entries = raw
         ?.split('\u001E')
         ?.flatMap { record ->
@@ -44,6 +47,46 @@ internal fun parseReleaseNotes(raw: String?): List<ReleaseNoteEntry> {
         ?.toList()
         .orEmpty()
     return entries.ifEmpty { listOf(RELEASE_NOTES_FALLBACK_ENTRY) }
+}
+
+private val unifiedReleaseNoteSections = setOf(
+    "Latest changes",
+    "Platform-specific changes",
+    "Known platform differences"
+)
+
+private fun parseUnifiedReleaseNotes(raw: String?): List<ReleaseNoteEntry> {
+    val lines = raw?.lineSequence()?.map(String::trim)?.toList().orEmpty()
+    if (lines.none { it.removeSuffix(":") in unifiedReleaseNoteSections }) return emptyList()
+
+    val entries = mutableListOf<ReleaseNoteEntry>()
+    var sectionTitle: String? = null
+    val changes = mutableListOf<String>()
+
+    fun finishSection() {
+        val title = sectionTitle ?: return
+        if (changes.isNotEmpty()) {
+            entries += ReleaseNoteEntry(
+                hash = "",
+                date = "",
+                title = title,
+                detail = changes.joinToString("\n")
+            )
+        }
+        changes.clear()
+    }
+
+    lines.forEach { line ->
+        val possibleSection = line.removeSuffix(":")
+        if (possibleSection in unifiedReleaseNoteSections) {
+            finishSection()
+            sectionTitle = possibleSection
+        } else if (sectionTitle != null && line.isNotEmpty()) {
+            changes += line.removePrefix("-").trim()
+        }
+    }
+    finishSection()
+    return entries
 }
 
 private fun parseReleaseNoteLine(line: String): ReleaseNoteEntry? {

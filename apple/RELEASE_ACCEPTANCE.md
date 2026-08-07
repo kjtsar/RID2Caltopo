@@ -9,7 +9,7 @@ hardware.
 
 | Capability | Android-aligned operator contract | Current evidence | Status |
 | --- | --- | --- | --- |
-| Configuration import | Import Android `R2C1`, `R2CFAA1`, and `R2CMA1` QR/config payloads and preserve imported mappings and settings. | Cross-language vectors, bundle tests, paste/custom-URL flow, and Simulator UI are green. | Green except physical camera/Drive proof |
+| Configuration import | Import Android `R2C2`, `R2CFAA1`, and `R2CMA1` QR/config payloads; R2C2 applies team settings and redeems a unique tracker device credential. | Cross-language vectors, bundle tests, paste/custom-URL flow, and Simulator UI are green. | Green except physical camera/Drive proof |
 | Remote ID core | Decode ASTM Basic ID, Location, System, and Message Packs and apply Android filtering, canonical IDs, aging, and archive policy. | Shared tests and live synthetic Simulator observations are green. | Green |
 | Bluetooth scanning | Start automatically, expose scanner state and aircraft details, and produce Android-shaped diagnostics. | A real iPad flight produced 48 accepted Bluetooth waypoints to approximately 333 m and a completed local archive; background/lock continuity remains unqualified. | Foreground green; background physical gate |
 | Wi-Fi Remote ID | Receive Wi-Fi Beacon/NAN aircraft through the DS110 Bluetooth bridge. | The app uses the normal Bluetooth parser and intentionally has no UDP compatibility listener. | Physical DS110 flight gate |
@@ -64,9 +64,9 @@ build; an untested or unevidenced required row remains a no-go.
 
 Before upload or release:
 
-1. Create and review `apple/AppStore/release-notes/<version>.txt`, covering both
-   the latest changes and the remaining Android differences, and copy it
-   unchanged to `apple/AppStore/metadata/en-US/whats_new.txt`.
+1. Create and review `release-notes/<version>/whats_new.txt`, covering shared
+   changes, platform-specific changes, and known platform differences. Run
+   `tools/sync_release_notes.sh <version>` to update store metadata.
 2. Run `apple/release-check.sh` with that marketing version from a cleanly
    understood worktree; the gate verifies the versioned release notes and the
    shared protected-land source catalog. Catalog network verification is

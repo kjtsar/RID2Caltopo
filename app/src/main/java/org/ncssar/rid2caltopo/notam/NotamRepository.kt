@@ -131,10 +131,10 @@ internal class NotamRepository {
                 NearbyNotam(
                     id = "pending_credentials",
                     title = "FAA NOTAM proxy pending",
-                    summary = "NOTAM monitoring is enabled, but FAA proxy access is unavailable in this build.",
+                    summary = "NOTAM monitoring is enabled, but FAA proxy access has not been configured.",
                     distanceNm = null,
                     effectiveText = "Waiting for FAA proxy configuration",
-                    details = "Install a build configured for FAA proxy access to activate live nearby NOTAM queries.",
+                    details = "Import an r2c-tracker organization QR code to activate live nearby NOTAM queries.",
                     rawText = "",
                     severity = NotamChipSeverity.Neutral
                 )
@@ -280,7 +280,7 @@ internal class NotamRepository {
                 if (!response.isSuccessful) {
                     val message = when (response.code) {
                         401, 403 -> {
-                            "FAA proxy authorization failed (HTTP ${response.code})."
+                            NotamAuthManager.authorizationFailureMessage(response.code)
                         }
                         else -> "$requestLabel failed with HTTP ${response.code}."
                     }

@@ -22,12 +22,14 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <uses-feature android:name="android.hardware.bluetooth"  android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
     <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.location.gps" android:required="false" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
@@ -47,6 +49,10 @@
         android:theme="@style/Theme.RID2Caltopo" >
         <meta-data android:name="com.google.android.gms.ads.AD_ID_DELIVERY" android:value="exclude_all" />
         <meta-data android:name="google_analytics_adid_collection_enabled" android:value="false" />
+        <!-- Prefetch the permissionless scanner still used by RID aircraft mapping. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
         <activity
             android:name=".app.R2CActivity"
             android:exported="true"
@@ -57,12 +63,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Handles r2c1:// URIs from org-config QR codes scanned by the camera -->
+            <!-- Handles R2C2 organization/enrollment bundles scanned by the camera. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="r2c1" />
+                <data android:scheme="r2c2" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

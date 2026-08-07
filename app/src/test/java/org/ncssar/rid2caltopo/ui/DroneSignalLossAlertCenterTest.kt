@@ -219,4 +219,28 @@ class DroneSignalLossAlertCenterTest {
             )
         )
     }
+
+    @Test
+    fun bridgeRecentlySeen_remainsTrueThroughFreshnessBoundary() {
+        assertEquals(
+            true,
+            DroneSignalLossAlertCenter.isBridgeRecentlySeenForTests(
+                lastSeenMonotonicMs = 1_000L,
+                nowMonotonicMs = 33_000L,
+                freshnessMs = 32_000L
+            )
+        )
+    }
+
+    @Test
+    fun bridgeRecentlySeen_turnsFalseAfterFreshnessBoundary() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.isBridgeRecentlySeenForTests(
+                lastSeenMonotonicMs = 1_000L,
+                nowMonotonicMs = 33_001L,
+                freshnessMs = 32_000L
+            )
+        )
+    }
 }

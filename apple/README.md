@@ -60,7 +60,7 @@ Choose **Import Config** and scan the managed enrollment QR from
 `r2c-tracker.com`. The app exchanges its signed, limited-use locator for a
 revocable device credential and stores that credential in Keychain. Configure
 organization and aircraft under Settings → Organization & RID mappings; the
-drone designator is derived from owner callsign and model. Legacy `R2C1:`,
+drone designator is derived from owner callsign and model. `R2C2:`,
 `R2CFAA1:`, `R2CMA1:`, and file imports remain available only for migration and
 mutual-aid compatibility. Camera scanning and live credential redemption remain
 physical-device field-test gates.

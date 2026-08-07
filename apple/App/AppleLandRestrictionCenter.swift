@@ -24,7 +24,9 @@ final class AppleLandRestrictionCenter: ObservableObject {
     @Published var enabled: Bool { didSet { defaults.set(enabled, forKey: "landRestrictions.enabled") } }
     @Published var showOnMap: Bool { didSet { defaults.set(showOnMap, forKey: "landRestrictions.showOnMap") } }
     @Published var autoRefresh: Bool { didSet { defaults.set(autoRefresh, forKey: "landRestrictions.autoRefresh") } }
-    @Published var radiusNM: Int { didSet { defaults.set(radiusNM, forKey: "landRestrictions.radiusNM") } }
+    @Published var radiusStatuteMiles: Int {
+        didSet { defaults.set(radiusStatuteMiles, forKey: "landRestrictions.radiusStatuteMiles") }
+    }
 
     private let defaults: UserDefaults
     private let cacheURL: URL?
@@ -41,14 +43,25 @@ final class AppleLandRestrictionCenter: ObservableObject {
         enabled = defaults.object(forKey: "landRestrictions.enabled") as? Bool ?? true
         showOnMap = defaults.object(forKey: "landRestrictions.showOnMap") as? Bool ?? true
         autoRefresh = defaults.object(forKey: "landRestrictions.autoRefresh") as? Bool ?? true
-        radiusNM = max(1, min(50, defaults.object(forKey: "landRestrictions.radiusNM") as? Int ?? 5))
+        if let storedRadius = defaults.object(forKey: "landRestrictions.radiusStatuteMiles") as? Int {
+            radiusStatuteMiles = max(1, min(50, storedRadius))
+        } else if let legacyRadiusNM = defaults.object(forKey: "landRestrictions.radiusNM") as? Int {
+            radiusStatuteMiles = max(1, min(50, Int(ceil(Double(legacyRadiusNM) / 0.868976))))
+        } else {
+            radiusStatuteMiles = 1
+        }
         restoreCache()
         rebuild(loading: false, errors: [], waitingForLocation: true)
     }
 
     func update(location: CLLocation?, force: Bool = false) {
         guard enabled else {
-            state = AppleLandRestrictionState(enabled: false, chipLabel: "Land rules off", statusLine: "Protected-land checks are disabled.")
+            state = AppleLandRestrictionState(
+                visible: true,
+                enabled: false,
+                chipLabel: "Land rules off",
+                statusLine: "Protected-land checks are disabled."
+            )
             return
         }
         guard let location else {
@@ -78,7 +91,7 @@ final class AppleLandRestrictionCenter: ObservableObject {
                     guard let url = OperationalLandRestriction.queryURL(
                         source: source,
                         center: coordinate,
-                        radiusNM: Double(radiusNM)
+                        radiusStatuteMiles: Double(radiusStatuteMiles)
                     ) else { throw URLError(.badURL) }
                     var request = URLRequest(url: url)
                     request.timeoutInterval = 40

@@ -9,6 +9,9 @@ struct AppleSignalLossAlert: Identifiable, Equatable {
     let mappedID: String
     let idleSeconds: Double
     let distanceFeet: Double
+    let lastRSSIDbm: Int?
+    let lastTransport: RidObservation.Source
+    let bridgeRecentlySeen: Bool
 }
 
 struct AppleAltitudeComplianceAlert: Identifiable, Equatable {
@@ -37,6 +40,7 @@ final class AppleOperationalAlertCenter: ObservableObject {
         alertEligibility: (String) -> Bool,
         bridgeCheckDistanceFeet: Double = 20,
         maximumTrackDelaySeconds: Double = 30,
+        bridgeLastSeenAt: Date? = nil,
         now: Date = Date()
     ) {
         let activeIDs = Set(tracks.map(\.aircraftID))
@@ -64,6 +68,7 @@ final class AppleOperationalAlertCenter: ObservableObject {
                 }.filter { $0 > 0 }
                 let decision = OperationalSignalLossPolicy.evaluate(.init(
                     signalIdleSeconds: max(0, now.timeIntervalSince(track.lastSignalAt)),
+                    trackTelemetryIdleSeconds: max(0, now.timeIntervalSince(track.lastAircraftMessageAt)),
                     learnedIntervalSeconds: intervals.isEmpty ? nil : intervals.reduce(0, +) / Double(intervals.count),
                     learnedSamples: intervals.count,
                     distanceFromDeviceFeet: currentDistance,
@@ -78,7 +83,12 @@ final class AppleOperationalAlertCenter: ObservableObject {
                         remoteID: track.aircraftID,
                         mappedID: identity.mappedID,
                         idleSeconds: max(0, now.timeIntervalSince(track.lastSignalAt)),
-                        distanceFeet: currentDistance
+                        distanceFeet: currentDistance,
+                        lastRSSIDbm: track.lastSignalStrengthDbm,
+                        lastTransport: track.lastSignalSource,
+                        bridgeRecentlySeen: bridgeLastSeenAt.map {
+                            now.timeIntervalSince($0) <= Double(DroneScoutRelayPing.signalFreshnessSeconds)
+                        } ?? false
                     ))
                 }
             }
@@ -119,10 +129,18 @@ final class AppleOperationalAlertCenter: ObservableObject {
 
     private func announceNewSignalAlerts(_ alerts: [AppleSignalLossAlert], now: Date) {
         for alert in alerts where shouldSpeak(key: "signal:\(alert.remoteID)", now: now) {
-            speak("Drone signal lost, \(alert.mappedID)")
+            speak(
+                alert.bridgeRecentlySeen
+                    ? "Drone location stale, \(alert.mappedID)"
+                    : "Drone signal lost, \(alert.mappedID)"
+            )
             AppleLog.warning(
                 "SignalLossAlert",
-                "Alert remoteId=\(alert.remoteID) mappedId=\(alert.mappedID) idleSeconds=\(Int(alert.idleSeconds)) distanceFeet=\(Int(alert.distanceFeet))"
+                "Alert remoteId=\(alert.remoteID) mappedId=\(alert.mappedID) " +
+                    "idleSeconds=\(Int(alert.idleSeconds)) distanceFeet=\(Int(alert.distanceFeet)) " +
+                    "lastRssiDbm=\(alert.lastRSSIDbm.map(String.init) ?? "unavailable") " +
+                    "lastTransport=\(alert.lastTransport.rawValue) " +
+                    "bridgeRecentlySeen=\(alert.bridgeRecentlySeen)"
             )
         }
     }
@@ -158,6 +176,36 @@ final class AppleOperationalAlertCenter: ObservableObject {
     }
 }
 
+@MainActor
+final class AppleDroneScoutBridgeAlertCenter: ObservableObject {
+    @Published private(set) var audioMuted = false
+
+    private var announcementGate = DroneScoutBridgeLossAnnouncementGate()
+
+    func update(monitoringActive: Bool, lastPingAt: Date?, now: Date = Date()) {
+        guard announcementGate.shouldAnnounce(
+            monitoringActive: monitoringActive,
+            lastPingAt: lastPingAt,
+            now: now,
+            muted: audioMuted
+        ) else { return }
+
+        AppleSpokenWarningCenter.shared.speak("Bridge Not Detected")
+        AppleLog.warning(
+            "DroneScoutBridge",
+            "Relay ping not detected for more than 32 seconds"
+        )
+    }
+
+    func toggleAudioMuted() {
+        audioMuted.toggle()
+        AppleLog.info(
+            "DroneScoutBridge",
+            audioMuted ? "Bridge warning muted" : "Bridge warning unmuted"
+        )
+    }
+}
+
 struct OperationalAlertBanner: View {
     let signalLoss: AppleSignalLossAlert?
     let altitude: AppleAltitudeComplianceAlert?
@@ -168,9 +216,17 @@ struct OperationalAlertBanner: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let signalLoss {
-                Label("Drone Signal Lost", systemImage: "antenna.radiowaves.left.and.right.slash")
+                Label(
+                    signalLoss.bridgeRecentlySeen ? "Drone Location Stale" : "Drone Signal Lost",
+                    systemImage: "antenna.radiowaves.left.and.right.slash"
+                )
                     .font(.headline).foregroundStyle(.red)
-                Text("\(signalLoss.mappedID): no telemetry for \(Int(signalLoss.idleSeconds.rounded())) seconds, \(Int(signalLoss.distanceFeet.rounded())) ft from this device.")
+                Text(
+                    "\(signalLoss.mappedID): " +
+                        (signalLoss.bridgeRecentlySeen ? "location stale" : "signal lost") +
+                        " for \(Int(signalLoss.idleSeconds.rounded())) seconds, " +
+                        "\(Int(signalLoss.distanceFeet.rounded())) ft from this device."
+                )
                 controls { onMuteSignal(signalLoss.remoteID) }
             } else if let altitude {
                 Label(

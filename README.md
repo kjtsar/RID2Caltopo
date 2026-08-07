@@ -117,13 +117,12 @@ legacy `tracker_url_pfx` key is still accepted for backward compatibility.
 The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the
 CalTopo Teams API credential. Map selection remains in each app.
 
-Managed organizations no longer need to distribute `ridmap.json` or
-`credentials.json`. An organization administrator creates an enrollment QR on
-`r2c-tracker.com`; Android or iOS scans it and exchanges its limited-use locator
-for a revocable device credential. Tracker secrets are not embedded in the QR.
-Organization and RID mappings are edited directly under Settings →
-Organization & RID mappings and persisted in app-private storage. Legacy JSON
-and R2C1 imports remain only as a migration path for existing installations.
+Managed organizations distribute an `R2C2` configuration containing team
+settings, RID mappings, and a signed r2c-tracker enrollment locator. Android or
+iOS redeems that locator for a unique, revocable device credential; an issued
+device secret is never copied into the organization bundle. The enrollment
+campaign must allow enough redemptions for the receiving devices. R2C1
+organization tokens are not accepted.
 
 ## ct_mutual_aid_credentials
 If you can enlist the help of your Caltopo Teams Admin, have them create a subteam account 

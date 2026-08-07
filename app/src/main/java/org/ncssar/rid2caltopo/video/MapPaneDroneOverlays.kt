@@ -393,6 +393,60 @@ internal fun bearingLineToViewportEdge(
     )
 }
 
+internal const val MINIMUM_TRAVEL_BEARING_DISPLACEMENT_METERS = 2.0
+
+/**
+ * Uses the latest displacement an operator can also see in the marker track.
+ * Duplicate/stationary samples retain the last movement course.
+ */
+internal fun travelBearingDegrees(
+    points: List<LocalTrackPoint>,
+    minimumDisplacementMeters: Double = MINIMUM_TRAVEL_BEARING_DISPLACEMENT_METERS
+): Double? {
+    if (!minimumDisplacementMeters.isFinite() || minimumDisplacementMeters <= 0.0) return null
+    val latest = points.lastOrNull()?.takeIf { it.lat.isFinite() && it.lng.isFinite() } ?: return null
+    for (index in points.lastIndex - 1 downTo 0) {
+        val earlier = points[index]
+        if (!earlier.lat.isFinite() || !earlier.lng.isFinite()) continue
+        val distance = travelDistanceMeters(earlier.lat, earlier.lng, latest.lat, latest.lng)
+        if (distance < minimumDisplacementMeters) continue
+        return initialTravelBearingDegrees(earlier.lat, earlier.lng, latest.lat, latest.lng)
+    }
+    return null
+}
+
+private fun travelDistanceMeters(lat1Degrees: Double, lng1Degrees: Double, lat2Degrees: Double, lng2Degrees: Double): Double {
+    val earthRadiusMeters = 6_371_008.8
+    val lat1 = Math.toRadians(lat1Degrees)
+    val lat2 = Math.toRadians(lat2Degrees)
+    val deltaLat = Math.toRadians(lat2Degrees - lat1Degrees)
+    val deltaLng = Math.toRadians(lng2Degrees - lng1Degrees)
+    val sinHalfLat = kotlin.math.sin(deltaLat / 2.0)
+    val sinHalfLng = kotlin.math.sin(deltaLng / 2.0)
+    val a = sinHalfLat * sinHalfLat +
+        kotlin.math.cos(lat1) * kotlin.math.cos(lat2) * sinHalfLng * sinHalfLng
+    return earthRadiusMeters * 2.0 * kotlin.math.atan2(
+        kotlin.math.sqrt(a),
+        kotlin.math.sqrt((1.0 - a).coerceAtLeast(0.0))
+    )
+}
+
+private fun initialTravelBearingDegrees(
+    lat1Degrees: Double,
+    lng1Degrees: Double,
+    lat2Degrees: Double,
+    lng2Degrees: Double
+): Double? {
+    val lat1 = Math.toRadians(lat1Degrees)
+    val lat2 = Math.toRadians(lat2Degrees)
+    val deltaLng = Math.toRadians(lng2Degrees - lng1Degrees)
+    val y = kotlin.math.sin(deltaLng) * kotlin.math.cos(lat2)
+    val x = kotlin.math.cos(lat1) * kotlin.math.sin(lat2) -
+        kotlin.math.sin(lat1) * kotlin.math.cos(lat2) * kotlin.math.cos(deltaLng)
+    if (x == 0.0 && y == 0.0) return null
+    return normalizeDegrees(Math.toDegrees(kotlin.math.atan2(y, x)))
+}
+
 private fun polarPoint(
     cx: Float,
     cy: Float,

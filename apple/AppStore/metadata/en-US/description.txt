@@ -11,3 +11,5 @@ RID2Caltopo also embeds MediaMTX for local controller-video ingest. Live video c
 Daily diagnostic logs and Android-compatible GeoJSON track archives remain on the device until the operator explicitly exports or shares them.
 
 RID2Caltopo is intended for trained incident personnel. It does not replace visual observation, see-and-avoid responsibilities, or compliance with aviation regulations.
+
+RID2Caltopo is an independent project and is not affiliated with or endorsed by CalTopo. It uses the CalTopo Teams API. The RID2Caltopo developer thanks the CalTopo team for its excellent product and support of the Teams API.

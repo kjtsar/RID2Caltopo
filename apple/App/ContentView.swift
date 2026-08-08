@@ -565,7 +565,7 @@ struct ContentView: View {
                     if let remoteID = ridTracks.tracks.first?.aircraftID {
                         let identity = RidAircraftIdentity(
                             remoteID: remoteID,
-                            organization: "NCSSAR",
+                            organization: "mySAR",
                             pilotCallsign: "Apple1",
                             droneDescription: "Simulator Drone"
                         )

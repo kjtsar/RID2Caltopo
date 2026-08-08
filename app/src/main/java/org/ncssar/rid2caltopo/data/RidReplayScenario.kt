@@ -19,7 +19,7 @@ import com.google.gson.JsonParser
  *     {
  *       "remote_id": "RID-ALPHA",
  *       "mapped_id": "1SAR7DjMn4Pr",
- *       "org": "NCSSAR",
+ *       "org": "mySAR",
  *       "model": "DJI Mini 4 Pro",
  *       "owner": "Ken Taylor",
  *       "transport": "WIFI",

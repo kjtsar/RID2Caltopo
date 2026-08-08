@@ -70,7 +70,7 @@ import java.util.UUID;
 /* Based on www.github.com/ncssar/caltopo_python (Tom Grundy).  The same 
  * caveats apply here.
  *
- *  Developed for Nevada County Sheriff's Search and Rescue
+ *  Developed for search-and-rescue operations
  *  Copyright (c) 2025 Ken Taylor 1SAR7
  *
  *   Caltopo currently does not have a publicly available API;

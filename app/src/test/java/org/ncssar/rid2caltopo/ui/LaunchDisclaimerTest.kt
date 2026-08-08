@@ -19,7 +19,10 @@ class LaunchDisclaimerTest {
                 "availability, accuracy, or completeness. Features and information may be unavailable, " +
                 "inaccurate, incomplete, or delayed. This app provides supplemental situational awareness " +
                 "only and must not be used as the sole source for navigation, flight safety, communications, " +
-                "or incident-command decisions. By selecting I agree, I accept responsibility for safe use " +
+                "or incident-command decisions. RID2Caltopo is an independent project and is not affiliated " +
+                "with or endorsed by CalTopo. It uses the CalTopo Teams API. The RID2Caltopo developer thanks " +
+                "the CalTopo team for its excellent product and support of the Teams API. By selecting I agree, " +
+                "I accept responsibility for safe use " +
                 "and for independently verifying safety-critical information.",
             LAUNCH_DISCLAIMER_TEXT,
         )

@@ -14,10 +14,10 @@ search assignments and actual drone coverage.  Together with Caltopo's "Aircraft
 ~real-time updates from this app allow an air-boss or supplemental Visual Observers to keep 
 track of all airborne assets.
 
-The [Caltopo](https://www.caltopo.com) platform is the preferred search management platform for many SAR agencies, 
-including the [Nevada County Sheriff's Search And Rescue](https://nevadacountysar.org/) 
-organization from which this project originates.  This project is very thankful to the 
-developers of Caltopo for exposing their Teams API to developers.   We are also thankful 
+The [CalTopo](https://www.caltopo.com) platform is a search-management platform used by many SAR agencies.
+RID2Caltopo is an independent project and is not affiliated with or endorsed by CalTopo. It uses
+the CalTopo Teams API. The RID2Caltopo developer thanks the CalTopo team for its excellent product
+and support of the Teams API. We are also thankful
 for the network sniffing and decoding code developed by the [OpenDroneId](https://github.com/opendroneid/receiver-android) project.
 
 Android phones and tablets have limited sensitivity to the Remote ID signalling.  They should
@@ -54,15 +54,15 @@ Use the ridmap configuration file format to map remoteIDs to more friendly track
         {
             "remoteId" : "1581F6Z9C24BH0036EJL",
             "mappedId" : "1SAR7min4p",
-            "org" : "NCSSAR",
-            "owner" : "NCSSAR",
+            "org" : "mySAR",
+            "owner" : "mySAR",
             "model" : "Mini 4 Pro"
 	    },
         {
             "remoteId" : "1581F67QE239L00A00DE",
             "mappedId" : "1SAR7mvc3p",
-            "org" : "NCSSAR",
-            "owner" : "NCSSAR",
+            "org" : "mySAR",
+            "owner" : "mySAR",
             "model" : "Mavic 3 Pro"
         },
     ]
@@ -102,7 +102,7 @@ website if your team is using that tool to keep track of flights:
     "credential_secret" : "this is where you enter your credential secret",
     "map_id" : "AH2JKLM",
     "use_direct_flag" : true,
-    "group_id" : "NCSSAR",
+    "group_id" : "mySAR",
     "track_folder" : "DroneTracks",
     "tracker_url_prefix" : "https://tracker.kjt.us",
     "tracker_api_key" : "SecretTokenToAuthenticateSubmission"

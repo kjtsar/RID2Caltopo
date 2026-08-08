@@ -13,10 +13,14 @@ class LaunchDisclaimerTest {
     @Test
     fun disclaimerUsesApprovedSafetyLanguage() {
         assertEquals(
-            "This app provides supplemental situational awareness that may be unavailable or " +
-                "contain incomplete or delayed information and must not be used as the sole source " +
-                "for navigation, flight safety, communications, or incident-command decisions.  " +
-                "I am responsible for safe use and independently verifying safety-critical information.",
+            "RID2Caltopo is provided on a best-effort, \"as is,\" and \"as available\" basis, " +
+                "with no express or implied warranties or guarantees, including merchantability, " +
+                "fitness for a particular purpose, non-infringement, suitability, reliability, " +
+                "availability, accuracy, or completeness. Features and information may be unavailable, " +
+                "inaccurate, incomplete, or delayed. This app provides supplemental situational awareness " +
+                "only and must not be used as the sole source for navigation, flight safety, communications, " +
+                "or incident-command decisions. By selecting I agree, I accept responsibility for safe use " +
+                "and for independently verifying safety-critical information.",
             LAUNCH_DISCLAIMER_TEXT,
         )
     }

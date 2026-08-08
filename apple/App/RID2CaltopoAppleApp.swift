@@ -98,7 +98,7 @@ private struct LaunchDisclaimerView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                Text("Safety Disclaimer")
+                Text("Safety and Best-Effort Disclaimer")
                     .font(.largeTitle.bold())
                     .multilineTextAlignment(.center)
                 Text(ApplicationLaunchDisclaimer.text)

@@ -536,13 +536,19 @@ internal class DroneAltitudeCoordinator(
 
         val atoFt = displayAtoMeters(altM, calibration, ridHeightAtoM)?.times(METERS_TO_FEET)
         val headingDeg = telemetryHeading[designator] ?: fallbackHeading[designator]
+        val rangeFt = state.source.takeIf { it.hasTakeoffLocation() }?.let { spec ->
+            val result = FloatArray(1)
+            Location.distanceBetween(spec.takeoffLat, spec.takeoffLng, demLat, demLng, result)
+            result[0].takeIf { it.isFinite() }?.toDouble()?.times(METERS_TO_FEET)
+        }
 
         displayStateByDesignator[designator] = DroneDisplayState(
             headingDeg = headingDeg,
             aglFt = aglFt,
             aglStale = aglStale,
             aglUsesDem = usingDemAgl,
-            atoFt = atoFt
+            atoFt = atoFt,
+            rangeFt = rangeFt,
         )
     }
 

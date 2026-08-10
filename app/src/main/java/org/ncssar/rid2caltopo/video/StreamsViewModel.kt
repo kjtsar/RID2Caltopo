@@ -723,6 +723,7 @@ data class DroneDisplayState(
     /** True when aglFt is DEM-backed; false means we are falling back to ATO / flat-earth estimate. */
     val aglUsesDem: Boolean = false,
     val atoFt: Double?,
+    val rangeFt: Double? = null,
 )
 
 internal fun streamTelemetryDisplayState(

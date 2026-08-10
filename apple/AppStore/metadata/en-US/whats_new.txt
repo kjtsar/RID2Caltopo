@@ -1,8 +1,13 @@
 Latest changes:
+- Added selectable 30 m, 10 m, and maximum-available 1 m USGS terrain downloads on Android and iOS, with conservative storage estimates and cache-limit checks.
+- Improved AGL accuracy by preserving the best available terrain resolution and preferring the finest downloaded terrain data at each aircraft position.
+- Standardized map and live-video telemetry as ATO, AGL, RNG, and HDG in the same order and units on both platforms.
+- Made Ignore suppress an unconfirmed drone only for its current flight so a later flight asks for confirmation again.
 - Clarified that RID2Caltopo is an independent project, is not affiliated with or endorsed by CalTopo, and uses the CalTopo Teams API with appreciation for the CalTopo team's product and API support.
 - Replaced public organization examples with the neutral mySAR name.
 
 Platform-specific changes:
+- iOS now matches Android's top-bar double-tap shortcut for switching between the Main and Live View screens.
 - Android and iOS show the same CalTopo relationship language in the required launch acknowledgment.
 
 Known platform differences:

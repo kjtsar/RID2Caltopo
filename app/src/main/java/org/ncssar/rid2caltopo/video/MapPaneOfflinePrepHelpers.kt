@@ -5,6 +5,8 @@ import android.os.StatFs
 import kotlinx.coroutines.CancellationException
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.HttpUrl
+import org.json.JSONObject
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
@@ -16,6 +18,108 @@ import org.ncssar.rid2caltopo.video.mapcache.MapCacheRootResolver
 import org.osmdroid.util.BoundingBox
 import java.io.File
 import java.util.Locale
+
+internal enum class DemResolutionOption(val meters: Int, val label: String, val explanation: String) {
+    STANDARD_30M(30, "Standard (30 m)", "Default; broad coverage and smallest download."),
+    ENHANCED_10M(10, "Enhanced (10 m)", "About 9x as many terrain samples as 30 m."),
+    MAXIMUM_1M(1, "Maximum available (1 m)", "Downloads available USGS lidar-derived project tiles; may be very large.")
+}
+
+internal data class DemDownload(
+    val url: String,
+    val fileName: String,
+    val expectedBytes: Long? = null
+)
+
+internal fun estimateDemDownloadCount(bounds: BoundingBox, resolution: DemResolutionOption): Int {
+    if (resolution != DemResolutionOption.MAXIMUM_1M) return demTileNamesForBounds(bounds).size
+    val centerLat = (bounds.latNorth + bounds.latSouth) / 2.0
+    val widthMeters = kotlin.math.abs(bounds.lonEast - bounds.lonWest) * 111_320.0 *
+        kotlin.math.cos(Math.toRadians(centerLat)).coerceAtLeast(0.1)
+    val heightMeters = kotlin.math.abs(bounds.latNorth - bounds.latSouth) * 111_320.0
+    val oneMeterTiles = maxOf(1, kotlin.math.ceil(widthMeters / 10_000.0).toInt() * kotlin.math.ceil(heightMeters / 10_000.0).toInt())
+    return demTileNamesForBounds(bounds).size + oneMeterTiles
+}
+
+internal fun conservativeDemBytes(count: Int, resolution: DemResolutionOption): Long {
+    val perTile = when (resolution) {
+        DemResolutionOption.STANDARD_30M -> 54_000_000L
+        DemResolutionOption.ENHANCED_10M -> 486_000_000L
+        // Maximum detail also includes 10 m coverage beneath any unavailable/NoData 1 m areas.
+        DemResolutionOption.MAXIMUM_1M -> 486_000_000L
+    }
+    return count.toLong() * perTile
+}
+
+internal fun conservativeDemBytes(bounds: BoundingBox, resolution: DemResolutionOption): Long {
+    if (resolution != DemResolutionOption.MAXIMUM_1M) {
+        return conservativeDemBytes(estimateDemDownloadCount(bounds, resolution), resolution)
+    }
+    val fallbackCount = demTileNamesForBounds(bounds).size
+    val oneMeterCount = (estimateDemDownloadCount(bounds, resolution) - fallbackCount).coerceAtLeast(1)
+    return fallbackCount * 486_000_000L + oneMeterCount * 400_000_000L
+}
+
+internal fun resolveDemDownloads(
+    bounds: BoundingBox,
+    resolution: DemResolutionOption,
+    client: OkHttpClient
+): List<DemDownload> {
+    if (resolution != DemResolutionOption.MAXIMUM_1M) {
+        val product = if (resolution == DemResolutionOption.ENHANCED_10M) "13" else "1"
+        return demTileNamesForBounds(bounds).map { name ->
+            val fileName = "USGS_${product}_$name.tif"
+            DemDownload(
+                url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/$product/TIFF/current/$name/$fileName",
+                fileName = fileName
+            )
+        }
+    }
+    val out = linkedMapOf<String, DemDownload>()
+    // Keep complete 10 m coverage below project-based 1 m tiles so gaps and NoData areas
+    // remain useful offline. The sampler will choose the finest valid overlapping value.
+    demTileNamesForBounds(bounds).forEach { name ->
+        val fileName = "USGS_13_$name.tif"
+        val url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/$name/$fileName"
+        out[url] = DemDownload(url, fileName)
+    }
+    var offset = 0
+    do {
+        val url = HttpUrl.Builder()
+            .scheme("https").host("tnmaccess.nationalmap.gov")
+            .addPathSegments("api/v1/products")
+            .addQueryParameter("bbox", "${bounds.lonWest},${bounds.latSouth},${bounds.lonEast},${bounds.latNorth}")
+            .addQueryParameter("prodFormats", "GeoTIFF")
+            .addQueryParameter("outputFormat", "JSON")
+            .addQueryParameter("datasets", "Digital Elevation Model (DEM) 1 meter")
+            .addQueryParameter("max", "100").addQueryParameter("offset", offset.toString())
+            .build()
+        val page = client.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            check(response.isSuccessful) { "TNM catalog HTTP ${response.code}" }
+            JSONObject(response.body?.string() ?: error("TNM catalog response was empty"))
+        }
+        val items = page.optJSONArray("items") ?: break
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val downloadUrl = item.optString("downloadURL").takeIf { it.startsWith("https://") } ?: continue
+            val originalName = downloadUrl.substringAfterLast('/').takeIf { it.endsWith(".tif", ignoreCase = true) } ?: continue
+            val boundingBox = item.optJSONObject("boundingBox")
+            val fileName = if (boundingBox != null) {
+                val minLat = kotlin.math.round(boundingBox.optDouble("minY") * 100_000.0).toLong()
+                val maxLat = kotlin.math.round(boundingBox.optDouble("maxY") * 100_000.0).toLong()
+                val minLon = kotlin.math.round(boundingBox.optDouble("minX") * 100_000.0).toLong()
+                val maxLon = kotlin.math.round(boundingBox.optDouble("maxX") * 100_000.0).toLong()
+                "R2C_1M_${minLat}_${maxLat}_${minLon}_${maxLon}_$originalName"
+            } else originalName
+            val expected = item.optLong("sizeInBytes", -1L).takeIf { it > 0L }
+            out[downloadUrl] = DemDownload(downloadUrl, fileName, expected)
+        }
+        offset += items.length()
+        val total = page.optInt("total", offset)
+        if (items.length() == 0 || offset >= total) break
+    } while (offset < 2_000)
+    return out.values.sortedBy { it.fileName }
+}
 
 private fun estimateDemSamplesForBounds(
     bounds: BoundingBox,

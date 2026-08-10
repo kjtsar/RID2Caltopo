@@ -3,6 +3,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
+import org.ncssar.rid2caltopo.video.mapcache.GeoTiffDemSource
 
 class DroneAltitudeCoordinatorTest {
     @Test
@@ -132,6 +133,13 @@ class DroneAltitudeCoordinatorTest {
         val nearby = DemElevationService.positionSamplingKey(39.153620, -121.132090)
 
         assertFalse(first == nearby)
+    }
+
+    @Test
+    fun geoTiffUtmConversionMatchesKnownCoordinate() {
+        val utm = GeoTiffDemSource.latLonToUtm(43.19113, -110.92524, 26912)!!
+        assertEquals(506_075.0, utm.first, 5.0)
+        assertEquals(4_782_042.0, utm.second, 5.0)
     }
 
     @Test

@@ -5,6 +5,7 @@ import org.json.JSONObject
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.osmdroid.util.BoundingBox
@@ -12,6 +13,18 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.util.MapTileIndex
 
 class MapPaneArtifactOverlayStateTest {
+    @Test
+    fun demPlannerDefaultsToThirtyMetersAndPricesFinerProductsHigher() {
+        val bounds = BoundingBox(39.75, -104.98, 39.73, -105.01)
+        assertEquals(30, DemResolutionOption.values().first().meters)
+        val count = estimateDemDownloadCount(bounds, DemResolutionOption.STANDARD_30M)
+        assertEquals(2, count)
+        assertTrue(
+            conservativeDemBytes(count, DemResolutionOption.ENHANCED_10M) >
+                conservativeDemBytes(count, DemResolutionOption.STANDARD_30M)
+        )
+    }
+
     @Before
     fun setUp() {
         CaltopoClient.ResetPersistedClientState()

@@ -2,9 +2,112 @@ import CoreLocation
 import R2CCore
 import R2CAppleRadios
 import SwiftUI
+import UIKit
 
 private struct DroneConfirmationRequest: Identifiable {
     let id: String
+}
+
+private struct NavigationBarDoubleTapBridge: UIViewRepresentable {
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeUIView(context: Context) -> InstallerView {
+        let view = InstallerView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: InstallerView, context: Context) {
+        context.coordinator.action = action
+        uiView.installWhenReady()
+    }
+
+    static func dismantleUIView(_ uiView: InstallerView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var action: () -> Void
+        weak var navigationBar: UINavigationBar?
+        lazy var recognizer: UITapGestureRecognizer = {
+            let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
+            recognizer.numberOfTapsRequired = 2
+            recognizer.cancelsTouchesInView = false
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        func install(on navigationBar: UINavigationBar) {
+            guard self.navigationBar !== navigationBar else { return }
+            uninstall()
+            navigationBar.addGestureRecognizer(recognizer)
+            self.navigationBar = navigationBar
+        }
+
+        func uninstall() {
+            navigationBar?.removeGestureRecognizer(recognizer)
+            navigationBar = nil
+        }
+
+        @objc private func handleDoubleTap() {
+            action()
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldReceive touch: UITouch
+        ) -> Bool {
+            var candidate: UIView? = touch.view
+            while let view = candidate, view !== navigationBar {
+                if view is UIControl { return false }
+                candidate = view.superview
+            }
+            return true
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+
+    @MainActor
+    final class InstallerView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            installWhenReady()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            installWhenReady()
+        }
+
+        func installWhenReady() {
+            var responder: UIResponder? = self
+            while let current = responder {
+                if let controller = current as? UIViewController,
+                   let navigationBar = controller.navigationController?.navigationBar {
+                    coordinator?.install(on: navigationBar)
+                    return
+                }
+                responder = current.next
+            }
+        }
+    }
 }
 
 struct ContentView: View {
@@ -124,6 +227,10 @@ struct ContentView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                 }
+            }
+            .background {
+                NavigationBarDoubleTapBridge(action: togglePrimaryScreenFromTopBar)
+                    .frame(width: 0, height: 0)
             }
             .navigationDestination(isPresented: $showTrackMap) {
                 operationalMapView
@@ -1613,6 +1720,25 @@ struct ContentView: View {
     private func closeLiveView() {
         AppleLog.info("Navigation", "Live View back selected; returning to Main Screen")
         showTrackMap = false
+    }
+
+    private func togglePrimaryScreenFromTopBar() {
+        if showTrackMap {
+            AppleLog.info("Navigation", "Top bar double tap: returning to Main Screen")
+            closeLiveView()
+            return
+        }
+        guard !showCaltopoSettings,
+              !showDiagnosticLogs,
+              !showStatus,
+              !showReleaseNotes,
+              !showAboutPrivacy,
+              !showProximityPairs,
+              !showConfigurationTransfer,
+              selectedAircraftID == nil
+        else { return }
+        AppleLog.info("Navigation", "Top bar double tap: opening Live View")
+        showTrackMap = true
     }
 
     private var activeCredentialNearExpiry: Bool {

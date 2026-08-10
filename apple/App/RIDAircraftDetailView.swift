@@ -253,10 +253,9 @@ final class AppleDroneConfirmationStore: ObservableObject {
                 return (remoteID, identity)
             })
         }
-        ignoredRemoteIDs = Set(
-            defaults.stringArray(forKey: Self.ignoredRemoteIDsDefaultsKey)?
-                .filter { !$0.isEmpty } ?? []
-        )
+        // Ignore is scoped to the current active flight, matching Android. Older Apple
+        // builds persisted this set and could therefore suppress confirmation forever.
+        defaults.removeObject(forKey: Self.ignoredRemoteIDsDefaultsKey)
     }
 
     func identity(for remoteID: String) -> RidAircraftIdentity? {
@@ -276,6 +275,7 @@ final class AppleDroneConfirmationStore: ObservableObject {
         for remoteID in endedRemoteIDs {
             sessionIdentities.removeValue(forKey: remoteID)
             promptedRemoteIDs.remove(remoteID)
+            ignoredRemoteIDs.remove(remoteID)
         }
         activeRemoteIDs = currentRemoteIDs
 
@@ -299,8 +299,10 @@ final class AppleDroneConfirmationStore: ObservableObject {
         ignoredRemoteIDs.insert(remoteID)
         sessionIdentities.removeValue(forKey: remoteID)
         peerIdentities.removeValue(forKey: remoteID)
-        persistIgnoredRemoteIDs()
-        AppleLog.info("DroneConfirmation", "Ignored remoteId=\(remoteID) persisted=true caltopoSuppressed=true")
+        AppleLog.info(
+            "DroneConfirmation",
+            "Ignored remoteId=\(remoteID) currentFlightOnly=true caltopoSuppressed=true"
+        )
     }
 
     var importedMappingCount: Int { importedIdentities.count }
@@ -311,9 +313,7 @@ final class AppleDroneConfirmationStore: ObservableObject {
 
     func confirm(_ identity: RidAircraftIdentity) {
         guard identity.isComplete else { return }
-        if ignoredRemoteIDs.remove(identity.remoteID) != nil {
-            persistIgnoredRemoteIDs()
-        }
+        ignoredRemoteIDs.remove(identity.remoteID)
         sessionIdentities[identity.remoteID] = identity
         AppleLog.info(
             "DroneConfirmation",
@@ -401,10 +401,6 @@ final class AppleDroneConfirmationStore: ObservableObject {
         defaults.removeObject(forKey: Self.ignoredRemoteIDsDefaultsKey)
     }
 
-    private func persistIgnoredRemoteIDs() {
-        defaults.set(ignoredRemoteIDs.sorted(), forKey: Self.ignoredRemoteIDsDefaultsKey)
-    }
-
     private static func importedPilotCallsign(mappedID: String, model: String, remoteID: String) -> String {
         RidAircraftIdentity.guessPilotCallsign(mappedID: mappedID, model: model, remoteID: remoteID)
     }
@@ -458,7 +454,7 @@ struct DroneConfirmationView: View {
                     }
                 }
                 Section {
-                    Text("Matching Android, all three fields are required. Save keeps the local identity for this session and broadcasts it when tracker coordination is configured. Ignore remembers this Remote ID on this device and suppresses its CalTopo track until it is explicitly saved later or app data is reset.")
+                    Text("Matching Android, all three fields are required. Save keeps the local identity for this session and broadcasts it when tracker coordination is configured. Ignore suppresses this Remote ID and its CalTopo track for the current active flight; a later flight will ask again.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

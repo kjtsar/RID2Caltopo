@@ -17,6 +17,7 @@ import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 
 internal data class DemElevationSample(
     val elevationMeters: Double,
@@ -31,7 +32,7 @@ internal class DemElevationService(context: Context) {
         private const val EPQS_BASE_BACKOFF_MS = 500L
         private const val EPQS_MAX_BACKOFF_MS = 8_000L
 
-        /** One arc-second ≈ 30 m — the native resolution of USGS 3DEP 1" data. */
+        /** One arc-second, used only to prewarm adjacent blocks for the default 30 m product. */
         private const val ARC_SEC = 1.0 / 3600.0
 
         private val epqsRateGateLock = Any()
@@ -52,8 +53,8 @@ internal class DemElevationService(context: Context) {
     private val localGeoTiff = GeoTiffDemSource(context.applicationContext)
     private val cache: BlobCacheStore = BlobCacheStoreFactory.create(
         context = context.applicationContext,
-        namespace = "dem_point_v1",
-        dbName = "dem_point_v1.db",
+        namespace = "dem_point_v2",
+        dbName = "dem_point_v2.db",
         maxBytes = 50L * 1024L * 1024L,
         defaultTtlMs = 365L * 24L * 60L * 60L * 1000L
     )
@@ -68,58 +69,28 @@ internal class DemElevationService(context: Context) {
         .callTimeout(6, TimeUnit.SECONDS)
         .build()
 
-    init {
-        // One-time migration: purge the old per-point blob cache (thousands of ~60-byte JSON
-        // .bin files in dem_point_v1/<qLat>/<qLng>/m.bin).  GeoTiffDemSource now keeps a
-        // persistent decoded-block cache (.f32raw files) that is far more efficient — a single
-        // 1 MB block file covers 512×512 = 262 144 elevation points with O(1) seek access and
-        // no LZW/pred3 work after first decode.
-        //
-        // Run on a daemon background thread so the constructor (called from the Compose
-        // composition thread via remember{}) never stalls the UI, even if the old cache
-        // contains many SAF files to delete.
-        Thread({
-            val prefs = context.applicationContext
-                .getSharedPreferences("dem_cache_prefs", android.content.Context.MODE_PRIVATE)
-            if (!prefs.getBoolean("block_cache_migrated_v1", false)) {
-                // Delay cleanup so the prewarm has time to run first.  The v6 cache-key
-                // bump above ensures old v5 blob entries are invisible to new queries even
-                // while they still exist on disk — so this sleep has no correctness impact.
-                Thread.sleep(30_000L)
-                try {
-                    cache.clear()
-                    MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
-                        "dem point-cache cleared: one-time migration to block-level cache")
-                } catch (e: Exception) {
-                    MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
-                        "dem point-cache clear-failed: ${e.message}")
-                }
-                prefs.edit().putBoolean("block_cache_migrated_v1", true).apply()
-            }
-        }, "dem-migration").apply { isDaemon = true; start() }
-    }
-
     suspend fun sampleElevationMeters(lat: Double, lng: Double): DemElevationSample? = withContext(Dispatchers.IO) {
         if (!lat.isFinite() || !lng.isFinite()) return@withContext null
         val key = cacheKey(lat, lng)
 
         // Sample the local raster at the aircraft's exact coordinate before consulting the
-        // one-arc-second point cache. GeoTiffDemSource bilinearly interpolates the surrounding
+        // EPQS point cache. GeoTiffDemSource bilinearly interpolates the surrounding
         // pixels and has its own decoded-block cache, so this is both cheap and spatially smooth.
-        // The coarser point cache remains appropriate for EPQS/network fallback values.
-        val localTiff = localGeoTiff.sampleElevationMeters(lat, lng)
-        if (localTiff != null && localTiff.isFinite() && localTiff >= -500.0 && localTiff <= 10_000.0) {
+        // The point cache retains approximately one-metre keys so EPQS can expose its
+        // best-available 3DEP source resolution.
+        val localTiff = localGeoTiff.sample(lat, lng)
+        if (localTiff != null && localTiff.elevationMeters.isFinite() && localTiff.elevationMeters >= -500.0 && localTiff.elevationMeters <= 10_000.0) {
             val sample = DemElevationSample(
-                elevationMeters = localTiff,
+                elevationMeters = localTiff.elevationMeters,
                 stale = false,
-                source = "usgs-geotiff-local"
+                source = "usgs-geotiff-local-${localTiff.horizontalResolutionMeters.roundToInt()}m"
             )
             MapCacheDebug.log("dem local-geotiff key=$key elevM=${"%.2f".format(Locale.US, sample.elevationMeters)}")
             return@withContext sample
         }
         if (localTiff != null) {
             MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
-                "dem local-geotiff-range-reject key=$key elevM=$localTiff " +
+                "dem local-geotiff-range-reject key=$key elevM=${localTiff.elevationMeters} " +
                     "lat=${"%.5f".format(Locale.US, lat)} lng=${"%.5f".format(Locale.US, lng)}")
         }
         MapCacheDebug.log("dem local-geotiff-miss key=$key")
@@ -220,9 +191,10 @@ internal class DemElevationService(context: Context) {
     fun samplingKey(lat: Double, lng: Double): String = positionSamplingKey(lat, lng)
 
     private fun quantize(value: Double): Int {
-        // 3600 arc-seconds per degree → each cache cell is ≈1 arc-second ≈ 30 m,
-        // matching the native resolution of USGS 3DEP 1" data used by EPQS and GeoTIFF tiles.
-        return kotlin.math.round(value * 3_600.0).toInt()
+        // EPQS uses the best available 3DEP source, including 1 m lidar-derived DEMs.
+        // Preserve approximately one-metre query spacing instead of flattening that result
+        // into the former 30 m cells. Local GeoTIFFs bypass this point cache entirely.
+        return kotlin.math.round(value * 100_000.0).toInt()
     }
 
     private suspend fun fetchSample(lat: Double, lng: Double): DemElevationSample? {

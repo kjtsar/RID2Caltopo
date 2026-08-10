@@ -3,10 +3,12 @@ import Foundation
 public struct OperationalTerrainSample: Sendable, Equatable {
     public let elevationMeters: Double
     public let stale: Bool
+    public let source: String?
 
-    public init(elevationMeters: Double, stale: Bool = false) {
+    public init(elevationMeters: Double, stale: Bool = false, source: String? = nil) {
         self.elevationMeters = elevationMeters
         self.stale = stale
+        self.source = source
     }
 }
 
@@ -192,14 +194,15 @@ public struct OperationalAltitudeCoordinator: Sendable {
 
     public static func terrainKey(_ coordinate: Coordinate) -> String {
         // Schedule local DEM sampling at roughly one-metre position changes. The GeoTIFF
-        // source bilinearly interpolates its surrounding pixels, so retaining a 1-arc-second
-        // key here would hide that interpolation behind visible terrain steps.
+        // source bilinearly interpolates its surrounding pixels. Approximately one-metre
+        // scheduling exposes 1 m local tiles and best-available EPQS results without visible steps.
         "\(Int((coordinate.latitude * 100_000).rounded()))|\(Int((coordinate.longitude * 100_000).rounded()))"
     }
 
     public static func terrainCacheKey(_ coordinate: Coordinate) -> String {
-        // EPQS results remain cached at their native one-arc-second resolution.
-        "\(Int((coordinate.latitude * 3_600).rounded()))|\(Int((coordinate.longitude * 3_600).rounded()))"
+        // EPQS is backed by the best available 3DEP source, including 1 m lidar DEMs.
+        // Retain approximately one-metre spacing so a fine source is not flattened to 30 m.
+        "\(Int((coordinate.latitude * 100_000).rounded()))|\(Int((coordinate.longitude * 100_000).rounded()))"
     }
 
     private mutating func refreshCorrection() {

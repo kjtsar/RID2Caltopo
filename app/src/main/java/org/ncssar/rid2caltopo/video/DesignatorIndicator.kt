@@ -348,24 +348,9 @@ internal fun formatLiveState(
 }
 
 internal fun formatCompactTelemetry(display: DroneDisplayState?): String {
-    if (display == null) return "HDG --  AGL --  ATO --"
-
-    val heading = display.headingDeg
-        ?.takeIf { it.isFinite() }
-        ?.let {
-            val normalized = ((it % 360.0) + 360.0) % 360.0
-            String.format(Locale.US, "HDG %.0f\u00b0", normalized)
-        }
-        ?: "HDG --"
-    val agl = display.aglFt
-        ?.takeIf { it.isFinite() }
-        ?.let { String.format(Locale.US, "AGL %.0f'", it) }
-        ?: "AGL --"
-    val ato = display.atoFt
-        ?.takeIf { it.isFinite() }
-        ?.let { String.format(Locale.US, "ATO %.0f'", it) }
-        ?: "ATO --"
-    return "$heading  $agl  $ato"
+    // This is the header rendered over focused and split-screen live video. Reuse the map
+    // formatter so every operator view has the same entries, order, units, and missing tokens.
+    return streamTelemetryHeaderText(display)
 }
 
 private fun formatStreamErrorDetail(streamErrorDetail: String?): String? {

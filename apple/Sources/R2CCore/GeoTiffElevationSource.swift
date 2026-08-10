@@ -2,9 +2,13 @@ import Compression
 import Foundation
 
 /// Random-access elevation sampler for the USGS 3DEP GeoTIFFs downloaded by
-/// both RID2Caltopo platforms. Supports the TIFF encodings used by current
-/// 1-degree products: raw, LZW, Deflate, PackBits, and predictors 2/3.
+/// both RID2Caltopo platforms. Supports geographic 30/10 m products and
+/// NAD83/WGS84 UTM 1 m project tiles, plus raw, LZW, Deflate, PackBits, and predictors 2/3.
 public final class GeoTiffElevationSource: @unchecked Sendable {
+    public struct Sample: Sendable, Equatable {
+        public let elevationMeters: Double
+        public let horizontalResolutionMeters: Double
+    }
     private struct Bounds {
         let minLatitude: Double, maxLatitude: Double, minLongitude: Double, maxLongitude: Double
         func contains(latitude: Double, longitude: Double) -> Bool {
@@ -31,6 +35,18 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
         let offsets: [Int], byteCounts: [Int]
         let noData: Double?
         let verticalUnitCode: Int
+        let projectedCSTypeCode: Int?
+
+        func modelCoordinate(latitude: Double, longitude: Double) -> (x: Double, y: Double)? {
+            guard let epsg = projectedCSTypeCode else { return (longitude, latitude) }
+            return GeoTiffElevationSource.latLonToUTM(latitude: latitude, longitude: longitude, epsg: epsg)
+        }
+
+        func horizontalResolutionMeters(latitude: Double) -> Double {
+            if projectedCSTypeCode != nil { return max(abs(scaleX), abs(scaleY)) }
+            let x = abs(scaleX) * 111_320 * max(0.1, cos(latitude * .pi / 180))
+            return max(x, abs(scaleY) * 111_320)
+        }
     }
 
     private let directory: URL
@@ -49,21 +65,43 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
     }
 
     public func sampleElevationMeters(latitude: Double, longitude: Double) -> Double? {
+        sample(latitude: latitude, longitude: longitude)?.elevationMeters
+    }
+
+    public func sample(latitude: Double, longitude: Double) -> Sample? {
         guard latitude.isFinite, longitude.isFinite else { return nil }
         return lock.r2cWithLock {
             refreshCatalog()
+            var best: Sample?
             for tile in tiles where tile.bounds?.contains(latitude: latitude, longitude: longitude) != false {
                 guard let data = loadFile(tile.url), let metadata = loadMetadata(tile.url, data: data),
                       let value = sample(tile: tile, data: data, metadata: metadata, latitude: latitude, longitude: longitude),
                       value.isFinite, (-500 ... 10_000).contains(value)
                 else { continue }
-                return value
+                let candidate = Sample(
+                    elevationMeters: value,
+                    horizontalResolutionMeters: metadata.horizontalResolutionMeters(latitude: latitude)
+                )
+                if best == nil || candidate.horizontalResolutionMeters < best!.horizontalResolutionMeters {
+                    best = candidate
+                }
             }
-            return nil
+            return best
         }
     }
 
     public static func tileBounds(fileName: String) -> (south: Double, north: Double, west: Double, east: Double)? {
+        let plannedPattern = #"(?i)^R2C_1M_(-?[0-9]+)_(-?[0-9]+)_(-?[0-9]+)_(-?[0-9]+)_.*\.tiff?$"#
+        if let regex = try? NSRegularExpression(pattern: plannedPattern),
+           let match = regex.firstMatch(in: fileName, range: NSRange(fileName.startIndex..., in: fileName)),
+           let southRange = Range(match.range(at: 1), in: fileName),
+           let northRange = Range(match.range(at: 2), in: fileName),
+           let westRange = Range(match.range(at: 3), in: fileName),
+           let eastRange = Range(match.range(at: 4), in: fileName),
+           let south = Double(fileName[southRange]), let north = Double(fileName[northRange]),
+           let west = Double(fileName[westRange]), let east = Double(fileName[eastRange]) {
+            return (south / 100_000, north / 100_000, west / 100_000, east / 100_000)
+        }
         let pattern = #"(?i).*([ns])([0-9]{2})([ew])([0-9]{3}).*"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: fileName, range: NSRange(fileName.startIndex..., in: fileName)),
@@ -79,6 +117,39 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
         let north = ns == "n" ? latitudeDegrees : -latitudeDegrees
         let west = ew == "e" ? longitudeDegrees : -longitudeDegrees
         return (north - 1, north, west, west + 1)
+    }
+
+    /// WGS84/NAD83 latitude-longitude to UTM for USGS project-based one-metre DEMs.
+    public static func latLonToUTM(
+        latitude: Double,
+        longitude: Double,
+        epsg: Int
+    ) -> (x: Double, y: Double)? {
+        let zone: Int, northern: Bool, inverseFlattening: Double
+        switch epsg {
+        case 26901 ... 26923: (zone, northern, inverseFlattening) = (epsg - 26900, true, 298.257222101)
+        case 32601 ... 32660: (zone, northern, inverseFlattening) = (epsg - 32600, true, 298.257223563)
+        case 32701 ... 32760: (zone, northern, inverseFlattening) = (epsg - 32700, false, 298.257223563)
+        default: return nil
+        }
+        let a = 6_378_137.0, f = 1 / inverseFlattening
+        let e2 = f * (2 - f), ep2 = e2 / (1 - e2)
+        let phi = latitude * .pi / 180, lambda = longitude * .pi / 180
+        let lambda0 = Double(zone * 6 - 183) * .pi / 180
+        let n = a / sqrt(1 - e2 * pow(sin(phi), 2))
+        let t = pow(tan(phi), 2), c = ep2 * pow(cos(phi), 2), aa = cos(phi) * (lambda - lambda0)
+        let m = a * ((1 - e2 / 4 - 3 * pow(e2, 2) / 64 - 5 * pow(e2, 3) / 256) * phi
+            - (3 * e2 / 8 + 3 * pow(e2, 2) / 32 + 45 * pow(e2, 3) / 1024) * sin(2 * phi)
+            + (15 * pow(e2, 2) / 256 + 45 * pow(e2, 3) / 1024) * sin(4 * phi)
+            - (35 * pow(e2, 3) / 3072) * sin(6 * phi))
+        let k0 = 0.9996
+        let x = 500_000 + k0 * n * (aa + (1 - t + c) * pow(aa, 3) / 6
+            + (5 - 18 * t + pow(t, 2) + 72 * c - 58 * ep2) * pow(aa, 5) / 120)
+        var y = k0 * (m + n * tan(phi) * (pow(aa, 2) / 2
+            + (5 - t + 9 * c + 4 * pow(c, 2)) * pow(aa, 4) / 24
+            + (61 - 58 * t + pow(t, 2) + 600 * c - 330 * ep2) * pow(aa, 6) / 720))
+        if !northern { y += 10_000_000 }
+        return (x, y)
     }
 
     private func refreshCatalog() {
@@ -137,11 +208,13 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
         let tie = tags[33922]?.doubles ?? [], scale = tags[33550]?.doubles ?? []
         let geoKeys = tags[34735]?.integers ?? []
         var verticalUnit = 9001
+        var projectedCSType: Int?
         if geoKeys.count >= 4 {
             for index in 0 ..< geoKeys[3] {
                 let base = 4 + index * 4
                 guard base + 3 < geoKeys.count else { break }
                 if geoKeys[base] == 4099, geoKeys[base + 1] == 0 { verticalUnit = geoKeys[base + 3] }
+                if geoKeys[base] == 3072, geoKeys[base + 1] == 0 { projectedCSType = geoKeys[base + 3] }
             }
         }
         let metadata = Metadata(
@@ -156,7 +229,8 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
             rowsPerStrip: tags[278]?.firstInt,
             offsets: tiled ? tileOffsets : stripOffsets,
             byteCounts: tiled ? tileCounts : stripCounts,
-            noData: tags[42113]?.string.flatMap(Double.init), verticalUnitCode: verticalUnit
+            noData: tags[42113]?.string.flatMap(Double.init), verticalUnitCode: verticalUnit,
+            projectedCSTypeCode: projectedCSType
         )
         guard width > 0, height > 0, metadata.scaleX != 0, metadata.scaleY != 0,
               !metadata.offsets.isEmpty, metadata.offsets.count == metadata.byteCounts.count
@@ -170,8 +244,9 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
         latitude: Double, longitude: Double
     ) -> Double? {
         guard metadata.planarConfiguration == 1 else { return nil }
-        let column = metadata.tieI + (longitude - metadata.tieX) / metadata.scaleX
-        let row = metadata.tieJ + (metadata.tieY - latitude) / metadata.scaleY
+        guard let model = metadata.modelCoordinate(latitude: latitude, longitude: longitude) else { return nil }
+        let column = metadata.tieI + (model.x - metadata.tieX) / metadata.scaleX
+        let row = metadata.tieJ + (metadata.tieY - model.y) / metadata.scaleY
         guard column >= 0, row >= 0, column <= Double(metadata.width - 1), row <= Double(metadata.height - 1) else { return nil }
         let c0 = min(metadata.width - 1, Int(floor(column))), r0 = min(metadata.height - 1, Int(floor(row)))
         let c1 = min(metadata.width - 1, c0 + 1), r1 = min(metadata.height - 1, r0 + 1)

@@ -22,17 +22,23 @@ import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.regex.Pattern
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
+import kotlin.math.tan
 
 internal class GeoTiffDemSource(context: Context) {
+    data class Sample(val elevationMeters: Double, val horizontalResolutionMeters: Double)
     private val appContext = context.applicationContext
     private val lock = Any()
     private var catalogRefreshedAtMs: Long = 0L
     private var tiles: List<DemTile> = emptyList()
     private val metadataCache = object : LinkedHashMap<String, GeoTiffMetadata>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, GeoTiffMetadata>?): Boolean {
-            return size > 12
+            return size > 128
         }
     }
     /**
@@ -57,6 +63,10 @@ internal class GeoTiffDemSource(context: Context) {
     }
 
     fun sampleElevationMeters(lat: Double, lng: Double): Double? {
+        return sample(lat, lng)?.elevationMeters
+    }
+
+    fun sample(lat: Double, lng: Double): Sample? {
         if (!lat.isFinite() || !lng.isFinite()) return null
         val candidates = synchronized(lock) {
             refreshCatalogLocked()
@@ -64,14 +74,18 @@ internal class GeoTiffDemSource(context: Context) {
         }
         if (candidates.isEmpty()) return null
 
+        var best: Sample? = null
         for (tile in candidates) {
             val metadata = getOrLoadMetadata(tile) ?: continue
             val value = trySampleFromTile(tile, metadata, lat, lng)
             if (value != null && value.isFinite()) {
-                return value
+                val candidate = Sample(value, metadata.horizontalResolutionMeters(lat))
+                if (best == null || candidate.horizontalResolutionMeters < best.horizontalResolutionMeters) {
+                    best = candidate
+                }
             }
         }
-        return null
+        return best
     }
 
     private fun refreshCatalogLocked() {
@@ -157,8 +171,9 @@ internal class GeoTiffDemSource(context: Context) {
 
     private fun trySampleFromTile(tile: DemTile, metadata: GeoTiffMetadata, lat: Double, lng: Double): Double? {
         if (metadata.scaleX == 0.0 || metadata.scaleY == 0.0) return null
-        val colF = metadata.tieI + (lng - metadata.tieX) / metadata.scaleX
-        val rowF = metadata.tieJ + (metadata.tieY - lat) / metadata.scaleY
+        val model = metadata.modelCoordinate(lat, lng) ?: return null
+        val colF = metadata.tieI + (model.first - metadata.tieX) / metadata.scaleX
+        val rowF = metadata.tieJ + (metadata.tieY - model.second) / metadata.scaleY
         if (!colF.isFinite() || !rowF.isFinite()) return null
         if (colF < 0.0 || rowF < 0.0 || colF > (metadata.width - 1).toDouble() || rowF > (metadata.height - 1).toDouble()) {
             return null
@@ -490,6 +505,7 @@ internal class GeoTiffDemSource(context: Context) {
         val numGeoKeys = geoKeyDir.getOrElse(3) { 0 }
         var verticalUnitCode = 9001  // default: Linear_Meter
         var verticalUnitCodeExplicit = false
+        var projectedCSTypeCode: Int? = null
         for (k in 0 until numGeoKeys) {
             val base = 4 + k * 4
             val keyId    = geoKeyDir.getOrElse(base)     { 0 }
@@ -498,7 +514,9 @@ internal class GeoTiffDemSource(context: Context) {
             if (keyId == 4099 && tagLoc == 0) {
                 verticalUnitCode = valueOrIdx
                 verticalUnitCodeExplicit = true
-                break
+            }
+            if (keyId == 3072 && tagLoc == 0) {
+                projectedCSTypeCode = valueOrIdx
             }
         }
 
@@ -527,6 +545,7 @@ internal class GeoTiffDemSource(context: Context) {
             noDataValue = noDataValue,
             verticalUnitCode = verticalUnitCode,
             verticalUnitCodeExplicit = verticalUnitCodeExplicit,
+            projectedCSTypeCode = projectedCSTypeCode,
         )
     }
 
@@ -677,6 +696,14 @@ internal class GeoTiffDemSource(context: Context) {
     }
 
     private fun boundsFromName(name: String): TileBounds? {
+        val planned = PLANNED_1M_NAME_PATTERN.matcher(name)
+        if (planned.matches()) {
+            val minLat = planned.group(1)?.toDoubleOrNull()?.div(100_000.0) ?: return null
+            val maxLat = planned.group(2)?.toDoubleOrNull()?.div(100_000.0) ?: return null
+            val minLon = planned.group(3)?.toDoubleOrNull()?.div(100_000.0) ?: return null
+            val maxLon = planned.group(4)?.toDoubleOrNull()?.div(100_000.0) ?: return null
+            return TileBounds(minLat, maxLat, minLon, maxLon)
+        }
         val m = TILE_NAME_PATTERN.matcher(name)
         if (!m.matches()) return null
         val ns = m.group(1)?.lowercase(Locale.US) ?: return null
@@ -761,7 +788,64 @@ internal class GeoTiffDemSource(context: Context) {
         val verticalUnitCode: Int = 9001,
         /** True when GeoKey 4099 was explicitly present in the tile; false when 9001 is a default. */
         val verticalUnitCodeExplicit: Boolean = false,
-    )
+        /** GeoKey 3072. USGS one-metre project DEMs are normally NAD83 UTM (EPSG 269xx). */
+        val projectedCSTypeCode: Int? = null,
+    ) {
+        fun modelCoordinate(lat: Double, lng: Double): Pair<Double, Double>? {
+            val epsg = projectedCSTypeCode ?: return lng to lat
+            return latLonToUtm(lat, lng, epsg)
+        }
+
+        fun horizontalResolutionMeters(latitude: Double): Double {
+            if (projectedCSTypeCode != null) return maxOf(kotlin.math.abs(scaleX), kotlin.math.abs(scaleY))
+            val x = kotlin.math.abs(scaleX) * 111_320.0 * cos(Math.toRadians(latitude)).coerceAtLeast(0.1)
+            val y = kotlin.math.abs(scaleY) * 111_320.0
+            return maxOf(x, y)
+        }
+    }
+
+    companion object {
+        private val TILE_NAME_PATTERN: Pattern =
+            Pattern.compile(".*([nNsS])(\\d{2})([eEwW])(\\d{3}).*\\.tiff?$")
+        private val PLANNED_1M_NAME_PATTERN: Pattern =
+            Pattern.compile("R2C_1M_(-?\\d+)_(-?\\d+)_(-?\\d+)_(-?\\d+)_.*\\.tiff?$", Pattern.CASE_INSENSITIVE)
+
+        /** Convert WGS84 latitude/longitude to the UTM coordinates used by USGS 1 m DEM projects. */
+        internal fun latLonToUtm(lat: Double, lng: Double, epsg: Int): Pair<Double, Double>? {
+            val zone: Int
+            val northern: Boolean
+            val inverseFlattening: Double
+            when (epsg) {
+                in 26901..26923 -> { zone = epsg - 26900; northern = true; inverseFlattening = 298.257222101 }
+                in 32601..32660 -> { zone = epsg - 32600; northern = true; inverseFlattening = 298.257223563 }
+                in 32701..32760 -> { zone = epsg - 32700; northern = false; inverseFlattening = 298.257223563 }
+                else -> return null
+            }
+            val a = 6_378_137.0
+            val f = 1.0 / inverseFlattening
+            val e2 = f * (2.0 - f)
+            val ep2 = e2 / (1.0 - e2)
+            val phi = Math.toRadians(lat)
+            val lambda = Math.toRadians(lng)
+            val lambda0 = Math.toRadians(zone * 6.0 - 183.0)
+            val n = a / sqrt(1.0 - e2 * sin(phi).pow(2))
+            val t = tan(phi).pow(2)
+            val c = ep2 * cos(phi).pow(2)
+            val aa = cos(phi) * (lambda - lambda0)
+            val m = a * ((1 - e2 / 4 - 3 * e2.pow(2) / 64 - 5 * e2.pow(3) / 256) * phi
+                - (3 * e2 / 8 + 3 * e2.pow(2) / 32 + 45 * e2.pow(3) / 1024) * sin(2 * phi)
+                + (15 * e2.pow(2) / 256 + 45 * e2.pow(3) / 1024) * sin(4 * phi)
+                - (35 * e2.pow(3) / 3072) * sin(6 * phi))
+            val k0 = 0.9996
+            val easting = 500_000.0 + k0 * n * (aa + (1 - t + c) * aa.pow(3) / 6
+                + (5 - 18 * t + t.pow(2) + 72 * c - 58 * ep2) * aa.pow(5) / 120)
+            var northing = k0 * (m + n * tan(phi) * (aa.pow(2) / 2
+                + (5 - t + 9 * c + 4 * c.pow(2)) * aa.pow(4) / 24
+                + (61 - 58 * t + t.pow(2) + 600 * c - 330 * ep2) * aa.pow(6) / 720))
+            if (!northern) northing += 10_000_000.0
+            return easting to northing
+        }
+    }
 
     private interface RandomAccessDataSource : Closeable {
         fun readFully(position: Long, length: Int): ByteArray
@@ -805,8 +889,4 @@ internal class GeoTiffDemSource(context: Context) {
         }
     }
 
-    private companion object {
-        private val TILE_NAME_PATTERN: Pattern =
-            Pattern.compile(".*([nNsS])(\\d{2})([eEwW])(\\d{3}).*\\.tiff?$")
-    }
 }

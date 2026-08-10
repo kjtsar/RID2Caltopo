@@ -85,6 +85,11 @@ struct AppleCachedMapTileSelection: Identifiable {
 
 @MainActor
 final class AppleMapOfflineManager: ObservableObject {
+    private struct DEMDownload: Hashable {
+        let url: URL
+        let fileName: String
+        let expectedBytes: Int64?
+    }
     struct ProgressState: Equatable {
         var phase = "Idle"
         var completed = 0
@@ -147,19 +152,24 @@ final class AppleMapOfflineManager: ObservableObject {
         bounds: OperationalMapBounds,
         preset: OperationalOfflinePreset,
         includeContours: Bool,
-        includeDEM: Bool
+        includeDEM: Bool,
+        demResolution: OperationalDEMResolution = .standard30m
     ) -> (tiles: Int, dem: Int, bytes: Int64) {
         let tiles = OperationalOfflineMapPlanner.tileCount(
             bounds: bounds,
             minimumZoom: preset.minimumZoom,
             maximumZoom: preset.maximumZoom
         )
-        let dem = includeDEM ? OperationalOfflineMapPlanner.demTileNames(bounds: bounds).count : 0
-        return (tiles, dem, OperationalOfflineMapPlanner.estimatedBytes(
+        let dem = includeDEM ? OperationalOfflineMapPlanner.estimatedDEMTileCount(bounds: bounds, resolution: demResolution) : 0
+        let mapBytes = OperationalOfflineMapPlanner.estimatedBytes(
             tileCount: tiles,
             includeContours: includeContours,
-            demTileCount: dem
-        ))
+            demTileCount: 0
+        )
+        let demBytes = includeDEM
+            ? OperationalOfflineMapPlanner.estimatedDEMBytes(bounds: bounds, resolution: demResolution)
+            : 0
+        return (tiles, dem, mapBytes + demBytes)
     }
 
     func start(
@@ -167,7 +177,8 @@ final class AppleMapOfflineManager: ObservableObject {
         preset: OperationalOfflinePreset,
         baseLayer: OperationalMapBaseLayer,
         includeContours: Bool,
-        includeDEM: Bool
+        includeDEM: Bool,
+        demResolution: OperationalDEMResolution = .standard30m
     ) {
         guard !isRunning else { return }
         guard let tiles = OperationalOfflineMapPlanner.tiles(
@@ -178,10 +189,12 @@ final class AppleMapOfflineManager: ObservableObject {
             status = "Selection exceeds the 250,000-tile safety limit. Choose a smaller area or preset."
             return
         }
-        let demNames = includeDEM ? OperationalOfflineMapPlanner.demTileNames(bounds: bounds) : []
+        let estimatedDEMCount = includeDEM
+            ? OperationalOfflineMapPlanner.estimatedDEMTileCount(bounds: bounds, resolution: demResolution)
+            : 0
         isRunning = true
         let tileOperationCount = tiles.count * (includeContours ? 2 : 1)
-        let operationCount = tileOperationCount + demNames.count
+        let operationCount = tileOperationCount + estimatedDEMCount
         progress = ProgressState(
             phase: "Preparing map tiles",
             completed: 0,
@@ -189,22 +202,36 @@ final class AppleMapOfflineManager: ObservableObject {
             tileCompleted: 0,
             tileTotal: tileOperationCount,
             demCompleted: 0,
-            demTotal: demNames.count,
+            demTotal: estimatedDEMCount,
             startedAt: Date()
         )
         status = "Preparing \(operationCount) offline items"
         downloadTask = Task { [weak self] in
             guard let self else { return }
+            let demDownloads: [DEMDownload]
+            do {
+                demDownloads = includeDEM
+                    ? try await self.resolveDEMDownloads(bounds: bounds, resolution: demResolution)
+                    : []
+            } catch {
+                self.isRunning = false
+                self.progress.phase = "Failed"
+                self.status = "DEM planning failed: \(error.localizedDescription)"
+                self.downloadTask = nil
+                return
+            }
+            self.progress.demTotal = demDownloads.count
+            self.progress.total = tileOperationCount + demDownloads.count
             for tile in tiles {
                 guard !Task.isCancelled else { break }
                 await self.fetchTile(tile, baseLayer: baseLayer)
                 if includeContours, !Task.isCancelled { await self.fetchContour(tile) }
             }
-            if !demNames.isEmpty, !Task.isCancelled {
+            if !demDownloads.isEmpty, !Task.isCancelled {
                 self.progress.phase = "Preparing DEM tiles"
             }
-            for name in demNames where !Task.isCancelled {
-                await self.fetchDEM(name)
+            for download in demDownloads where !Task.isCancelled {
+                await self.fetchDEM(download)
             }
             let cancelled = Task.isCancelled
             self.isRunning = false
@@ -413,22 +440,78 @@ final class AppleMapOfflineManager: ObservableObject {
         }
     }
 
-    private func fetchDEM(_ name: String) async {
-        let destination = AppleMapCachePaths.demRoot.appendingPathComponent("USGS_1_\(name).tif")
+    private func resolveDEMDownloads(
+        bounds: OperationalMapBounds,
+        resolution: OperationalDEMResolution
+    ) async throws -> [DEMDownload] {
+        if resolution != .maximum1m {
+            let product = resolution == .enhanced10m ? "13" : "1"
+            return OperationalOfflineMapPlanner.demTileNames(bounds: bounds).compactMap { name in
+                let fileName = "USGS_\(product)_\(name).tif"
+                guard let url = URL(string: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/\(product)/TIFF/current/\(name)/\(fileName)") else { return nil }
+                return DEMDownload(url: url, fileName: fileName, expectedBytes: nil)
+            }
+        }
+
+        // Preserve complete 10 m coverage underneath project-based 1 m tiles. The terrain
+        // sampler selects the finest valid overlap and falls through on 1 m NoData cells.
+        var downloads: [DEMDownload] = OperationalOfflineMapPlanner.demTileNames(bounds: bounds).compactMap { name in
+            let fileName = "USGS_13_\(name).tif"
+            guard let url = URL(string: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/\(name)/\(fileName)") else { return nil }
+            return DEMDownload(url: url, fileName: fileName, expectedBytes: nil)
+        }
+        var offset = 0
+        repeat {
+            var components = URLComponents(string: "https://tnmaccess.nationalmap.gov/api/v1/products")!
+            components.queryItems = [
+                .init(name: "bbox", value: "\(bounds.west),\(bounds.south),\(bounds.east),\(bounds.north)"),
+                .init(name: "prodFormats", value: "GeoTIFF"),
+                .init(name: "outputFormat", value: "JSON"),
+                .init(name: "datasets", value: "Digital Elevation Model (DEM) 1 meter"),
+                .init(name: "max", value: "100"), .init(name: "offset", value: String(offset)),
+            ]
+            let (data, response) = try await URLSession.shared.data(from: components.url!)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let items = object["items"] as? [[String: Any]]
+            else { throw URLError(.badServerResponse) }
+            for item in items {
+                guard let text = item["downloadURL"] as? String, let url = URL(string: text) else { continue }
+                let bytes = (item["sizeInBytes"] as? NSNumber)?.int64Value
+                let fileName: String
+                if let box = item["boundingBox"] as? [String: Any],
+                   let minX = (box["minX"] as? NSNumber)?.doubleValue,
+                   let maxX = (box["maxX"] as? NSNumber)?.doubleValue,
+                   let minY = (box["minY"] as? NSNumber)?.doubleValue,
+                   let maxY = (box["maxY"] as? NSNumber)?.doubleValue {
+                    fileName = "R2C_1M_\(Int64((minY * 100_000).rounded()))_\(Int64((maxY * 100_000).rounded()))_"
+                        + "\(Int64((minX * 100_000).rounded()))_\(Int64((maxX * 100_000).rounded()))_\(url.lastPathComponent)"
+                } else {
+                    fileName = url.lastPathComponent
+                }
+                downloads.append(DEMDownload(url: url, fileName: fileName, expectedBytes: bytes))
+            }
+            offset += items.count
+            let total = (object["total"] as? NSNumber)?.intValue ?? downloads.count
+            if items.isEmpty || offset >= total { break }
+        } while offset < 2_000
+        return Array(Set(downloads)).sorted { $0.fileName < $1.fileName }
+    }
+
+    private func fetchDEM(_ download: DEMDownload) async {
+        let destination = AppleMapCachePaths.demRoot.appendingPathComponent(download.fileName)
         let cached = await Task.detached(priority: .utility) {
-            (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { $0 > 5_000_000 } == true
+            guard let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) else { return false }
+            if let expected = download.expectedBytes { return Int64(size) >= max(100_000, expected * 95 / 100) }
+            return size > 5_000_000
         }.value
         if cached {
             recordCacheHit(kind: .dem)
             return
         }
         progress.phase = "Downloading DEM tiles"
-        guard let url = URL(string: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/current/\(name)/USGS_1_\(name).tif") else {
-            recordFailure(kind: .dem)
-            return
-        }
         do {
-            let (temporary, response) = try await URLSession.shared.download(from: url)
+            let (temporary, response) = try await URLSession.shared.download(from: download.url)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 recordFailure(kind: .dem)
                 return
@@ -447,7 +530,7 @@ final class AppleMapOfflineManager: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
-            AppleLog.warning("MapOffline", "DEM download failed \(name): \(error.localizedDescription)")
+            AppleLog.warning("MapOffline", "DEM download failed \(download.fileName): \(error.localizedDescription)")
             recordFailure(kind: .dem)
         }
     }
@@ -565,6 +648,7 @@ struct AppleOfflineMapPreparationView: View {
     @State private var selectedBoundaryID = ""
     @State private var includeContours: Bool
     @State private var includeDEM = true
+    @State private var demResolution = OperationalDEMResolution.standard30m
 
     init(
         manager: AppleMapOfflineManager,
@@ -587,7 +671,10 @@ struct AppleOfflineMapPreparationView: View {
     }
 
     private var estimate: (tiles: Int, dem: Int, bytes: Int64) {
-        manager.estimate(bounds: bounds, preset: preset, includeContours: includeContours, includeDEM: includeDEM)
+        manager.estimate(
+            bounds: bounds, preset: preset, includeContours: includeContours,
+            includeDEM: includeDEM, demResolution: demResolution
+        )
     }
 
     var body: some View {
@@ -605,10 +692,21 @@ struct AppleOfflineMapPreparationView: View {
                 Section("Contents") {
                     Toggle("Include contour tiles", isOn: $includeContours)
                     Toggle("Include DEM tiles", isOn: $includeDEM)
+                    if includeDEM {
+                        Picker("DEM detail", selection: $demResolution) {
+                            ForEach(OperationalDEMResolution.allCases) { Text($0.label).tag($0) }
+                        }
+                        Text(demResolution.explanation)
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     LabeledContent("Map tiles", value: estimate.tiles.formatted())
                     LabeledContent("DEM tiles", value: estimate.dem.formatted())
                     LabeledContent("Conservative estimate", value: AppleMapOfflineManager.formatBytes(estimate.bytes))
-                    Text("DEM preparation downloads complete USGS 1° GeoTIFF tiles, approximately 25–54 MB each.")
+                    if estimate.bytes > Int64(manager.maximumCacheGB * 1_000_000_000) {
+                        Text("Selection exceeds the configured map-cache limit. Reduce the area/detail or raise the cache limit.")
+                            .font(.footnote).foregroundStyle(.red)
+                    }
+                    Text("The estimate is conservative. One-metre availability is resolved from the USGS catalog when preparation starts.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 if manager.isRunning || manager.progress.phase != "Idle" {
@@ -664,10 +762,14 @@ struct AppleOfflineMapPreparationView: View {
                             preset: preset,
                             baseLayer: baseLayer,
                             includeContours: includeContours,
-                            includeDEM: includeDEM
+                            includeDEM: includeDEM,
+                            demResolution: demResolution
                         )
                     }
-                    .disabled(manager.isRunning || estimate.tiles > 250_000)
+                    .disabled(
+                        manager.isRunning || estimate.tiles > 250_000
+                            || estimate.bytes > Int64(manager.maximumCacheGB * 1_000_000_000)
+                    )
                 }
             }
         }

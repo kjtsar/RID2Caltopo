@@ -858,6 +858,12 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(!tiles.isEmpty)
     #expect(Set(tiles).count == tiles.count)
     #expect(OperationalOfflineMapPlanner.demTileNames(bounds: bounds) == ["n40w106", "n40w105"])
+    #expect(OperationalDEMResolution.allCases.first == .standard30m)
+    #expect(OperationalOfflineMapPlanner.estimatedBytes(
+        tileCount: 0, includeContours: false, demTileCount: 1, demResolution: .enhanced10m
+    ) > OperationalOfflineMapPlanner.estimatedBytes(
+        tileCount: 0, includeContours: false, demTileCount: 1, demResolution: .standard30m
+    ))
 }
 
 @Test func offlineMapPlannerRejectsUnboundedDownloadPlans() {
@@ -1520,6 +1526,17 @@ private func proximityDrone(
     ) == "ATO:--' AGL:--' RNG:1250' HDG:5°")
 }
 
+@Test func operationalAircraftStreamHeaderMatchesMapEntriesAndOrder() {
+    #expect(OperationalAircraftDisplay.streamHeader(
+        designator: "1SAR7Mn4pr",
+        atoFeet: 125.2,
+        aglFeet: 90.4,
+        aglStale: false,
+        rangeFeet: 420,
+        headingDegrees: 273.2
+    ) == "1SAR7Mn4pr  ATO:125' AGL:90' RNG:420' HDG:273°")
+}
+
 @Test func operationalAltitudeUsesAtoAndTerrainDeltaLikeAndroid() throws {
     var coordinator = OperationalAltitudeCoordinator()
     coordinator.ingest(RidObservation(
@@ -2014,7 +2031,7 @@ private func proximityDrone(
     #expect(!DroneScoutRelayPing.matches(aircraft))
 }
 
-@Test func terrainSchedulingPreservesInterpolationWithinNetworkCacheCell() {
+@Test func terrainSchedulingAndNetworkCachePreserveFineResolution() {
     let first = OperationalAltitudeCoordinator.Coordinate(
         latitude: 39.153600,
         longitude: -121.132110
@@ -2025,7 +2042,23 @@ private func proximityDrone(
     )
 
     #expect(OperationalAltitudeCoordinator.terrainKey(first) != OperationalAltitudeCoordinator.terrainKey(nearby))
-    #expect(OperationalAltitudeCoordinator.terrainCacheKey(first) == OperationalAltitudeCoordinator.terrainCacheKey(nearby))
+    #expect(OperationalAltitudeCoordinator.terrainCacheKey(first) != OperationalAltitudeCoordinator.terrainCacheKey(nearby))
+}
+
+@Test func geoTiffUTMConversionMatchesKnownCoordinate() throws {
+    let utm = try #require(GeoTiffElevationSource.latLonToUTM(
+        latitude: 43.19113, longitude: -110.92524, epsg: 26912
+    ))
+    #expect(abs(utm.x - 506_075) < 5)
+    #expect(abs(utm.y - 4_782_042) < 5)
+}
+
+@Test func geoTiffRecognizesPlannerEncodedOneMeterBounds() throws {
+    let bounds = try #require(GeoTiffElevationSource.tileBounds(
+        fileName: "R2C_1M_4317269_4326281_-11100000_-11087679_USGS_1M_example.tif"
+    ))
+    #expect(abs(bounds.south - 43.17269) < 0.000001)
+    #expect(abs(bounds.east + 110.87679) < 0.000001)
 }
 
 @Test func droneScoutBridgeLossGateAnnouncesOnceAndResetsAfterPing() {

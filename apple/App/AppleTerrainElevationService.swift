@@ -16,7 +16,9 @@ actor AppleTerrainElevationService {
         self.session = session
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        cacheDirectory = root.appendingPathComponent("RID2Caltopo/Terrain", isDirectory: true)
+        // Version 2 preserves the dynamic service's best-available resolution instead of
+        // reusing legacy EPQS values quantized into approximately 30 m cells.
+        cacheDirectory = root.appendingPathComponent("RID2Caltopo/TerrainV2", isDirectory: true)
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         localDEM = GeoTiffElevationSource(directory: support.appendingPathComponent("RID2Caltopo/DEM", isDirectory: true))
@@ -29,10 +31,13 @@ actor AppleTerrainElevationService {
         let coordinate = OperationalAltitudeCoordinator.Coordinate(latitude: latitude, longitude: longitude)
         let key = OperationalAltitudeCoordinator.terrainCacheKey(coordinate)
         let localDEM = self.localDEM
-        if let elevation = await Task.detached(priority: .utility, operation: {
-            localDEM.sampleElevationMeters(latitude: latitude, longitude: longitude)
+        if let localSample = await Task.detached(priority: .utility, operation: {
+            localDEM.sample(latitude: latitude, longitude: longitude)
         }).value {
-            return OperationalTerrainSample(elevationMeters: elevation)
+            return OperationalTerrainSample(
+                elevationMeters: localSample.elevationMeters,
+                source: "usgs-geotiff-local-\(Int(localSample.horizontalResolutionMeters.rounded()))m"
+            )
         }
         let cached = load(key: key)
         if let cached, Date().timeIntervalSince(cached.fetchedAt) <= maximumFreshAge {

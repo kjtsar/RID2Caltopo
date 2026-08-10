@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.video
 
+import DroneDisplayState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -23,6 +24,21 @@ class MapPanePilotDisplayTest {
                 aglStale = false,
                 rangeFeet = 420.0,
                 headingDeg = 273.2
+            )
+        )
+    }
+
+    @Test
+    fun streamTelemetryHeader_matchesMapEntriesAndOrder() {
+        assertEquals(
+            "ATO:125' AGL:90' RNG:420' HDG:273°",
+            streamTelemetryHeaderText(
+                DroneDisplayState(
+                    headingDeg = 273.2,
+                    aglFt = 90.4,
+                    atoFt = 125.2,
+                    rangeFt = 420.0,
+                )
             )
         )
     }

@@ -72,6 +72,23 @@ public struct MapAircraftLabelLayout: Sendable, Equatable {
 }
 
 public enum OperationalAircraftDisplay {
+    public static func streamHeader(
+        designator: String,
+        atoFeet: Double?,
+        aglFeet: Double?,
+        aglStale: Bool,
+        rangeFeet: Double?,
+        headingDegrees: Double?
+    ) -> String {
+        "\(designator)  " + statusLabel(
+            atoFeet: atoFeet,
+            aglFeet: aglFeet,
+            aglStale: aglStale,
+            rangeFeet: rangeFeet,
+            headingDegrees: headingDegrees
+        )
+    }
+
     public static func statusLabel(
         atoFeet: Double?,
         aglFeet: Double?,

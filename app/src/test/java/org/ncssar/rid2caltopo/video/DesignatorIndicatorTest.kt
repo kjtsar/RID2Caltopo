@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import DroneSpecState
+import DroneDisplayState
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DesignatorState
 
@@ -77,12 +78,27 @@ class DesignatorIndicatorTest {
             )
         )
         assertEquals(
-            "HDG --  AGL --  ATO --",
+            "ATO:--' AGL:--' RNG:--' HDG:--\u00b0",
             telemetryChipTextFor(
                 designatorState = DesignatorState.Green(
                     DroneSpecState(CtDroneSpec("testRemoteId"))
                 ),
                 display = null
+            )
+        )
+    }
+
+    @Test
+    fun compactLiveTelemetry_matchesMapEntriesAndOrder() {
+        assertEquals(
+            "ATO:7' AGL:0' RNG:26' HDG:--\u00b0",
+            formatCompactTelemetry(
+                DroneDisplayState(
+                    headingDeg = null,
+                    aglFt = 0.0,
+                    atoFt = 7.0,
+                    rangeFt = 26.0,
+                )
             )
         )
     }

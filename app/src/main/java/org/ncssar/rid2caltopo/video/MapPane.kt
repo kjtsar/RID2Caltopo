@@ -574,6 +574,7 @@ internal fun SplitMapPane(
     var offlinePrepInFlight by remember { mutableStateOf(false) }
     var offlinePrepPreset by remember { mutableStateOf(OFFLINE_PREP_PRESETS[1]) }
     var offlinePrepIncludeDem by remember { mutableStateOf(true) }
+    var offlinePrepDemResolution by remember { mutableStateOf(DemResolutionOption.STANDARD_30M) }
     var offlinePrepIncludeContours by remember { mutableStateOf(false) }
     var offlinePrepMaxThroughput by remember { mutableStateOf(false) }
     var offlinePrepAreaMode by remember { mutableStateOf(OfflinePrepAreaMode.Viewport) }
@@ -977,6 +978,7 @@ internal fun SplitMapPane(
         offlinePrepBoundaryId,
         offlinePrepPreset,
         offlinePrepIncludeDem,
+        offlinePrepDemResolution,
         offlinePrepIncludeContours,
         mapBounds,
         offlineBoundaryOptions
@@ -1004,11 +1006,13 @@ internal fun SplitMapPane(
                 clipBoundary = selectedBoundary
             )
             val tileEstimate = offlinePrepTileOperationCount(baseTileEstimate, offlinePrepIncludeContours)
-            // DEM download fetches whole USGS 1° GeoTIFF tiles, not EPQS point samples.
-            val demEstimate = if (offlinePrepIncludeDem) demTileNamesForBounds(estimateBounds).size else 0
+            val demEstimate = if (offlinePrepIncludeDem) {
+                estimateDemDownloadCount(estimateBounds, offlinePrepDemResolution)
+            } else 0
             val tileCacheMb = (tileEstimate.toLong() * 20_000L) / (1024.0 * 1024.0)
-            // Each USGS 1° GeoTIFF tile is ~25–54 MB; use 54 MB as a conservative upper bound.
-            val demCacheMb = demEstimate * 54.0
+            val demCacheMb = if (offlinePrepIncludeDem) {
+                conservativeDemBytes(estimateBounds, offlinePrepDemResolution) / (1024.0 * 1024.0)
+            } else 0.0
             OfflinePrepEstimate(
                 tileEstimate = tileEstimate,
                 demEstimate = demEstimate,
@@ -1032,6 +1036,7 @@ internal fun SplitMapPane(
         offlinePrepBoundaryId,
         offlinePrepPreset,
         offlinePrepIncludeDem,
+        offlinePrepDemResolution,
         offlinePrepIncludeContours,
         baseLayer,
         mapBounds,
@@ -1041,6 +1046,10 @@ internal fun SplitMapPane(
     ) {
         if (!showOfflinePrepDialog) {
             offlinePrepCacheStatus = OfflinePrepCacheStatus()
+            return@LaunchedEffect
+        }
+        if (offlinePrepInFlight) {
+            offlinePrepCacheStatus = OfflinePrepCacheStatus(checked = false)
             return@LaunchedEffect
         }
         val selectedBoundary =
@@ -1075,9 +1084,11 @@ internal fun SplitMapPane(
             if (includeDem) {
                 val archiveRoot = CaltopoClient.GetArchiveDir()
                 val demDir = archiveRoot?.findFile("cache")?.findFile("dem")
-                for (tileName in demTileNamesForBounds(prepBounds)) {
-                    val fileName = "USGS_1_$tileName.tif"
-                    val demFile = demDir?.findFile(fileName)
+                val downloads = runCatching {
+                    resolveDemDownloads(prepBounds, offlinePrepDemResolution, demAutoFetchClient)
+                }.getOrDefault(emptyList())
+                for (download in downloads) {
+                    val demFile = demDir?.findFile(download.fileName)
                     if (demFile?.isFile != true) {
                         demMissing++
                     }
@@ -1123,6 +1134,7 @@ internal fun SplitMapPane(
             "base=${baseLayer.name}",
             "preset=${offlinePrepPreset.label}",
             "dem=$offlinePrepIncludeDem",
+            "demResolution=${offlinePrepDemResolution.meters}m",
             "contours=$offlinePrepIncludeContours",
             areaKey,
             "n=${"%.5f".format(Locale.US, bounds.latNorth)}",
@@ -1139,6 +1151,7 @@ internal fun SplitMapPane(
         offlinePrepBoundaryId,
         offlinePrepPreset,
         offlinePrepIncludeDem,
+        offlinePrepDemResolution,
         offlinePrepIncludeContours,
         baseLayer,
         mapBounds,
@@ -1221,15 +1234,14 @@ internal fun SplitMapPane(
         offlinePrepProgress = OfflinePrepProgress(phase = "Preparing", total = 0, completed = 0)
         val preset = offlinePrepPreset
         val includeDem = offlinePrepIncludeDem
+        val demResolution = offlinePrepDemResolution
         val includeContours = offlinePrepIncludeContours
         val tileSources = offlinePrepTileSources(baseLayer, includeContours)
         val isOsmDownload = baseLayer == BaseLayerOption.OpenStreetMap
         val maximizeThroughput = offlinePrepMaxThroughput && !isOsmDownload
-        // Compute 1° GeoTIFF tile names for the area now (on the main thread, before the IO job).
-        val demTileNames = if (includeDem) demTileNamesForBounds(bounds) else emptyList<String>()
         val estimatedTileOps = offlinePrepEstimate.tileEstimate
-        val estimatedDemOps = demTileNames.size
-        val estimatedTotalOps = (estimatedTileOps + estimatedDemOps).coerceAtLeast(1)
+        var estimatedDemOps = if (includeDem) estimateDemDownloadCount(bounds, demResolution) else 0
+        var estimatedTotalOps = (estimatedTileOps + estimatedDemOps).coerceAtLeast(1)
         val selectionKey = currentOfflinePrepSelectionKey()
         val tabletLocation = CaltopoMap.GetMyLocation()?.takeIf {
             it.latitude.isFinite() && it.longitude.isFinite()
@@ -1246,6 +1258,21 @@ internal fun SplitMapPane(
                 }
                 return@launch
             }
+            val demDownloads = if (includeDem) {
+                try {
+                    resolveDemDownloads(bounds, demResolution, demAutoFetchClient)
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main.immediate) {
+                        offlinePrepInFlight = false
+                        offlinePrepJob = null
+                        offlinePrepProgress = offlinePrepProgress.copy(phase = "Failed")
+                        CaltopoClient.ShowToast("DEM planning failed: ${e.message ?: e.javaClass.simpleName}")
+                    }
+                    return@launch
+                }
+            } else emptyList()
+            estimatedDemOps = demDownloads.size
+            estimatedTotalOps = (estimatedTileOps + estimatedDemOps).coerceAtLeast(1)
             // Resolve the GeoTIFF DEM storage directory once for this download job.
             // archiveDemDir is null when no archive directory is configured.
             val archiveDemDir: DocumentFile? = if (includeDem) {
@@ -1253,7 +1280,7 @@ internal fun SplitMapPane(
                 val cacheDir = archiveRoot?.findFile("cache")
                 cacheDir?.findFile("dem") ?: cacheDir?.createDirectory("dem")
             } else null
-            // Dedicated HTTP client for large file downloads (USGS GeoTIFF tiles are 25–54 MB each).
+            // Dedicated HTTP client for large USGS GeoTIFF downloads.
             val geoTiffHttpClient = OkHttpClient.Builder()
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.MINUTES)
@@ -1418,10 +1445,10 @@ internal fun SplitMapPane(
                         completed.incrementAndGet()
                     }
 
-                    // Downloads a single USGS 1° GeoTIFF tile to archiveDir/cache/dem/.
-                    // Skips tiles that are already present on disk (> 5 MB = clearly not truncated).
-                    // Streams the response body directly to disk to avoid loading 25–54 MB into RAM.
-                    suspend fun processGeoTiffTile(tileName: String) {
+                    // Downloads one planner-selected USGS GeoTIFF to archiveDir/cache/dem/.
+                    // The descriptor covers geographic 30/10 m tiles and catalog-resolved 1 m tiles.
+                    // Stream directly to disk because the finer products can be hundreds of MB.
+                    suspend fun processGeoTiffTile(download: DemDownload) {
                         ensureActive()
                         val demDir = archiveDemDir
                         if (demDir == null) {
@@ -1431,19 +1458,19 @@ internal fun SplitMapPane(
                             completed.incrementAndGet()
                             return
                         }
-                        val fileName = "USGS_1_$tileName.tif"
+                        val fileName = download.fileName
                         val existing = demDir.findFile(fileName)
-                        if (existing != null && existing.isFile && existing.length() > 5_000_000L) {
+                        val minimumCompleteBytes = download.expectedBytes?.let { maxOf(100_000L, it * 95L / 100L) } ?: 5_000_000L
+                        if (existing != null && existing.isFile && existing.length() >= minimumCompleteBytes) {
                             demHits.incrementAndGet()
                             demCompleted.incrementAndGet()
                             completed.incrementAndGet()
-                            MapCacheDebug.log("geotiff dem hit tile=$tileName bytes=${existing.length()}")
+                            MapCacheDebug.log("geotiff dem hit file=$fileName bytes=${existing.length()}")
                             return
                         }
-                        val url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/current/$tileName/USGS_1_$tileName.tif"
                         var failureDetail = "unknown"
                         val ok = try {
-                            val req = Request.Builder().url(url).build()
+                            val req = Request.Builder().url(download.url).build()
                             val call = geoTiffHttpClient.newCall(req)
                             offlinePrepActiveCalls += call
                             try {
@@ -1458,7 +1485,7 @@ internal fun SplitMapPane(
                                     context.contentResolver.openOutputStream(destFile.uri, "wt")?.use { out ->
                                         body.byteStream().copyTo(out)
                                     } ?: run { failureDetail = "stream-open-failed"; return@use false }
-                                    MapCacheDebug.log("geotiff dem fetched tile=$tileName uri=${destFile.uri}")
+                                    MapCacheDebug.log("geotiff dem fetched file=$fileName uri=${destFile.uri}")
                                     true
                                 }
                             } finally {
@@ -1477,7 +1504,7 @@ internal fun SplitMapPane(
                             totalFailed.incrementAndGet()
                             val n = demFailureLogCount.incrementAndGet()
                             if (n <= 12 || (n % 50) == 0) {
-                                val msg = "GeoTIFF download failure#$n tile=$tileName reason=$failureDetail"
+                                val msg = "GeoTIFF download failure#$n file=$fileName reason=$failureDetail"
                                 CTError(MAP_PANE_TAG, "DownloadMap DEM $msg")
                                 MapCacheDebug.warn(MapCacheDebug.TAG_DEM, msg)
                             }
@@ -1520,9 +1547,9 @@ internal fun SplitMapPane(
                                 }
                             } else {
                                 phase = "Downloading DEM tiles"
-                                for (tileName in demTileNames) {
+                                for (download in demDownloads) {
                                     currentCoroutineContext().ensureActive()
-                                    processGeoTiffTile(tileName)
+                                    processGeoTiffTile(download)
                                 }
                                 if (demFetched.get() > 0) demElevationService.refreshGeoTiffCatalog()
                             }
@@ -1531,7 +1558,7 @@ internal fun SplitMapPane(
                         val maxWorkers = 16
                         val minWorkers = 2
                         val tileQueue = Channel<Pair<OnlineTileSourceBase, Long>>(capacity = maxWorkers * 4)
-                        val demQueue = Channel<String>(capacity = maxWorkers * 3)
+                        val demQueue = Channel<DemDownload>(capacity = maxWorkers * 3)
                         val tileWorkers = mutableListOf<Job>()
                         val demWorkers = mutableListOf<Job>()
 
@@ -1554,9 +1581,9 @@ internal fun SplitMapPane(
                         }
                         val demProducer = if (includeDem && archiveDemDir != null) {
                             launch {
-                                for (tileName in demTileNames) {
+                                for (download in demDownloads) {
                                     currentCoroutineContext().ensureActive()
-                                    demQueue.send(tileName)
+                                    demQueue.send(download)
                                 }
                                 demQueue.close()
                             }
@@ -1579,8 +1606,8 @@ internal fun SplitMapPane(
                         }
                         fun addDemWorker() {
                             demWorkers += launch {
-                                for (tileName in demQueue) {
-                                    processGeoTiffTile(tileName)
+                                for (download in demQueue) {
+                                    processGeoTiffTile(download)
                                 }
                             }
                         }
@@ -1594,7 +1621,7 @@ internal fun SplitMapPane(
                         }
 
                         var initialTileWorkers = if (includeDem) 6 else 10
-                        // GeoTIFF tiles are large (25–54 MB each); 2 concurrent downloads is plenty.
+                        // Fine-resolution GeoTIFFs can be hundreds of MB; two concurrent downloads is plenty.
                         var initialDemWorkers = if (includeDem && archiveDemDir != null) 2 else 0
                         if (initialTileWorkers + initialDemWorkers > maxWorkers) {
                             initialTileWorkers = maxWorkers - initialDemWorkers
@@ -4034,7 +4061,7 @@ internal fun SplitMapPane(
                             }
                         }
                         Text(
-                            "DEM spacing above reflects runtime query granularity. Downloading fetches whole USGS 1° GeoTIFF tiles.",
+                            "DEM detail is planned separately from map zoom. The default remains 30 m.",
                             fontSize = 11.sp
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -4043,7 +4070,31 @@ internal fun SplitMapPane(
                                 onCheckedChange = { if (!offlinePrepInFlight) offlinePrepIncludeDem = it },
                                 enabled = !offlinePrepInFlight
                             )
-                            Text("Include DEM tiles (USGS 1° GeoTIFF, ~25–54 MB/tile)")
+                            Text("Include DEM tiles")
+                        }
+                        if (offlinePrepIncludeDem) {
+                            DemResolutionOption.values().forEach { resolution ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable(enabled = !offlinePrepInFlight) {
+                                            offlinePrepDemResolution = resolution
+                                        },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = offlinePrepDemResolution == resolution,
+                                        onCheckedChange = {
+                                            if (!offlinePrepInFlight && it == true) offlinePrepDemResolution = resolution
+                                        },
+                                        enabled = !offlinePrepInFlight
+                                    )
+                                    Column {
+                                        Text(resolution.label, fontSize = 12.sp)
+                                        Text(resolution.explanation, fontSize = 10.sp)
+                                    }
+                                }
+                            }
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(

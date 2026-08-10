@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.video
 
+import DroneDisplayState
 import StreamsViewModel
 import android.content.Context
 import android.graphics.Bitmap
@@ -103,6 +104,15 @@ internal fun shouldShowStreamClueCaptureButton(
     isLocalPlayback: Boolean,
     streamState: StreamState,
 ): Boolean = showTileControls && !isLocalPlayback && streamState == StreamState.LIVE
+
+internal fun streamTelemetryHeaderText(displayState: DroneDisplayState?): String =
+    droneStatusLabelText(
+        atoFeet = displayState?.atoFt,
+        aglFeet = displayState?.aglFt,
+        aglStale = displayState?.aglStale == true,
+        rangeFeet = displayState?.rangeFt,
+        headingDeg = displayState?.headingDeg,
+    )
 
 
 @Composable
@@ -480,15 +490,9 @@ fun StreamTile(
             )
         }
 
-        // ATO / AGL / HDG overlay — shown whenever the stream is live and we have a linked drone.
+        // Match the map's canonical ATO / AGL / RNG / HDG telemetry order.
         if (streamState == StreamState.LIVE && !isLocalPlayback && showStandaloneTelemetryOverlay) {
             val displayState = viewModel.droneDisplayStateForStream(streamDesignator)
-            val atoStr = displayState?.atoFt
-                ?.let { "${"%.0f".format(it)}ATO" } ?: "--ATO"
-            val aglStr = displayState?.aglFt
-                ?.let { "${"%.0f".format(it)}${if (displayState.aglStale) "?" else ""}AGL" } ?: "--AGL"
-            val hdgStr = displayState?.headingDeg
-                ?.let { "${"%.0f".format(it)}°" } ?: "--°"
             Row(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -497,14 +501,12 @@ fun StreamTile(
                     .padding(horizontal = 6.dp, vertical = 3.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                for (label in listOf(atoStr, aglStr, hdgStr)) {
-                    Text(
-                        text = label,
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                }
+                Text(
+                    text = streamTelemetryHeaderText(displayState),
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
                 if (zoomScale > 1.01f) {
                     Text(
                         text = "${zoomScale.formatZoom()}x",

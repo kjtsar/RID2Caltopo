@@ -89,6 +89,29 @@ public struct OperationalOfflinePreset: Sendable, Hashable, Identifiable {
     public static let all = [overview, operations, fullDetail]
 }
 
+public enum OperationalDEMResolution: Int, Sendable, Hashable, Identifiable, CaseIterable {
+    case standard30m = 30
+    case enhanced10m = 10
+    case maximum1m = 1
+
+    public var id: Int { rawValue }
+    public var label: String {
+        switch self {
+        case .standard30m: "Standard (30 m)"
+        case .enhanced10m: "Enhanced (10 m)"
+        case .maximum1m: "Maximum available (1 m)"
+        }
+    }
+
+    public var explanation: String {
+        switch self {
+        case .standard30m: "Default; broad coverage and smallest download."
+        case .enhanced10m: "About 9x as many terrain samples as 30 m."
+        case .maximum1m: "Downloads available USGS lidar-derived project tiles; may be very large."
+        }
+    }
+}
+
 public enum OperationalOfflineMapPlanner {
     public static func tileCount(
         bounds: OperationalMapBounds,
@@ -148,9 +171,48 @@ public enum OperationalOfflineMapPlanner {
         return names
     }
 
-    public static func estimatedBytes(tileCount: Int, includeContours: Bool, demTileCount: Int) -> Int64 {
+    public static func estimatedDEMTileCount(
+        bounds: OperationalMapBounds,
+        resolution: OperationalDEMResolution
+    ) -> Int {
+        guard resolution == .maximum1m else { return demTileNames(bounds: bounds).count }
+        let centerLatitude = (bounds.north + bounds.south) / 2 * .pi / 180
+        let widthMeters = abs(bounds.east - bounds.west) * 111_320 * max(0.1, cos(centerLatitude))
+        let heightMeters = abs(bounds.north - bounds.south) * 111_320
+        // Project-based USGS 1 m products are commonly distributed as 10 km square tiles.
+        let oneMeterTiles = max(1, Int(ceil(widthMeters / 10_000)) * Int(ceil(heightMeters / 10_000)))
+        return demTileNames(bounds: bounds).count + oneMeterTiles
+    }
+
+    public static func estimatedBytes(
+        tileCount: Int,
+        includeContours: Bool,
+        demTileCount: Int,
+        demResolution: OperationalDEMResolution = .standard30m
+    ) -> Int64 {
         let mapOperations = Int64(tileCount) * Int64(includeContours ? 2 : 1)
-        return mapOperations * 32_000 + Int64(demTileCount) * 54_000_000
+        let demBytesPerPlanningTile: Int64 = switch demResolution {
+        case .standard30m: 54_000_000
+        case .enhanced10m: 486_000_000
+        // Maximum detail includes 10 m fallback coverage under project-based 1 m tiles.
+        case .maximum1m: 486_000_000
+        }
+        return mapOperations * 32_000 + Int64(demTileCount) * demBytesPerPlanningTile
+    }
+
+    public static func estimatedDEMBytes(
+        bounds: OperationalMapBounds,
+        resolution: OperationalDEMResolution
+    ) -> Int64 {
+        let geographicTiles = Int64(demTileNames(bounds: bounds).count)
+        switch resolution {
+        case .standard30m: return geographicTiles * 54_000_000
+        case .enhanced10m: return geographicTiles * 486_000_000
+        case .maximum1m:
+            let total = Int64(estimatedDEMTileCount(bounds: bounds, resolution: resolution))
+            let oneMeterTiles = max(1, total - geographicTiles)
+            return geographicTiles * 486_000_000 + oneMeterTiles * 400_000_000
+        }
     }
 
     private static func tileRange(bounds: OperationalMapBounds, zoom: Int) -> (x: ClosedRange<Int>, y: ClosedRange<Int>) {

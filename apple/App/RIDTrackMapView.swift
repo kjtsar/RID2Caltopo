@@ -1132,10 +1132,17 @@ struct RIDTrackMapView: View {
         let identity = identityStore.identity(for: aircraftID)
         let label = identity?.mappedID.isEmpty == false ? identity!.mappedID : aircraftID
         let altitude = model.altitudeDisplayByAircraftID[aircraftID]
-        let ato = altitude?.atoFeet.map { String(format: "%.0f", $0) } ?? "--"
-        let agl = altitude?.aglFeet.map { String(format: "%.0f", $0) } ?? "--"
-        let range = altitude?.rangeFeet.map { String(format: "%.0f", $0) } ?? "--"
-        return "\(label)  ATO \(ato)  AGL \(agl)  RNG \(range) ft"
+        let heading = model.tracks
+            .first(where: { $0.aircraftID == aircraftID })?
+            .lastObservation.headingDegrees
+        return OperationalAircraftDisplay.streamHeader(
+            designator: label,
+            atoFeet: altitude?.atoFeet,
+            aglFeet: altitude?.aglFeet,
+            aglStale: altitude?.aglStale == true,
+            rangeFeet: altitude?.rangeFeet,
+            headingDegrees: heading
+        )
     }
 
     private var coordinateDisplayFormat: OperationalCoordinateDisplayFormat {

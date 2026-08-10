@@ -27,3 +27,6 @@ tools/sync_release_notes.sh <version>
 
 The platform release gates reject missing canonical notes, missing sections,
 version mismatches, and stale App Store metadata.
+
+See the [mobile release runbook](../RELEASE.md) for the complete Android and
+Apple build, qualification, tagging, store-staging, and recovery procedure.

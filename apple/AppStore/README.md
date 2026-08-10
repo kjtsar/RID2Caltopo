@@ -34,7 +34,9 @@ It also checks that the privacy manifest matches the conservative linked-data
 worksheet in `APP_STORE_CONNECT_CHECKLIST.md`. It does not contact or modify
 App Store Connect.
 
-The subtitle, Navigation/Utilities categories, Apple's calculated 4+ age
+The following is a historical onboarding snapshot, not current release
+evidence. Reconfirm every field and agreement in App Store Connect before each
+upload. The subtitle, Navigation/Utilities categories, Apple's calculated 4+ age
 rating, and all six iPhone/iPad screenshots were saved in App Store Connect on
 July 19, 2026. Content Rights is saved as No. The DSA non-trader declaration is
 Active, and the reviewer phone, contact information, no-sign-in selection,

@@ -175,7 +175,8 @@ compatibility listener and Android forwarding path have been removed.
 - Wi-Fi Beacon/NAN field qualification now uses the DS110 wireless relay into
   Apple's Bluetooth intake. The UDP compatibility listener and Android sender
   are deliberately absent.
-- Tracker peer coordination now matches Android's `/ws/r2c` protocol and
+- Tracker peer coordination now matches Android's organization-scoped
+  `/<organization-designator>/ws/r2c` protocol and
   `X-SAR-Token` authentication. The Apple adapter maintains hello/heartbeat
   health, reconnects with bounded backoff, replays active sightings and pending
   confirmations, rejects stale leases, and exposes live peer/link state.

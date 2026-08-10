@@ -345,8 +345,7 @@ public class CaltopoMap {
         }
         String trackerUrl = CaltopoClient.GetTrackerCoordinationUrlPfx().trim();
         if (!trackerUrl.isEmpty()) {
-            String trackerStatusUrl = trackerUrl.endsWith("/") ? trackerUrl + "r2c" : trackerUrl + "/r2c";
-            return "Zone arbitration via r2c-tracker: " + trackerStatusUrl;
+            return "Zone arbitration via r2c-tracker organization: " + trackerUrl;
         }
         String broker = R2CMqttManager.GetBrokerUri().trim();
         if (!broker.isEmpty()) {

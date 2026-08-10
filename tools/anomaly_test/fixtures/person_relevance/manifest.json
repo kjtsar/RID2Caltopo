@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "suite_name": "Person Relevance deterministic smoke fixture",
+  "cases": [
+    {
+      "id": "deterministic-smoke",
+      "duration_s": 10.0,
+      "review": "review.json",
+      "off": {
+        "detections_csv": "off-detections.csv",
+        "summary_json": "off-summary.json"
+      },
+      "shadow": {
+        "detections_csv": "shadow-detections.csv",
+        "summary_json": "shadow-summary.json"
+      },
+      "person_evidence": "person-evidence.json"
+    }
+  ]
+}

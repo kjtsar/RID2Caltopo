@@ -7,8 +7,13 @@ project="$script_dir/RID2CaltopoApple.xcodeproj"
 scheme="RID2CaltopoApple"
 team="${R2C_DEVELOPMENT_TEAM:-}"
 bundle_id="${R2C_APP_BUNDLE_ID:-org.ncssar.RID2CaltopoApple}"
-build_number="${R2C_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
-marketing_version="${R2C_MARKETING_VERSION:-1.2}"
+version_major="$(sed -nE 's/^[[:space:]]*def versionMajor = ([0-9]+)$/\1/p' "$repo_root/app/build.gradle" | head -1)"
+version_minor="$(sed -nE 's/^[[:space:]]*def versionMinor = ([0-9]+)$/\1/p' "$repo_root/app/build.gradle" | head -1)"
+version_patch="$(sed -nE 's/^[[:space:]]*def versionPatch = ([0-9]+)$/\1/p' "$repo_root/app/build.gradle" | head -1)"
+android_build_number="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)$/\1/p' "$repo_root/app/build.gradle" | head -1)"
+android_marketing_version="${version_major}.${version_minor}.${version_patch}"
+build_number="${R2C_BUILD_NUMBER:-$android_build_number}"
+marketing_version="${R2C_MARKETING_VERSION:-$android_marketing_version}"
 archive_path=""
 export_path=""
 upload=false
@@ -26,8 +31,8 @@ usage: apple/archive-for-testflight.sh --team TEAM_ID [options]
 Options:
   --team TEAM_ID           Apple Developer team (or R2C_DEVELOPMENT_TEAM)
   --bundle-id BUNDLE_ID    App Store Connect bundle ID
-  --build-number NUMBER    Unique CFBundleVersion (default: UTC timestamp)
-  --marketing-version VER App Store CFBundleShortVersionString (default: 1.0)
+  --build-number NUMBER    CFBundleVersion (default: Android versionCode)
+  --marketing-version VER CFBundleShortVersionString (default: Android versionName)
   --archive-path PATH      Verified unsigned xcarchive destination
   --export-path PATH       Locally exported IPA directory
   --internal-only          Restrict an uploaded build to internal TestFlight
@@ -44,6 +49,11 @@ The script first creates and verifies an unsigned archive, then asks Xcode to
 export a locally signed App Store IPA. It never stores Apple credentials and
 uploads only when --upload is explicitly supplied.
 USAGE
+}
+
+[[ -n "$version_major" && -n "$version_minor" && -n "$version_patch" && -n "$android_build_number" ]] || {
+    echo "Unable to read the Android version authority from $repo_root/app/build.gradle" >&2
+    exit 2
 }
 
 while [[ $# -gt 0 ]]; do

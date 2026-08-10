@@ -1,0 +1,8 @@
+{
+  "realtime_factor": 2.0,
+  "qualification_timing": {
+    "avg_ms": 10.0,
+    "p95_ms": 15.0,
+    "max_ms": 20.0
+  }
+}

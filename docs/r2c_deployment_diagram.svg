@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1000" height="600" viewBox="0 0 1000 600" xmlns="http://www.w3.org/2000/svg"
+  font-family="'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="gSky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a4e6e"/>
+      <stop offset="100%" stop-color="#72b8d4"/>
+    </linearGradient>
+    <linearGradient id="gGround" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5a8f38"/>
+      <stop offset="35%" stop-color="#496e2e"/>
+      <stop offset="100%" stop-color="#7a5f25"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Sky -->
+  <rect width="1000" height="600" fill="url(#gSky)"/>
+
+  <!-- RF Coverage Zones (centered on R2C instances) -->
+
+  <!-- Zone 1 (R2C-1, left slope) — blue -->
+  <ellipse cx="220" cy="300" rx="340" ry="290"
+    fill="#3355cc" fill-opacity="0.11"
+    stroke="#3355cc" stroke-width="2.5" stroke-dasharray="10,6" stroke-opacity="0.70"/>
+
+  <!-- Zone 2 (R2C-2, right slope) — green -->
+  <ellipse cx="740" cy="300" rx="340" ry="290"
+    fill="#22aa44" fill-opacity="0.11"
+    stroke="#22aa44" stroke-width="2.5" stroke-dasharray="10,6" stroke-opacity="0.70"/>
+
+  <!-- Terrain: smooth central plateau with flat-topped R2C-2 hill, rounded valleys -->
+  <path d="
+    M -5,600 L -5,450
+    C 25,440 40,340 60,285
+    C 75,330 90,440 110,450
+    C 150,445 185,355 220,300
+    C 270,340 310,445 360,450
+    C 400,440 450,320 500,300
+    C 550,320 600,440 650,450
+    C 690,445 710,310 740,300
+    L 770,300
+    C 800,300 830,335 865,445
+    C 900,450 930,330 960,285
+    C 980,340 995,440 1005,450
+    L 1005,600 Z
+  " fill="url(#gGround)"/>
+
+  <!-- Terrain labels -->
+  <text x="290" y="480" text-anchor="middle" fill="#2a4a18" font-size="11" opacity="0.55">Valley 1-2</text>
+  <text x="500" y="285" text-anchor="middle" fill="#2a4a18" font-size="11" opacity="0.55">Central Plateau</text>
+  <text x="705" y="480" text-anchor="middle" fill="#2a4a18" font-size="11" opacity="0.55">Valley 2-3</text>
+
+  <!-- ── FAR LEFT: Cell Tower on Mountain ── -->
+
+  <!-- Cell tower on far-left mountain -->
+  <g transform="translate(60,285)">
+    <line x1="-5" y1="0" x2="-2" y2="-54" stroke="#888" stroke-width="2.5"/>
+    <line x1="5"  y1="0" x2="2"  y2="-54" stroke="#888" stroke-width="2.5"/>
+    <line x1="-4.5" y1="-12" x2="4.5" y2="-12" stroke="#888" stroke-width="1.5"/>
+    <line x1="-4"   y1="-25" x2="4"   y2="-25" stroke="#888" stroke-width="1.5"/>
+    <line x1="-3.5" y1="-38" x2="3.5" y2="-38" stroke="#888" stroke-width="1.5"/>
+    <line x1="-3"   y1="-51" x2="3"   y2="-51" stroke="#888" stroke-width="1.5"/>
+    <!-- Antenna cross-arms -->
+    <line x1="0" y1="-54" x2="-12" y2="-60" stroke="#888" stroke-width="2"/>
+    <line x1="0" y1="-54" x2="12"  y2="-60" stroke="#888" stroke-width="2"/>
+    <!-- Signal arcs -->
+    <path d="M 18,-46 A 22,22 0 0,1 18,-66" fill="none" stroke="#ff8800" stroke-width="2.5" opacity="0.85"/>
+    <path d="M 28,-42 A 32,32 0 0,1 28,-72" fill="none" stroke="#ff8800" stroke-width="1.8" opacity="0.60"/>
+  </g>
+  <text x="60" y="265" text-anchor="middle" fill="#dd8844" font-size="11" font-weight="bold">Cell Tower</text>
+
+  <!-- Dotted line from cell tower to R2C-1 -->
+  <line x1="60" y1="285" x2="220" y2="300"
+    stroke="#ff8800" stroke-width="2" stroke-dasharray="8,5" opacity="0.80"/>
+
+  <!-- ── LEFT SLOPE: R2C-1 ── -->
+
+  <!-- R2C-1 device -->
+  <rect x="202" y="300" width="36" height="22" rx="4" fill="#1a2f7a" stroke="#6688dd" stroke-width="1.5"/>
+  <text x="220" y="316" text-anchor="middle" fill="white" font-size="9" font-weight="bold">R2C-1</text>
+
+  <!-- R2C-1 caption -->
+  <text x="220" y="340" text-anchor="middle" fill="#ddeeff" font-size="13" font-weight="bold">R2C-1</text>
+  <text x="220" y="356" text-anchor="middle" fill="#aac4dd" font-size="11">Cell Connected</text>
+
+  <!-- ── RIGHT SLOPE: R2C-2 (flat-topped hill) ── -->
+
+  <!-- R2C-2 device -->
+  <rect x="722" y="300" width="36" height="22" rx="4" fill="#1a5c30" stroke="#44bb66" stroke-width="1.5"/>
+  <text x="740" y="316" text-anchor="middle" fill="white" font-size="9" font-weight="bold">R2C-2</text>
+
+  <!-- Starlink tablet device on ground next to R2C-2 -->
+  <g transform="translate(805,318)">
+    <!-- Stand/mount -->
+    <line x1="-1" y1="0" x2="-3" y2="6" stroke="#666" stroke-width="1.2"/>
+    <line x1="1"  y1="0" x2="3"  y2="6" stroke="#666" stroke-width="1.2"/>
+    <line x1="-3" y1="6" x2="3" y2="6" stroke="#666" stroke-width="1"/>
+    <!-- Tablet device (tilted down-left) -->
+    <g transform="rotate(-25 0 -2)">
+      <rect x="-4.8" y="-3.2" width="9.6" height="6.4" rx="0.4" fill="#e8e8e8" stroke="#888" stroke-width="0.5"/>
+      <rect x="-4.4" y="-2.8" width="8.8" height="5.6" rx="0.2" fill="#f5f5f5" stroke="#999" stroke-width="0.3"/>
+    </g>
+  </g>
+
+  <!-- R2C-2 caption -->
+  <text x="740" y="340" text-anchor="middle" fill="#ceffd0" font-size="13" font-weight="bold">R2C-2</text>
+  <text x="740" y="356" text-anchor="middle" fill="#90dd99" font-size="11">Starlink Connected</text>
+
+  <!-- ── CENTRAL PLATEAU: Incident Command ── -->
+
+  <!-- IC device -->
+  <rect x="468" y="300" width="36" height="22" rx="4" fill="#880000" stroke="#ff5533" stroke-width="1.5"/>
+  <text x="486" y="316" text-anchor="middle" fill="white" font-size="9" font-weight="bold">IC</text>
+
+  <!-- IC flag (left side of building) -->
+  <g transform="translate(460,300)">
+    <line x1="12" y1="0" x2="12" y2="-28" stroke="#666" stroke-width="1.5"/>
+    <polygon points="12,-28 26,-23 12,-18" fill="#cc2200" stroke="#882200" stroke-width="0.8"/>
+  </g>
+
+  <!-- Starlink tablet device on IC roof (right side) -->
+  <g transform="translate(515,295)">
+    <!-- Stand/mount (short post on roof) -->
+    <line x1="0" y1="0" x2="0" y2="-4" stroke="#666" stroke-width="1"/>
+    <!-- Tablet device (tilted up-right toward satellite) -->
+    <g transform="rotate(35 0 -2)">
+      <rect x="-4.4" y="-2.8" width="8.8" height="5.6" rx="0.4" fill="#e8e8e8" stroke="#888" stroke-width="0.5"/>
+      <rect x="-4" y="-2.4" width="8" height="4.8" rx="0.2" fill="#f5f5f5" stroke="#999" stroke-width="0.3"/>
+    </g>
+  </g>
+
+  <!-- IC caption -->
+  <text x="486" y="340" text-anchor="middle" fill="#ffcccc" font-size="13" font-weight="bold">IC</text>
+  <text x="486" y="356" text-anchor="middle" fill="#dd9999" font-size="11">Starlink / Caltopo</text>
+
+  <!-- ── SKY: Starlink Satellite ── -->
+  <g transform="translate(640,60)">
+    <!-- Satellite body -->
+    <rect x="-2" y="-1.5" width="4" height="3" rx="0.5" fill="#999" stroke="#bbb" stroke-width="0.3"/>
+    <!-- Solar panels -->
+    <rect x="-6.5" y="-0.8" width="4" height="1.5" rx="0.3" fill="#1a3d99" stroke="#3366cc" stroke-width="0.2"/>
+    <rect x="2.5"  y="-0.8" width="4" height="1.5" rx="0.3" fill="#1a3d99" stroke="#3366cc" stroke-width="0.2"/>
+    <!-- Dish/antenna -->
+    <path d="M -1,1.5 Q 0,2.5 1,1.5" fill="none" stroke="#bbb" stroke-width="0.3"/>
+    <line x1="0" y1="1.5" x2="0" y2="2.5" stroke="#bbb" stroke-width="0.2"/>
+  </g>
+  <text x="640" y="48" text-anchor="middle" fill="#a0d0e8" font-size="10" font-weight="bold">Starlink Sat</text>
+
+  <!-- ── SKY: Caltopo Cloud (center top) ── -->
+  <g transform="translate(500,70)">
+    <path d="M -50,-8 C -50,-25 -38,-35 -22,-33 C -19,-47 -7,-56 8,-52
+             C 10,-65 25,-70 36,-62 C 53,-66 63,-52 57,-39
+             C 72,-35 72,-16 57,-11 C 55,5 39,10 28,4
+             C 21,14 6,15 -5,8 C -18,17 -38,12 -40,-2 Z"
+      fill="white" fill-opacity="0.82" stroke="#99aabb" stroke-width="1.5"/>
+    <text x="0" y="-5" text-anchor="middle" fill="#334455" font-size="11" font-weight="bold">Caltopo</text>
+    <text x="0" y="9" text-anchor="middle" fill="#334455" font-size="10">/ Internet</text>
+  </g>
+
+  <!-- Cell uplink (cell tower to cloud) -->
+  <path d="M 72,245 C 150,150 350,90 450,72"
+    fill="none" stroke="#ff8800" stroke-width="2" stroke-dasharray="8,5" opacity="0.80"/>
+
+  <!-- Starlink uplink (R2C-2 to satellite) -->
+  <line x1="805" y1="315" x2="640" y2="75"
+    stroke="#22aa44" stroke-width="2" stroke-dasharray="8,5" opacity="0.80"/>
+
+  <!-- Starlink uplink (IC to satellite) -->
+  <line x1="515" y1="295" x2="640" y2="75"
+    stroke="#22aa44" stroke-width="2" stroke-dasharray="8,5" opacity="0.80"/>
+
+  <!-- Satellite to Cloud -->
+  <line x1="640" y1="60" x2="550" y2="70"
+    stroke="#22aa44" stroke-width="2" stroke-dasharray="8,5" opacity="0.80"/>
+
+  <!-- ── Drone examples ── -->
+
+  <!-- Drone 1 in valley between R2C-1 and IC -->
+  <g transform="translate(360,420)" opacity="0.80">
+    <circle cx="0" cy="0" r="4" fill="#555" stroke="#bbb" stroke-width="1"/>
+    <line x1="-12" y1="-12" x2="-4" y2="-4" stroke="#ccc" stroke-width="1.5"/>
+    <line x1="12"  y1="-12" x2="4"  y2="-4" stroke="#ccc" stroke-width="1.5"/>
+    <line x1="-12" y1="12"  x2="-4" y2="4"  stroke="#ccc" stroke-width="1.5"/>
+    <line x1="12"  y1="12"  x2="4"  y2="4"  stroke="#ccc" stroke-width="1.5"/>
+    <circle cx="-12" cy="-12" r="5" fill="none" stroke="#ddd" stroke-width="1.5"/>
+    <circle cx="12"  cy="-12" r="5" fill="none" stroke="#ddd" stroke-width="1.5"/>
+    <circle cx="-12" cy="12"  r="5" fill="none" stroke="#ddd" stroke-width="1.5"/>
+    <circle cx="12"  cy="12"  r="5" fill="none" stroke="#ddd" stroke-width="1.5"/>
+    <text x="0" y="-24" text-anchor="middle" fill="#ccc" font-size="8">Drone 1</text>
+  </g>
+
+  <!-- Drone 3 in valley between IC and R2C-2 -->
+  <g transform="translate(650,420)" opacity="0.80">
+    <circle cx="0" cy="0" r="4" fill="#555" stroke="#bbb" stroke-width="1"/>
+    <line x1="-12" y1="-12" x2="-4" y2="-4" stroke="#ccc" stroke-width="1.5"/>
+    <line x1="12"  y1="-12" x2="4"  y2="-4" stroke="#ccc" stroke-width="1.5"/>
+    <line x1="-12" y1="12"  x2="-4" y2="4"  stroke="#ccc" stroke-width="1.5"/>
+    <line x1="12"  y1="12"  x2="4"  y2="4"  stroke="#ccc" stroke-width="1.5"/>
+    <circle cx="-12" cy="-12" r="5" fill="none" stroke="#ddd" stroke-width="1.5"/>
+    <circle cx="12"  cy="-12" r="5" fill="none" stroke="#ddd" stroke-width="1.5"/>
+    <circle cx="-12" cy="12"  r="5" fill="none" stroke="#ddd" stroke-width="1.5"/>
+    <circle cx="12"  cy="12"  r="5" fill="none" stroke="#ddd" stroke-width="1.5"/>
+    <text x="0" y="-24" text-anchor="middle" fill="#ccc" font-size="8">Drone 3</text>
+  </g>
+
+  <!-- Shared drone in overlap zone (center, upper) — YELLOW DRONE -->
+  <g transform="translate(500,220)" opacity="0.95">
+    <circle cx="0" cy="0" r="4" fill="#ff9900" stroke="#ffcc00" stroke-width="1.5"/>
+    <line x1="-12" y1="-12" x2="-4" y2="-4" stroke="#ffcc00" stroke-width="1.5"/>
+    <line x1="12"  y1="-12" x2="4"  y2="-4" stroke="#ffcc00" stroke-width="1.5"/>
+    <line x1="-12" y1="12"  x2="-4" y2="4"  stroke="#ffcc00" stroke-width="1.5"/>
+    <line x1="12"  y1="12"  x2="4"  y2="4"  stroke="#ffcc00" stroke-width="1.5"/>
+    <circle cx="-12" cy="-12" r="5" fill="none" stroke="#ffdd77" stroke-width="1.5"/>
+    <circle cx="12"  cy="-12" r="5" fill="none" stroke="#ffdd77" stroke-width="1.5"/>
+    <circle cx="-12" cy="12"  r="5" fill="none" stroke="#ffdd77" stroke-width="1.5"/>
+    <circle cx="12"  cy="12"  r="5" fill="none" stroke="#ffdd77" stroke-width="1.5"/>
+    <text x="0" y="-24" text-anchor="middle" fill="#ffdd77" font-size="8">Drone 2</text>
+  </g>
+
+  <!-- Detection line (Drone 3 to R2C-2) -->
+  <line x1="650" y1="420" x2="740" y2="310"
+    stroke="#22aa44" stroke-width="1" stroke-dasharray="4,4" opacity="0.35"/>
+
+  <!-- Zone labels in coverage areas -->
+  <text x="70"  y="220" fill="#6688dd" font-size="12" font-weight="bold" opacity="0.80">R2C-1</text>
+  <text x="55"  y="234" fill="#6688dd" font-size="11" opacity="0.80">Coverage Zone</text>
+
+  <text x="900" y="220" fill="#44aa55" font-size="12" font-weight="bold" opacity="0.80">R2C-2</text>
+  <text x="885" y="234" fill="#44aa55" font-size="11" opacity="0.80">Coverage Zone</text>
+
+  <!-- ── Legend ── -->
+  <g transform="translate(8,8)">
+    <rect x="0" y="0" width="220" height="158" rx="6"
+      fill="black" fill-opacity="0.50" stroke="#556677" stroke-width="1"/>
+    <text x="11" y="21" fill="white" font-size="13" font-weight="bold">Legend</text>
+
+    <line x1="12" y1="36" x2="44" y2="36" stroke="#3355cc" stroke-width="2.5" stroke-dasharray="8,4"/>
+    <text x="52" y="40" fill="#ccd" font-size="11">R2C-1 Coverage Zone</text>
+
+    <line x1="12" y1="56" x2="44" y2="56" stroke="#22aa44" stroke-width="2.5" stroke-dasharray="8,4"/>
+    <text x="52" y="60" fill="#cdc" font-size="11">R2C-2 Coverage Zone</text>
+
+    <line x1="12" y1="76" x2="44" y2="76" stroke="#ff8800" stroke-width="2" stroke-dasharray="6,4"/>
+    <text x="52" y="80" fill="#fda" font-size="11">Cell Tower → R2C-1</text>
+
+    <line x1="12" y1="96" x2="44" y2="96" stroke="#22aa44" stroke-width="2" stroke-dasharray="6,4"/>
+    <text x="52" y="100" fill="#afa" font-size="11">Starlink Links</text>
+
+    <line x1="12" y1="116" x2="44" y2="116" stroke="#cc4400" stroke-width="2" stroke-dasharray="6,4"/>
+    <text x="52" y="120" fill="#fca" font-size="11">IC / Cloud Link</text>
+
+    <line x1="12" y1="136" x2="44" y2="136" stroke="#aaa" stroke-width="1.5" stroke-dasharray="4,4"/>
+    <text x="52" y="140" fill="#ddd" font-size="11">Remote ID Detection</text>
+  </g>
+
+  <!-- Title bar -->
+  <rect x="0" y="572" width="1000" height="28" fill="black" fill-opacity="0.50"/>
+  <text x="500" y="591" text-anchor="middle" fill="white" font-size="14" font-weight="bold">
+    RID2Caltopo — Typical SAR Deployment with Dual Remote ID Coverage
+  </text>
+</svg>

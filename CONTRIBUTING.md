@@ -19,3 +19,8 @@ of Origin sign-off in the commit message:
 
 The sign-off states that you have the right to submit the contribution under
 the project's license. See <https://developercertificate.org/>.
+
+Contributing code does not by itself grant signing or store-publishing access.
+Maintainers preparing a release must follow the [mobile release
+runbook](RELEASE.md), keep Android and Apple versions synchronized, and record
+automated, artifact, Simulator, and physical-device evidence separately.

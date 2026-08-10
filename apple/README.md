@@ -212,7 +212,8 @@ confirmations are session-only; Remote ID mappings imported from an Android QR
 configuration persist locally.
 
 When tracker peer coordination is enabled, the app connects to the Android
-tracker's `/ws/r2c` endpoint with `X-SAR-Token` authentication. It sends the
+tracker's `/<organization-designator>/ws/r2c` endpoint with `X-SAR-Token`
+authentication. It sends the
 same hello, heartbeat, first-sighting, sighting, lost, and confirmation payloads,
 replays active state after reconnect, and displays link/peer status in the
 incident header. CalTopo publication is allowed only after this Apple device
@@ -235,8 +236,9 @@ uses the last two samples to project horizontal and vertical motion forward by
 up to two seconds before applying the same threshold; projected warnings are
 identified in the alert readout and diagnostics.
 
-See `TESTFLIGHT.md` for distributing a signed beta to field testers who do not
-have Xcode or a developer account.
+See the root [mobile release runbook](../RELEASE.md) for coordinated Android and
+Apple release control, and [TestFlight distribution](TESTFLIGHT.md) for tester
+onboarding and Apple-specific field-test details.
 
 The project is assigned to Apple Developer team `94UV79S6LR`. The TestFlight
 script intentionally archives without signing and lets Xcode apply its managed

@@ -26,44 +26,22 @@ install RID2Caltopo like any other beta application.
 
 ## Reproducible build and upload
 
-Create `../release-notes/<version>/whats_new.txt` for every release. It must
-contain `Latest changes:`, `Platform-specific changes:`, and
-`Known platform differences:` sections. After review, run
-`tools/sync_release_notes.sh <version>`; the release gate rejects missing,
-stale, mismatched, or incorrectly bundled notes.
+Follow the root [mobile release runbook](../RELEASE.md) for version selection,
+unified notes, automated gates, signed export, upload, tagging, physical
+qualification, and recovery. It is the procedural authority for both stores.
 
-Review the checked-in App Store wording and verify Apple's text limits first:
+`app/build.gradle` is the shared version authority. Unless explicitly
+overridden, `archive-for-testflight.sh` derives the Apple marketing version
+from Android `versionName` and the Apple build from Android `versionCode`.
+Always pass or inspect those values during preflight; do not use a timestamp or
+an independent Apple version.
 
-```sh
-apple/AppStore/verify-metadata.sh --marketing-version 1.1
-```
-
-After the one-time account setup, first run a read-only preflight. Replace the
-example team and bundle values with those shown by the Apple Developer portal:
-
-```sh
-apple/archive-for-testflight.sh \
-  --team 94UV79S6LR \
-  --bundle-id org.ncssar.RID2CaltopoApple \
-  --preflight
-```
-
-Create an unsigned archive, export and verify a distribution-signed IPA, but do
-not upload it:
-
-```sh
-apple/archive-for-testflight.sh \
-  --team 94UV79S6LR \
-  --bundle-id org.ncssar.RID2CaltopoApple
-```
-
-The default build number is a unique UTC timestamp. The command first runs the
-full `apple/release-check.sh` gate, produces a verified unsigned archive, then
-uses Xcode automatic distribution signing during local export. It rejects the
-IPA if
-its team, bundle ID, build number, arm64 binary, iPhone/iPad device families,
-QR URL schemes, privacy declarations, signature, or release entitlements do
-not match expectations. It does not store Apple credentials.
+The command runs the full `apple/release-check.sh` gate, produces a verified
+unsigned archive, then uses Xcode automatic distribution signing during local
+export. It rejects the IPA if its team, bundle ID, build number, marketing
+version, arm64 binary, iPhone/iPad device families, QR URL schemes, privacy
+declarations, signature, or release entitlements do not match expectations. It
+does not store Apple credentials and does not upload without `--upload`.
 
 Release preparation also verifies the shared protected-land source catalog,
 but performs the network check no more than once every seven days. Repeated
@@ -71,26 +49,19 @@ packaging runs reuse that result. Use `--force-land-catalog-refresh` on either
 release command when a known agency endpoint change requires an immediate
 recheck.
 
-Only after the App Store Connect record and TestFlight metadata are ready, add
-the explicit upload flag:
-
-```sh
-apple/archive-for-testflight.sh \
-  --team 94UV79S6LR \
-  --bundle-id org.ncssar.RID2CaltopoApple \
-  --upload
-```
-
-Use `--internal-only` with `--upload` for a build that must never be released to
-external testers or the App Store. Normal uploads use the local App Store
-Connect key in `~/.appstoreconnect/private_keys` plus its non-secret issuer ID,
-so an expired Xcode account token does not block routine releases. The private
-key is never copied into the repository or command output. Internal-only upload
-continues to use Xcode's configured Apple Account.
+Only after the exact source is tagged, the signed IPA is reviewed, and App Store
+Connect metadata is ready should the release owner add `--upload`. Assign a
+normal uploaded release candidate to internal testers first. Use
+`--internal-only` only for a throwaway build that must never proceed to external
+TestFlight or the App Store. Normal uploads may use the local App Store Connect
+key in `~/.appstoreconnect/private_keys` plus its non-secret issuer ID. The
+private key is never copied into the repository or command output.
+Internal-only upload uses Xcode's configured Apple Account.
 
 The equivalent manual Organizer workflow remains available:
 
-1. Increment `CURRENT_PROJECT_VERSION` for every upload.
+1. Increment the shared Android `versionCode` and use that value for Apple
+   `CURRENT_PROJECT_VERSION` for every upload.
 2. Select **Any iOS Device (arm64)** as the run destination.
 3. Choose **Product > Archive**.
 4. In Organizer, choose **Distribute App > App Store Connect > Upload**.
@@ -158,32 +129,15 @@ group requires review; later builds may receive a shorter review.
 
 ## Current local readiness
 
-The universal iPhone/iPad Release target builds successfully, including the app
-icon, privacy manifest, in-app privacy policy, MediaMTX bridge, anomaly core,
-Remote ID receivers, tracker peer coordination, and daily log-sharing workflow.
-The project is configured for team `94UV79S6LR`. On July 19, 2026, Xcode's
-automatic distribution export created and used an Apple Distribution identity
-and device-free App Store profile for `org.ncssar.RID2CaltopoApple`; the
-resulting arm64 IPA passed signature, provisioning, entitlement, bundle, device
-family, QR scheme, and privacy checks. App Store metadata drafts and visually
-reviewed 6.9-inch iPhone and 13-inch iPad screenshots are available under
-`AppStore` and `Build/AppStoreScreenshots`; all six screenshots are uploaded.
-The four App Privacy data types were published July 19, 2026 after explicit
-owner confirmation of Apple's accuracy/compliance attestation. Content Rights
-is saved as No, DSA non-trader status is Active, and the complete App Review
-contact and notes are saved. Version 1.0 build `202607191735` is uploaded,
-processed, and Ready to Submit with its beta description and build-specific
-test instructions saved. The superseded 0.1 build `202607191720` must not be
-assigned to testers. Archive and signed-IPA verification now require the
-expected marketing version as well as the build number. App Store Connect
-version 1.0 remains in `Prepare for Submission`. Release remains gated by `RELEASE_ACCEPTANCE.md`, including
-physical-device qualification. A July 19, 2026 preflight revalidated team
-`94UV79S6LR`, bundle `org.ncssar.RID2CaltopoApple`, the current Xcode project,
-and the installed Kenneth Taylor development identity without changing App
-Store Connect; distribution signing remains automatically managed at export.
+Historical local archives, exports, screenshots, and App Store Connect setup
+are not evidence for a new release. For every candidate, rerun preflight and the
+full gate, verify the newly signed IPA, install the exact processed TestFlight
+build, and complete `RELEASE_ACCEPTANCE.md` with fresh device reports. Confirm
+current agreements, metadata, privacy answers, signing access, and review state
+in App Store Connect before upload.
 
 Unsigned local archives can be checked before signing with:
 
 ```sh
-apple/verify-unsigned-archive.sh apple/Build/RID2CaltopoApple-unsigned-15.xcarchive
+apple/verify-unsigned-archive.sh apple/Build/RID2CaltopoApple-unsigned-BUILD.xcarchive
 ```

@@ -220,6 +220,10 @@ To build the application, use Android Studio.
 Import the project (File -> New -> Import Project, or just Open on newer versions of Android Studio) 
 and point to the root folder. Then Build -> Make Project.
 
+For production versioning, signed Android artifacts, Apple/TestFlight builds,
+physical qualification, store staging, and recovery procedures, follow the
+[mobile release runbook](RELEASE.md).
+
 ## Detector documentation
 
 RID2Caltopo includes an Anomaly Detector that can help searchers identify

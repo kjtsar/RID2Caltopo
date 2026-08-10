@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "backend_kind": "deterministic_fake",
+  "model_identity": {
+    "model_name": "fixture-person",
+    "model_version": "1",
+    "model_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "runtime": "host-fake-1",
+    "backend": "deterministic-fixture"
+  },
+  "provenance": {
+    "fixture_id": "tracked-person-smoke-v1",
+    "generator": "checked-in-fixture",
+    "source_detectors": [
+      "color_outlier"
+    ]
+  },
+  "counters": {
+    "offers": 1,
+    "admissions": 1,
+    "drops": 0,
+    "replaced": 0,
+    "stale": 0,
+    "evaluated": 1,
+    "published": 1,
+    "backend_failures": 0
+  },
+  "inference_time_us": [
+    1000.0
+  ],
+  "queue_age_us": [
+    200.0
+  ],
+  "first_person_relevance_latency_ms": 42.0,
+  "decisions": [
+    {
+      "frame": 30,
+      "time_s": 1.0,
+      "box": {
+        "cx_norm": 0.5,
+        "cy_norm": 0.5,
+        "width_norm": 0.2,
+        "height_norm": 0.2
+      },
+      "raw_score": 0.9,
+      "threshold": 0.6,
+      "status": "accepted"
+    }
+  ],
+  "decision_signature_sha256": "f7367b3bfd6a81109bd47b10eeb15e4220c7ca996d3def0900e5cbe7fbbe5f75"
+}

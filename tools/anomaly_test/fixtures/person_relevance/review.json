@@ -1,0 +1,18 @@
+{
+  "schema_version": 2,
+  "frames": [
+    {
+      "frame_idx": 30,
+      "source_timestamp_us": 1000000,
+      "annotations": [
+        {
+          "x_norm": 0.5,
+          "y_norm": 0.5,
+          "verdict": "good",
+          "review_kind": "correct_detection",
+          "object_type": "person"
+        }
+      ]
+    }
+  ]
+}

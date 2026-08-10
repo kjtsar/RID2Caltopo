@@ -1,9 +1,14 @@
 # Apple release acceptance
 
-Version 1.0 is a **no-go** until every required row below is green. Simulator
-coverage is evidence for shared logic and layout, but it is not a substitute
-for radio, camera, networking, performance, or background testing on Apple
-hardware.
+Use this matrix with the procedural [mobile release runbook](../RELEASE.md).
+The runbook controls versioning, build/export/upload, tagging, and evidence;
+this document defines the Apple physical acceptance threshold.
+
+Every release is a **no-go** until every required row below is green for the
+exact candidate build. Evidence summarized in the table is a baseline and must
+be refreshed when affected behavior or dependencies change. Simulator coverage
+is evidence for shared logic and layout, but it is not a substitute for radio,
+camera, networking, performance, or background testing on Apple hardware.
 
 ## Automated and Simulator gate
 
@@ -17,7 +22,7 @@ hardware.
 | NOTAM/TFR | Authenticate with imported FAA configuration, retain last results across transient failure, show freshness/restriction status and details, and render operational geometry. | Parser/policy tests and deterministic Simulator overlays are green. | Credentialed physical-location gate |
 | FAA facility map | Query Android's one-mile operating area and report airport, airspace class, ceiling, LAANC availability, and authorization status. | Query/parser/policy tests, Simulator UI, and full app compilation are green. | Physical-location gate |
 | Offline terrain | Download Android-compatible USGS one-degree DEM tiles and sample GeoTIFF elevation directly before online/cache fallback. | Direct GeoTIFF parser/sampling test and full app compilation are green. | Physical downloaded-DEM spot-check gate |
-| Tracker/CalTopo | Automatically request Save/Ignore once per active flight, match `/ws/r2c` ownership/relay behavior, publish/stop Android-shaped CalTopo tracks, and upload/replay eligible completed archives. | Automatic current-flight confirmation compiles in the signed iPad build; two-zone tracker Simulator run, signed-request tests, and Android-compatible archive-upload policy/request tests are green. | Credentialed physical gate |
+| Tracker/CalTopo | Automatically request Save/Ignore once per active flight, match organization-scoped `/<designator>/ws/r2c` ownership/relay behavior, publish/stop Android-shaped CalTopo tracks, and upload/replay eligible completed archives. | Automatic current-flight confirmation compiles in the signed iPad build; two-zone tracker Simulator run, signed-request tests, and Android-compatible archive-upload policy/request tests are green. | Credentialed physical gate |
 | Proximity alerts | Match threshold, ownership/team eligibility, predictive head, speech/haptic, Map, Suspend, Resume, and delayed clear behavior. | Shared tests and tracker-backed Simulator exercises are green. | Physical controlled-spacing gate |
 | Video/MediaMTX | Run MediaMTX in-process, accept controller RTMP, and render local HLS video with reconnect behavior. | Native ABI, Simulator RTMP/HLS loopback, and signed arm64 packaging are green. | Physical network/thermal gate |
 | Multi-stream/external display | Admit up to four controller streams, expose focus/grid/capacity state, and route app-managed content and alerts to an attached display. | Registry integration and Simulator layouts are green. | Physical multi-publisher/display gate |

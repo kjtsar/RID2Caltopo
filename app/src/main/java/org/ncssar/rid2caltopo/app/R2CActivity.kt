@@ -794,7 +794,14 @@ class R2CActivity :
                             ManagedVideoThumbnailStore::get,
                         )
                         if (activeRemoteVideoRequest == null) {
-                            refreshManagedVideoThumbnails(advertisements)
+                            val forcePreviewRefresh = R2cRuntimeRegistry
+                                .getDefaultRuntime()
+                                .peerCoordinator
+                                .shouldRefreshManagedVideoThumbnails()
+                            refreshManagedVideoThumbnails(
+                                advertisements,
+                                force = forcePreviewRefresh,
+                            )
                             advertisements = ManagedVideoStreamPresence.snapshot(
                                 streams,
                                 streamsViewModel::managedVideoSourceInfo,
@@ -1739,9 +1746,13 @@ class R2CActivity :
 
     private suspend fun refreshManagedVideoThumbnails(
         advertisements: List<ManagedVideoStreamAdvertisement>,
+        force: Boolean = false,
     ) {
         for (advertisement in advertisements.take(8)) {
-            if (ManagedVideoThumbnailStore.get(advertisement.sessionId) != null) continue
+            if (
+                ManagedVideoThumbnailStore.get(advertisement.sessionId) != null &&
+                (!force || advertisement.mediaKind != "live")
+            ) continue
             val recording = if (advertisement.mediaKind == "recording") {
                 ManagedVideoSessionRecordingCatalog.find(
                     applicationContext,

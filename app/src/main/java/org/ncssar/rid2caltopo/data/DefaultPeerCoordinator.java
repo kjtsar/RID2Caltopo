@@ -313,6 +313,11 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public boolean shouldRefreshManagedVideoThumbnails() {
+        return activeCoordinator.shouldRefreshManagedVideoThumbnails();
+    }
+
+    @Override
     public void respondToVideoStreamRequest(
             @NonNull String requestId,
             boolean approved,

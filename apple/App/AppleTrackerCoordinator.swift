@@ -273,6 +273,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     private let managedVideoSessionStartedAt = Date()
     private var managedVideoRecordingsBySessionID: [String: AppleManagedVideoRecording] = [:]
     private var managedVideoThumbnailTasks: [String: Task<Void, Never>] = [:]
+    private var managedVideoThumbnailPreviewUntil = Date.distantPast
+    private var managedVideoThumbnailPreviewTask: Task<Void, Never>?
     private var managedVideoRecordingSourceRequestIDs: Set<String> = []
     private var managedSessionIDBySourcePath: [String: String] = [:]
     private var lastVideoPreflightOfferByRequestID: [String: String] = [:]
@@ -908,9 +910,10 @@ final class AppleTrackerCoordinator: ObservableObject {
         refreshManagedVideoThumbnails()
     }
 
-    private func refreshManagedVideoThumbnails() {
+    private func refreshManagedVideoThumbnails(force: Bool = false) {
         for advertisement in managedVideoStreams.prefix(8)
-        where advertisement.thumbnailRevision.isEmpty &&
+        where (advertisement.thumbnailRevision.isEmpty ||
+               (force && advertisement.mediaKind == "live")) &&
               managedVideoThumbnailTasks[advertisement.sessionId] == nil {
             let sessionID = advertisement.sessionId
             managedVideoThumbnailTasks[sessionID] = Task { @MainActor [weak self] in
@@ -950,6 +953,21 @@ final class AppleTrackerCoordinator: ObservableObject {
                     )
                 self.sendManagedVideoPresence()
             }
+        }
+    }
+
+    private func startManagedVideoThumbnailPreviewTaskIfNeeded() {
+        guard managedVideoThumbnailPreviewTask == nil else { return }
+        managedVideoThumbnailPreviewTask = Task { @MainActor [weak self] in
+            while let self,
+                  !Task.isCancelled,
+                  Date() < self.managedVideoThumbnailPreviewUntil {
+                if self.mediaPeersByRequestID.isEmpty {
+                    self.refreshManagedVideoThumbnails(force: true)
+                }
+                try? await Task.sleep(for: .seconds(5))
+            }
+            self?.managedVideoThumbnailPreviewTask = nil
         }
     }
 
@@ -1011,6 +1029,15 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
         if type == "video_preflight_offer" {
             handleVideoPreflightOffer(data)
+            return true
+        }
+        if type == "video_thumbnail_preview" {
+            let ttlSeconds = max(10, min(object["ttlSec"] as? Int ?? 25, 60))
+            managedVideoThumbnailPreviewUntil = max(
+                managedVideoThumbnailPreviewUntil,
+                Date().addingTimeInterval(TimeInterval(ttlSeconds))
+            )
+            startManagedVideoThumbnailPreviewTaskIfNeeded()
             return true
         }
         if type == "video_media_offer" {
@@ -1258,6 +1285,9 @@ final class AppleTrackerCoordinator: ObservableObject {
 
     func shutdown() async {
         terminateAllRemoteVideoStreams()
+        managedVideoThumbnailPreviewTask?.cancel()
+        managedVideoThumbnailPreviewTask = nil
+        managedVideoThumbnailPreviewUntil = .distantPast
         for task in sourceEndGraceTasks.values { task.cancel() }
         sourceEndGraceTasks.removeAll()
         for task in managedVideoThumbnailTasks.values { task.cancel() }

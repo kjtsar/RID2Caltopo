@@ -74,6 +74,9 @@ public interface PeerCoordinator {
     default List<ManagedVideoStreamAdvertisement> getManagedVideoStreams() {
         return Collections.emptyList();
     }
+    default boolean shouldRefreshManagedVideoThumbnails() {
+        return false;
+    }
     default void respondToVideoStreamRequest(
             @NonNull String requestId,
             boolean approved,

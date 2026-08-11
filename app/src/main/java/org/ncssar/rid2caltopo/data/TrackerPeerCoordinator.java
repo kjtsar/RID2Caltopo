@@ -114,6 +114,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private volatile String managedVideoIncidentName = "";
     @NonNull private volatile List<ManagedVideoStreamAdvertisement> managedVideoStreams =
             Collections.emptyList();
+    private volatile long managedVideoThumbnailPreviewUntilMs;
     @Nullable private volatile HardFailureListener hardFailureListener;
 
     @Nullable private volatile String mapId;
@@ -343,6 +344,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             activeTransport.disconnect();
         }
         started = false;
+        managedVideoThumbnailPreviewUntilMs = 0L;
         hardFailureNotified = false;
         reconnectPending = false;
         intentionallyParked = false;
@@ -369,6 +371,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @Override
     public List<ManagedVideoStreamAdvertisement> getManagedVideoStreams() {
         return managedVideoStreams;
+    }
+
+    @Override
+    public boolean shouldRefreshManagedVideoThumbnails() {
+        return nowMs() < managedVideoThumbnailPreviewUntilMs;
     }
 
     @Override
@@ -1217,6 +1224,16 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 case "video_stream_request":
                     onVideoStreamRequest(jo);
                     break;
+                case "video_thumbnail_preview":
+                    int previewTtlSeconds = Math.max(
+                            10,
+                            Math.min(jo.optInt("ttlSec", 25), 60)
+                    );
+                    managedVideoThumbnailPreviewUntilMs = Math.max(
+                            managedVideoThumbnailPreviewUntilMs,
+                            nowMs() + previewTtlSeconds * 1_000L
+                    );
+                    break;
                 case "video_preflight_offer":
                     onVideoPreflightOffer(jo);
                     break;
@@ -1925,6 +1942,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         INSTANCE.seenVideoStreamRequestIds.clear();
         INSTANCE.managedVideoIncidentName = "";
         INSTANCE.managedVideoStreams = Collections.emptyList();
+        INSTANCE.managedVideoThumbnailPreviewUntilMs = 0L;
         INSTANCE.hardFailureListener = null;
         INSTANCE.hardFailureNotified = false;
         INSTANCE.forcedReconnectCount = 0L;

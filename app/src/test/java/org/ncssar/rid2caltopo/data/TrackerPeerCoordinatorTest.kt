@@ -194,6 +194,22 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun thumbnailPreviewLease_expiresWithoutExplicitTeardown() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        transport.receive(
+            JSONObject()
+                .put("type", "video_thumbnail_preview")
+                .put("ttlSec", 25)
+                .toString()
+        )
+
+        assertTrue(coordinator.shouldRefreshManagedVideoThumbnails())
+        clock.advanceBy(25_001L)
+        assertFalse(coordinator.shouldRefreshManagedVideoThumbnails())
+    }
+
+    @Test
     fun helloAckWithNewerRecommendedVersion_triggersUpdateAdvisory() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
 

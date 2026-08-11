@@ -32,6 +32,7 @@ public interface CalTopoSessionGateway {
                                       @Nullable CtLineProperty lineProp, @Nullable Consumer<CaltopoOp> onComplete);
     @NonNull CaltopoOp addLiveTrackPoint(@NonNull String deviceId, double lat, double lng, double eleMeters,
                                          @Nullable CtDroneSpec.PositionTelemetry telemetry,
+                                         @Nullable CaltopoCameraMetadata cameraMetadata,
                                          @Nullable Consumer<CaltopoOp> onComplete);
     @Nullable CaltopoOp addPhotoMarker(double lat, double lng, @NonNull String markerTitle, @NonNull String markerDesc,
                                        @NonNull String folderId, long clueTimestamp,

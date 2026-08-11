@@ -204,7 +204,7 @@ public final class FakeCalTopoSessionGateway implements CalTopoSessionGateway {
 
     @NonNull
     @Override
-    public CaltopoOp addLiveTrackPoint(@NonNull String deviceId, double lat, double lng, double eleMeters, @Nullable CtDroneSpec.PositionTelemetry telemetry, @Nullable Consumer<CaltopoOp> onComplete) {
+    public CaltopoOp addLiveTrackPoint(@NonNull String deviceId, double lat, double lng, double eleMeters, @Nullable CtDroneSpec.PositionTelemetry telemetry, @Nullable CaltopoCameraMetadata cameraMetadata, @Nullable Consumer<CaltopoOp> onComplete) {
         JSONObject payload = new JSONObject();
         try {
             payload.put("deviceId", deviceId);
@@ -217,6 +217,10 @@ public final class FakeCalTopoSessionGateway implements CalTopoSessionGateway {
                 if (telemetry.aircraftTrackDeg != null) telemetryJson.put("trackDeg", telemetry.aircraftTrackDeg);
                 if (telemetry.aircraftAltitudeRateFpm != null) telemetryJson.put("altitudeRateFpm", telemetry.aircraftAltitudeRateFpm);
                 payload.put("telemetry", telemetryJson);
+            }
+            if (cameraMetadata != null) {
+                payload.put("cameraExternalUrl", cameraMetadata.externalUrl);
+                payload.put("cameraThumbnailUrl", cameraMetadata.thumbnailUrl);
             }
         } catch (Exception ignored) { }
         record("addLiveTrackPoint", deviceId, payload);

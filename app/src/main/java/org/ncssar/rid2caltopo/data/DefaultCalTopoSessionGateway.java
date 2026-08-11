@@ -97,8 +97,8 @@ public final class DefaultCalTopoSessionGateway implements CalTopoSessionGateway
 
     @NonNull
     @Override
-    public CaltopoOp addLiveTrackPoint(@NonNull String deviceId, double lat, double lng, double eleMeters, @Nullable CtDroneSpec.PositionTelemetry telemetry, @Nullable Consumer<CaltopoOp> onComplete) {
-        return CaltopoSession.AddLiveTrackPoint(deviceId, lat, lng, eleMeters, telemetry, onComplete);
+    public CaltopoOp addLiveTrackPoint(@NonNull String deviceId, double lat, double lng, double eleMeters, @Nullable CtDroneSpec.PositionTelemetry telemetry, @Nullable CaltopoCameraMetadata cameraMetadata, @Nullable Consumer<CaltopoOp> onComplete) {
+        return CaltopoSession.AddLiveTrackPoint(deviceId, lat, lng, eleMeters, telemetry, cameraMetadata, onComplete);
     }
 
     @NonNull

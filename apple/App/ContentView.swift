@@ -406,6 +406,13 @@ struct ContentView: View {
                                 Text("Video Stream Request")
                                     .font(.title2.bold())
                                 LabeledContent("From", value: request.requesterEmail)
+                        if let activeEmail = peerCoordinator.currentRemoteVideoRequesterEmail {
+                            Text(
+                                "The app is already streaming to \(activeEmail). " +
+                                "Starting this request will redirect that viewer."
+                            )
+                            .foregroundStyle(.orange)
+                        }
                         LabeledContent(
                             "Incident",
                             value: request.incidentName.isEmpty
@@ -741,14 +748,10 @@ struct ContentView: View {
             }
             .task {
                 while !Task.isCancelled {
-                    if streamRegistry.sessions.contains(where: {
-                        $0.state == .live && $0.id != "demo"
-                    }) {
-                        peerCoordinator.updateManagedVideoStreams(
-                            incidentName: currentIncidentName,
-                            sessions: streamRegistry.sessions
-                        )
-                    }
+                    peerCoordinator.updateManagedVideoStreams(
+                        incidentName: currentIncidentName,
+                        sessions: streamRegistry.sessions
+                    )
                     try? await Task.sleep(for: .seconds(2))
                 }
             }
@@ -1909,11 +1912,18 @@ struct ContentView: View {
         else { return }
         let color: String
         switch peerCoordinator.status {
-        case .healthy, .standalone: color = "#2e7d32"
+        case .healthy: color = "#2e7d32"
+        case .standalone: color = "#1976d2"
         case .connecting: color = "#f9a825"
-        case .degraded, .unavailable: color = "#c62828"
-        case .unconfigured: color = "#757575"
+        case .degraded: color = "#f9a825"
+        case .unavailable: color = peerCoordinator.coordinationRequired ? "#f9a825" : "#1976d2"
+        case .unconfigured: color = "#1976d2"
         }
+        let markerDescription = TrackerTabletLink.markerDescription(
+            trackerURLPrefix: argumentValue("--tracker-url")
+                ?? orgConfigSettings.trackerURLPrefix,
+            tabletName: AppleDeviceIdentity.displayName
+        )
         ridTracks.publishLocalDeviceMarker(
             CaltopoDeviceMarker(
                 id: peerCoordinator.localZoneID,
@@ -1921,7 +1931,7 @@ struct ContentView: View {
                 deviceName: AppleDeviceIdentity.displayName,
                 latitude: coordinate.latitude,
                 longitude: coordinate.longitude,
-                description: peerCoordinator.localDeviceStatusLines.joined(separator: "\n"),
+                description: markerDescription,
                 color: color
             ),
             force: force

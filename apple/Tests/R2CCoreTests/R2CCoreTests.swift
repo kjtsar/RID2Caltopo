@@ -2789,7 +2789,13 @@ private func proximityDrone(
         headingDegrees: 92,
         speedMetersPerSecond: 10
     )
-    let request = try await client.makePointRequest(remoteID: "RID01", observation: observation)
+    let request = try await client.makePointRequest(
+        remoteID: "RID01",
+        observation: observation,
+        cameraMetadata: CaltopoCameraMetadata(
+            externalURL: try #require(URL(string: "https://r2c-tracker.com/t/Bz2DZg"))
+        )
+    )
     let url = try #require(request.url)
     let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
     #expect(components.path == "/api/v1/position/report/DRONE")
@@ -2802,6 +2808,10 @@ private func proximityDrone(
     let aircraft = try #require(JSONSerialization.jsonObject(with: aircraftData) as? [String: Double])
     #expect(abs((aircraft["gs"] ?? 0) - 19.4384449) < 0.000001)
     #expect(aircraft["track"] == 92)
+    let cameraData = try #require(values["camera"]?.data(using: .utf8))
+    let camera = try #require(JSONSerialization.jsonObject(with: cameraData) as? [String: String])
+    #expect(camera["external_url"] == "https://r2c-tracker.com/t/Bz2DZg")
+    #expect(camera["thumbnail_url"] == nil)
 }
 
 @Test func caltopoStopRequestMatchesAndroidLiveTrackDelete() async throws {
@@ -2929,6 +2939,7 @@ private func proximityDrone(
         label: "ALPHA1",
         observations: observations,
         folderID: "archive-folder",
+        description: "Video Stream: https://r2c-tracker.com/s/QHkyEQ",
         now: Date(timeIntervalSince1970: 1_700_000_010)
     )
     #expect(request.url?.path == "/api/v1/map/map123/Shape/track456")
@@ -2940,6 +2951,7 @@ private func proximityDrone(
     #expect(properties["class"] as? String == "Shape")
     #expect(properties["folderId"] as? String == "archive-folder")
     #expect(properties["stroke"] as? String == "#ff00ff")
+    #expect(properties["description"] as? String == "Video Stream: https://r2c-tracker.com/s/QHkyEQ")
     #expect((geometry["coordinates"] as? [Any])?.count == 2)
 }
 
@@ -2976,6 +2988,40 @@ private func proximityDrone(
     #expect(properties["r2c-guid"] as? String == "28adc36d-1111-2222-3333-444444444444")
     #expect(properties["r2c-last-seen-epoch-ms"] as? Int64 == 1_700_000_000_000)
     #expect(coordinates == [-116.202, 43.615])
+}
+
+@Test func trackerTabletShortLinkMatchesAndroidAndServerContract() throws {
+    let url = try #require(TrackerTabletLink.shortURL(
+        trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
+        tabletName: "Kjt A5 Pro"
+    ))
+    #expect(url.absoluteString == "https://r2c-tracker.com/t/Bz2DZg")
+    #expect(TrackerTabletLink.markerDescription(
+        trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
+        tabletName: "Kjt A5 Pro"
+    ) == "R2C tablet: https://r2c-tracker.com/t/Bz2DZg")
+    #expect(TrackerTabletLink.markerDescription(
+        trackerURLPrefix: "",
+        tabletName: "Kjt A5 Pro"
+    ).isEmpty)
+    #expect(TrackerTabletLink.thumbnailURL(
+        trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
+        tabletName: "Kjt A5 Pro",
+        streamSessionID: "00000000-0000-0000-0000-000000000001"
+    )?.absoluteString == "https://r2c-tracker.com/r2c-thumbnail/Bz2DZg/00000000-0000-0000-0000-000000000001.jpg")
+    #expect(TrackerTabletLink.streamShortURL(
+        trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
+        tabletName: "Kjt A5 Pro",
+        videoStream: "NCS1m3"
+    )?.absoluteString == "https://r2c-tracker.com/s/QHkyEQ")
+}
+
+@Test func caltopoArchiveDescriptionIncludesOnlyCapturedVideo() throws {
+    let description = CaltopoArchiveDescription.build(
+        capturedVideoURL: try #require(URL(string: "https://r2c-tracker.com/s/QHkyEQ"))
+    )
+    #expect(description == "Video Stream: https://r2c-tracker.com/s/QHkyEQ")
+    #expect(CaltopoArchiveDescription.build(capturedVideoURL: nil).isEmpty)
 }
 
 @Test func caltopoDeviceMarkerDeleteMatchesAndroidDisconnectContract() async throws {

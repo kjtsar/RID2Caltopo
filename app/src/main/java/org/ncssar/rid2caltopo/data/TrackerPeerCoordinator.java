@@ -365,6 +365,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         sendManagedVideoPresence();
     }
 
+    @NonNull
+    @Override
+    public List<ManagedVideoStreamAdvertisement> getManagedVideoStreams() {
+        return managedVideoStreams;
+    }
+
     @Override
     public void onLiveTrackCreated(@NonNull LiveTrackOwnerDelegate liveTrack,
                                    @NonNull CtDroneSpec droneSpec,
@@ -1071,6 +1077,18 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 advertised.put("sourceFps", stream.sourceFps);
                 advertised.put("sourceBitrateBps", stream.sourceBitrateBps);
                 advertised.put("sourceCodec", stream.sourceCodec);
+                advertised.put("mediaKind", stream.mediaKind);
+                if (stream.recordedAt != null && !stream.recordedAt.isEmpty()) {
+                    advertised.put("recordedAt", stream.recordedAt);
+                }
+                advertised.put("durationMs", stream.durationMs);
+                if (!stream.thumbnailRevision.isEmpty()) {
+                    advertised.put("thumbnailRevision", stream.thumbnailRevision);
+                }
+                if (stream.thumbnailJpegBase64 != null &&
+                        !stream.thumbnailJpegBase64.isEmpty()) {
+                    advertised.put("thumbnailJpegBase64", stream.thumbnailJpegBase64);
+                }
                 streams.put(advertised);
             }
             message.put("type", "video_stream_advertisement");

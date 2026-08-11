@@ -70,6 +70,10 @@ public interface PeerCoordinator {
             @NonNull String incidentName,
             @NonNull List<ManagedVideoStreamAdvertisement> streams) {
     }
+    @NonNull
+    default List<ManagedVideoStreamAdvertisement> getManagedVideoStreams() {
+        return Collections.emptyList();
+    }
     default void respondToVideoStreamRequest(
             @NonNull String requestId,
             boolean approved,

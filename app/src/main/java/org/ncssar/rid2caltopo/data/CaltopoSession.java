@@ -820,6 +820,7 @@ public class CaltopoSession {
 	public static CaltopoOp AddLiveTrackPoint(@NonNull String deviceId,
 									   double lat, double lng, double eleMeters,
                                        @Nullable CtDroneSpec.PositionTelemetry telemetry,
+                                       @Nullable CaltopoCameraMetadata cameraMetadata,
                                        @Nullable Consumer<CaltopoOp> onComplete) {
         if (null == MapId)
             throw new RuntimeException("AddLiveTrackPoint(): Map not specified - call OpenMap() first");
@@ -832,8 +833,8 @@ public class CaltopoSession {
 				EncodeParm("lat", latStr) + "&" +
 				EncodeParm("lng", lngStr) + "&" +
 				EncodeParm("elevation", ele.toString()));
-        if (telemetry != null) {
-            appendTelemetryJson(urlBuilder, telemetry);
+        if (telemetry != null || cameraMetadata != null) {
+            appendTelemetryJson(urlBuilder, telemetry, cameraMetadata);
         }
         String url = urlBuilder.toString();
 
@@ -843,13 +844,20 @@ public class CaltopoSession {
 	}
 
     private static void appendTelemetryJson(@NonNull StringBuilder sb,
-                                            @NonNull CtDroneSpec.PositionTelemetry telemetry) {
+                                            @Nullable CtDroneSpec.PositionTelemetry telemetry,
+                                            @Nullable CaltopoCameraMetadata cameraMetadata) {
         JSONObject aircraft = new JSONObject();
         JSONObject camera = new JSONObject();
         try {
-            putFinite(aircraft, "altitude_rate", telemetry.aircraftAltitudeRateFpm);
-            putFinite(aircraft, "gs", telemetry.aircraftGsKnots);
-            putFinite(aircraft, "track", telemetry.aircraftTrackDeg);
+            if (telemetry != null) {
+                putFinite(aircraft, "altitude_rate", telemetry.aircraftAltitudeRateFpm);
+                putFinite(aircraft, "gs", telemetry.aircraftGsKnots);
+                putFinite(aircraft, "track", telemetry.aircraftTrackDeg);
+            }
+            if (cameraMetadata != null) {
+                putString(camera, "external_url", cameraMetadata.externalUrl);
+                putString(camera, "thumbnail_url", cameraMetadata.thumbnailUrl);
+            }
         } catch (Exception e) {
             CTError(TAG, "appendTelemetryJson() JSON put raised", e);
             return;

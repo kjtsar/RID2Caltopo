@@ -136,7 +136,12 @@ actor AppleCaltopoPublisher {
         )
     }
 
-    func publish(remoteID: String, label: String, observation: RidObservation) async {
+    func publish(
+        remoteID: String,
+        label: String,
+        observation: RidObservation,
+        cameraMetadata: CaltopoCameraMetadata? = nil
+    ) async {
         guard let client else { return }
         do {
             try await ensureFolders(client: client)
@@ -173,7 +178,11 @@ actor AppleCaltopoPublisher {
                 continuation.yield(.trackStarted(remoteID))
             }
             let requestStarted = Date()
-            try await client.publishPoint(remoteID: remoteID, observation: observation)
+            try await client.publishPoint(
+                remoteID: remoteID,
+                observation: observation,
+                cameraMetadata: cameraMetadata
+            )
             let rttMilliseconds = max(0, Int64(Date().timeIntervalSince(requestStarted) * 1_000))
             continuation.yield(.pointPublished(remoteID, rttMilliseconds: rttMilliseconds))
         } catch {
@@ -182,7 +191,7 @@ actor AppleCaltopoPublisher {
         }
     }
 
-    func finish(remoteID: String) async {
+    func finish(remoteID: String, description: String = "") async {
         finishingRemoteIDs.insert(remoteID)
         defer { finishingRemoteIDs.remove(remoteID) }
         guard let client else {
@@ -211,7 +220,8 @@ actor AppleCaltopoPublisher {
                 liveTrackID: liveTrackID,
                 label: labels[remoteID] ?? remoteID,
                 observations: observations[remoteID] ?? [],
-                folderID: archiveFolderID
+                folderID: archiveFolderID,
+                description: description
             )
             liveTrackIDs.removeValue(forKey: remoteID)
             labels.removeValue(forKey: remoteID)

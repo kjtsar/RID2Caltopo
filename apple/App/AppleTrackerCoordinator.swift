@@ -1,5 +1,6 @@
 import Combine
 import CoreLocation
+import CryptoKit
 import Foundation
 import R2CCore
 import UIKit
@@ -48,6 +49,96 @@ private struct AppleManagedVideoStreamAdvertisement: Codable, Equatable {
     let sourceFps: Double
     let sourceBitrateBps: Int64
     let sourceCodec: String
+    let mediaKind: String
+    let recordedAt: String?
+    let durationMs: Int64
+    let thumbnailRevision: String
+    let thumbnailJpegBase64: String?
+
+    func withThumbnail(revision: String, jpegBase64: String) -> Self {
+        .init(
+            sessionId: sessionId,
+            droneDesignator: droneDesignator,
+            sourceWidth: sourceWidth,
+            sourceHeight: sourceHeight,
+            sourceFps: sourceFps,
+            sourceBitrateBps: sourceBitrateBps,
+            sourceCodec: sourceCodec,
+            mediaKind: mediaKind,
+            recordedAt: recordedAt,
+            durationMs: durationMs,
+            thumbnailRevision: revision,
+            thumbnailJpegBase64: jpegBase64
+        )
+    }
+}
+
+private struct AppleManagedVideoRecording: Equatable {
+    let sessionId: String
+    let droneDesignator: String
+    let url: URL
+    let recordedAt: Date
+    let durationMs: Int64
+}
+
+private enum AppleManagedVideoRecordingCatalog {
+    static func snapshot(sessionStartedAt: Date, now: Date = Date()) -> [AppleManagedVideoRecording] {
+        guard UserDefaults.standard.bool(forKey: "video.captureStreams"),
+              let documents = try? FileManager.default.url(
+                  for: .documentDirectory,
+                  in: .userDomainMask,
+                  appropriateFor: nil,
+                  create: false
+              )
+        else { return [] }
+        let root = documents.appendingPathComponent(
+            "RID2Caltopo/CapturedStreams",
+            isDirectory: true
+        )
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [
+                .isRegularFileKey,
+                .contentModificationDateKey,
+                .fileSizeKey,
+            ],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return enumerator.compactMap { element -> AppleManagedVideoRecording? in
+            guard let url = element as? URL,
+                  ["mp4", "fmp4"].contains(url.pathExtension.lowercased()),
+                  let values = try? url.resourceValues(forKeys: [
+                      .isRegularFileKey,
+                      .contentModificationDateKey,
+                      .fileSizeKey,
+                  ]),
+                  values.isRegularFile == true,
+                  (values.fileSize ?? 0) > 0,
+                  let modified = values.contentModificationDate,
+                  modified >= sessionStartedAt,
+                  now.timeIntervalSince(modified) >= 3
+            else { return nil }
+            let designator = url.deletingLastPathComponent().lastPathComponent
+            return AppleManagedVideoRecording(
+                sessionId: stableSessionID(url.path),
+                droneDesignator: designator.isEmpty ? "Recording" : designator,
+                url: url,
+                recordedAt: modified,
+                durationMs: 0
+            )
+        }
+        .sorted { $0.recordedAt > $1.recordedAt }
+        .prefix(20)
+        .map { $0 }
+    }
+
+    private static func stableSessionID(_ value: String) -> String {
+        let hex = SHA256.hash(data: Data(value.utf8))
+            .prefix(16)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20).prefix(12))"
+    }
 }
 
 private struct AppleVideoPreflightOffer: Decodable {
@@ -179,6 +270,10 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var managedVideoIncidentName = ""
     private var managedVideoStreams: [AppleManagedVideoStreamAdvertisement] = []
     private var managedVideoSourcesBySessionID: [String: AppleVideoFrameSource] = [:]
+    private let managedVideoSessionStartedAt = Date()
+    private var managedVideoRecordingsBySessionID: [String: AppleManagedVideoRecording] = [:]
+    private var managedVideoThumbnailTasks: [String: Task<Void, Never>] = [:]
+    private var managedVideoRecordingSourceRequestIDs: Set<String> = []
     private var managedSessionIDBySourcePath: [String: String] = [:]
     private var lastVideoPreflightOfferByRequestID: [String: String] = [:]
     private var approvedVideoStreamRequests: [String: AppleApprovedVideoStream] = [:]
@@ -244,6 +339,19 @@ final class AppleTrackerCoordinator: ObservableObject {
             approvedVideoStreamRequests[$0]?.request.requesterEmail
         }).sorted()
         return emails.isEmpty ? "Remote viewer" : emails.joined(separator: ", ")
+    }
+
+    var currentRemoteVideoRequesterEmail: String? {
+        let activeRequestID = mediaPeersByRequestID.keys.sorted().first
+        if let activeRequestID,
+           let email = approvedVideoStreamRequests[activeRequestID]?
+            .request.requesterEmail {
+            return email
+        }
+        return approvedVideoStreamRequests.values
+            .map(\.request)
+            .sorted { $0.requestId < $1.requestId }
+            .first?.requesterEmail
     }
 
     var activeRemoteVideoRouteSummary: String {
@@ -603,6 +711,7 @@ final class AppleTrackerCoordinator: ObservableObject {
                 + "quality=\(choice.width)x\(choice.height)@\(choice.fps) "
                 + "bitrate=\(choice.bitrateBps)"
         )
+        redirectRemoteVideoStreams(to: request.requesterEmail)
         sendVideoStreamDecision(
             requestID: request.requestId,
             approved: true,
@@ -663,10 +772,22 @@ final class AppleTrackerCoordinator: ObservableObject {
         resetVideoPreflightState()
     }
 
+    private func redirectRemoteVideoStreams(to replacementRequesterEmail: String) {
+        let reason = "Stream redirected to \(replacementRequesterEmail)"
+        let displacedRequestIDs = approvedVideoStreamRequests.keys.sorted()
+        for requestID in displacedRequestIDs {
+            terminateRemoteVideoRequest(requestID: requestID, reason: reason)
+        }
+    }
+
     func updateManagedVideoStreams(
         incidentName: String,
         sessions: [AppleLiveStreamSession]
     ) {
+        // Stream inventory is intentionally independent of telemetry binding. A camera
+        // commonly starts publishing before its drone emits Remote ID; the tablet-level
+        // R2C link must expose it immediately, while track metadata is added only after
+        // a matching telemetry identity becomes available.
         let live = sessions
             .filter {
                 $0.state == .live &&
@@ -723,7 +844,16 @@ final class AppleTrackerCoordinator: ObservableObject {
                 sourceHeight: session.model.sourceHeight,
                 sourceFps: session.model.sourceFrameRate,
                 sourceBitrateBps: 0,
-                sourceCodec: session.model.sourceWidth > 0 ? "H264" : ""
+                sourceCodec: session.model.sourceWidth > 0 ? "H264" : "",
+                mediaKind: "live",
+                recordedAt: nil,
+                durationMs: 0,
+                thumbnailRevision: managedVideoStreams.first(where: {
+                    $0.sessionId == sessionID
+                })?.thumbnailRevision ?? "",
+                thumbnailJpegBase64: managedVideoStreams.first(where: {
+                    $0.sessionId == sessionID
+                })?.thumbnailJpegBase64
             )
         }
         // Keep an actively viewed stream advertised during the same bounded
@@ -741,6 +871,31 @@ final class AppleTrackerCoordinator: ObservableObject {
                 currentSources[sessionID] = source
             }
         }
+        let recordings = AppleManagedVideoRecordingCatalog.snapshot(
+            sessionStartedAt: managedVideoSessionStartedAt
+        )
+        managedVideoRecordingsBySessionID = Dictionary(
+            uniqueKeysWithValues: recordings.map { ($0.sessionId, $0) }
+        )
+        updatedStreams += recordings.map { recording in
+            let previous = managedVideoStreams.first {
+                $0.sessionId == recording.sessionId
+            }
+            return AppleManagedVideoStreamAdvertisement(
+                sessionId: recording.sessionId,
+                droneDesignator: recording.droneDesignator,
+                sourceWidth: 0,
+                sourceHeight: 0,
+                sourceFps: 0,
+                sourceBitrateBps: 0,
+                sourceCodec: "h264",
+                mediaKind: "recording",
+                recordedAt: ISO8601DateFormatter().string(from: recording.recordedAt),
+                durationMs: recording.durationMs,
+                thumbnailRevision: previous?.thumbnailRevision ?? "",
+                thumbnailJpegBase64: previous?.thumbnailJpegBase64
+            )
+        }
         updatedStreams.sort {
             $0.sessionId.localizedCaseInsensitiveCompare($1.sessionId) == .orderedAscending
         }
@@ -750,6 +905,74 @@ final class AppleTrackerCoordinator: ObservableObject {
         if presenceChanged {
             sendManagedVideoPresence()
         }
+        refreshManagedVideoThumbnails()
+    }
+
+    private func refreshManagedVideoThumbnails() {
+        for advertisement in managedVideoStreams.prefix(8)
+        where advertisement.thumbnailRevision.isEmpty &&
+              managedVideoThumbnailTasks[advertisement.sessionId] == nil {
+            let sessionID = advertisement.sessionId
+            managedVideoThumbnailTasks[sessionID] = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let recording = self.managedVideoRecordingsBySessionID[sessionID]
+                let ownedSource: AppleVideoFrameSource?
+                let source: AppleVideoFrameSource?
+                if let recording {
+                    let playback = AppleVideoFrameSource()
+                    playback.startPlayback(url: recording.url)
+                    ownedSource = playback
+                    source = playback
+                    try? await Task.sleep(for: .milliseconds(900))
+                } else {
+                    ownedSource = nil
+                    source = self.managedVideoSourcesBySessionID[sessionID]
+                }
+                defer {
+                    ownedSource?.stop()
+                    self.managedVideoThumbnailTasks.removeValue(forKey: sessionID)
+                }
+                guard let snapshot = try? await source?.captureSnapshot(),
+                      let jpeg = Self.catalogThumbnailJPEG(snapshot.jpegData),
+                      jpeg.count <= 256 * 1024,
+                      let index = self.managedVideoStreams.firstIndex(where: {
+                          $0.sessionId == sessionID
+                      })
+                else { return }
+                let revision = SHA256.hash(data: jpeg)
+                    .prefix(12)
+                    .map { String(format: "%02x", $0) }
+                    .joined()
+                self.managedVideoStreams[index] = self.managedVideoStreams[index]
+                    .withThumbnail(
+                        revision: revision,
+                        jpegBase64: jpeg.base64EncodedString()
+                    )
+                self.sendManagedVideoPresence()
+            }
+        }
+    }
+
+    private static func catalogThumbnailJPEG(_ source: Data) -> Data? {
+        guard let image = UIImage(data: source) else { return nil }
+        let size = CGSize(width: 320, height: 180)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let rendered = renderer.image { _ in
+            UIColor.black.setFill()
+            UIRectFill(CGRect(origin: .zero, size: size))
+            let scale = min(size.width / image.size.width, size.height / image.size.height)
+            let drawn = CGSize(
+                width: image.size.width * scale,
+                height: image.size.height * scale
+            )
+            image.draw(in: CGRect(
+                x: (size.width - drawn.width) / 2,
+                y: (size.height - drawn.height) / 2,
+                width: drawn.width,
+                height: drawn.height
+            ))
+        }
+        return rendered.jpegData(compressionQuality: 0.72)
     }
 
     private func scheduleSourceEndAfterRecoveryGrace(sessionID: String) {
@@ -852,7 +1075,10 @@ final class AppleTrackerCoordinator: ObservableObject {
             }
             guard managedVideoStreams.contains(where: {
                 $0.sessionId == request.streamSessionId
-            }), managedVideoSourcesBySessionID[request.streamSessionId] != nil
+            }), (
+                managedVideoSourcesBySessionID[request.streamSessionId] != nil ||
+                managedVideoRecordingsBySessionID[request.streamSessionId] != nil
+            )
             else {
                 sendVideoStreamUnavailable(
                     requestID: request.requestId,
@@ -915,14 +1141,26 @@ final class AppleTrackerCoordinator: ObservableObject {
                 )
                 return
             }
-            guard
-                let approval = approvedVideoStreamRequests[offer.requestId],
-                approval.request.streamSessionId == offer.streamSessionId,
-                let source = managedVideoSourcesBySessionID[offer.streamSessionId]
+            guard let approval = approvedVideoStreamRequests[offer.requestId],
+                  approval.request.streamSessionId == offer.streamSessionId
             else {
                 AppleLog.warning(
                     "TrackerPeer",
                     "Ignoring media offer without matching pilot approval request=\(offer.requestId)"
+                )
+                return
+            }
+            let recording = managedVideoRecordingsBySessionID[offer.streamSessionId]
+            let source = managedVideoSourcesBySessionID[offer.streamSessionId]
+                ?? recording.map { item in
+                    let playback = AppleVideoFrameSource()
+                    playback.startPlayback(url: item.url)
+                    return playback
+                }
+            guard let source else {
+                AppleLog.warning(
+                    "TrackerPeer",
+                    "Approved media source disappeared request=\(offer.requestId)"
                 )
                 return
             }
@@ -954,6 +1192,9 @@ final class AppleTrackerCoordinator: ObservableObject {
             )
             mediaPeersByRequestID[offer.requestId] = peer
             mediaSourcesByRequestID[offer.requestId] = source
+            if recording != nil {
+                managedVideoRecordingSourceRequestIDs.insert(offer.requestId)
+            }
             mediaRouteKindByRequestID[offer.requestId] = approvedRoute
             source.setManagedVideoFrameConsumer(peer)
             peer.start(
@@ -990,6 +1231,9 @@ final class AppleTrackerCoordinator: ObservableObject {
         let peer = mediaPeersByRequestID.removeValue(forKey: requestID)
         let source = mediaSourcesByRequestID.removeValue(forKey: requestID)
         source?.setManagedVideoFrameConsumer(nil)
+        if managedVideoRecordingSourceRequestIDs.remove(requestID) != nil {
+            source?.stop()
+        }
         peer?.close()
         mediaRouteKindByRequestID.removeValue(forKey: requestID)
         activeRemoteVideoConnectionCount = mediaPeersByRequestID.count
@@ -1016,6 +1260,8 @@ final class AppleTrackerCoordinator: ObservableObject {
         terminateAllRemoteVideoStreams()
         for task in sourceEndGraceTasks.values { task.cancel() }
         sourceEndGraceTasks.removeAll()
+        for task in managedVideoThumbnailTasks.values { task.cancel() }
+        managedVideoThumbnailTasks.removeAll()
         managedVideoStreams = []
         managedVideoSourcesBySessionID.removeAll()
         managedSessionIDBySourcePath.removeAll()
@@ -1390,7 +1636,7 @@ final class AppleTrackerCoordinator: ObservableObject {
                 let width = source?.sourceWidth ?? $0.sourceWidth
                 let height = source?.sourceHeight ?? $0.sourceHeight
                 let frameRate = source?.sourceFrameRate ?? $0.sourceFps
-                return [
+                var advertised = [
                     "sessionId": $0.sessionId,
                     "droneDesignator": $0.droneDesignator,
                     "sourceWidth": width,
@@ -1398,13 +1644,87 @@ final class AppleTrackerCoordinator: ObservableObject {
                     "sourceFps": frameRate,
                     "sourceBitrateBps": $0.sourceBitrateBps,
                     "sourceCodec": width > 0 ? "H264" : $0.sourceCodec,
+                    "mediaKind": $0.mediaKind,
+                    "durationMs": $0.durationMs,
+                    "thumbnailRevision": $0.thumbnailRevision,
                 ] as [String: Any]
+                if let recordedAt = $0.recordedAt {
+                    advertised["recordedAt"] = recordedAt
+                }
+                if let thumbnailJpegBase64 = $0.thumbnailJpegBase64 {
+                    advertised["thumbnailJpegBase64"] = thumbnailJpegBase64
+                }
+                return advertised
             },
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
             return
         }
         send(data)
+    }
+
+    func caltopoCameraMetadata(droneDesignator: String) -> CaltopoCameraMetadata? {
+        let normalized = droneDesignator.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              let stream = managedVideoStreams.first(where: {
+                  $0.mediaKind == "live" &&
+                  $0.droneDesignator.trimmingCharacters(in: .whitespacesAndNewlines)
+                      .localizedCaseInsensitiveCompare(normalized) == .orderedSame
+              }),
+              let tabletURL = TrackerTabletLink.shortURL(
+                  trackerURLPrefix: trackerURLPrefix,
+                  tabletName: AppleDeviceIdentity.displayName
+              )
+        else { return nil }
+        let thumbnailURL = stream.thumbnailRevision.isEmpty ? nil :
+            TrackerTabletLink.thumbnailURL(
+                trackerURLPrefix: trackerURLPrefix,
+                tabletName: AppleDeviceIdentity.displayName,
+                streamSessionID: stream.sessionId
+            )
+        return CaltopoCameraMetadata(
+            externalURL: tabletURL,
+            thumbnailURL: thumbnailURL
+        )
+    }
+
+    func capturedVideoURL(matching designators: [String]) -> URL? {
+        let normalized = Set(
+            designators
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+        )
+        guard !normalized.isEmpty else { return nil }
+        if let recording = managedVideoRecordingsBySessionID.values
+                  .sorted(by: { $0.recordedAt > $1.recordedAt })
+                  .first(where: {
+                      normalized.contains(
+                          $0.droneDesignator
+                              .trimmingCharacters(in: .whitespacesAndNewlines)
+                              .lowercased()
+                      )
+                  }) {
+            return TrackerTabletLink.streamShortURL(
+                trackerURLPrefix: trackerURLPrefix,
+                tabletName: AppleDeviceIdentity.displayName,
+                videoStream: recording.droneDesignator
+            )
+        }
+        guard UserDefaults.standard.bool(forKey: "video.captureStreams"),
+              let live = managedVideoStreams.first(where: {
+                  $0.mediaKind == "live"
+                      && normalized.contains(
+                          $0.droneDesignator
+                              .trimmingCharacters(in: .whitespacesAndNewlines)
+                              .lowercased()
+                      )
+              })
+        else { return nil }
+        return TrackerTabletLink.streamShortURL(
+            trackerURLPrefix: trackerURLPrefix,
+            tabletName: AppleDeviceIdentity.displayName,
+            videoStream: live.droneDesignator
+        )
     }
 
     private func publish(_ event: TrackerCoordinationEvent) {

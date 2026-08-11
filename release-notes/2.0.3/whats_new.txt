@@ -1,4 +1,8 @@
 Latest changes:
+- Added short R2C tablet links that open the authenticated current-session video inventory, including live and recently captured streams with thumbnails.
+- Made live streams available from the tablet link even before telemetry identifies the corresponding drone; CalTopo Live and Archived Tracks receive stream links only after a matching identity is available.
+- Added pilot/VO control for one remote viewer at a time, including explicit decline reasons and higher-priority viewer replacement.
+- Added CalTopo live-track video links and thumbnails for matched active streams, plus archived-track links for matched locally captured video.
 - Added selectable 30 m, 10 m, and maximum-available 1 m USGS terrain downloads on Android and iOS, with conservative storage estimates and cache-limit checks.
 - Improved AGL accuracy by preserving the best available terrain resolution and preferring the finest downloaded terrain data at each aircraft position.
 - Standardized map and live-video telemetry as ATO, AGL, RNG, and HDG in the same order and units on both platforms.

@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Before
 import org.junit.Test
+import org.ncssar.rid2caltopo.app.R2CActivity
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 
@@ -18,6 +19,23 @@ class CaltopoLiveTrackTest {
     private lateinit var originalMapStatus: CaltopoMap.MapStatusListener.mapStatus
     private var originalFolderId: String? = null
     private var originalArchiveFolderId: String? = null
+
+    @Test
+    fun archiveDescription_preservesIdentityAndAddsCapturedVideoLink() {
+        val drone = CtDroneSpec("RID-ARCHIVE")
+        drone.owner = "1SAR7"
+        drone.org = "NCSSAR"
+        drone.model = "M30T"
+
+        assertEquals(
+            "Video Stream: https://r2c-tracker.com/s/QHkyEQ",
+            CaltopoLiveTrack.buildArchiveDescription(
+                drone,
+                "https://r2c-tracker.com/s/QHkyEQ",
+            ),
+        )
+        assertEquals("", CaltopoLiveTrack.buildArchiveDescription(drone))
+    }
 
     @Before
     fun setUp() {
@@ -163,6 +181,53 @@ class CaltopoLiveTrackTest {
 
         assertEquals(listOf("first", "second"), calls)
         assertFalse(calls.contains("late"))
+    }
+
+    @Test
+    fun liveVideoForMappedDrone_addsTabletExternalUrlToPositionReport() {
+        val oldTrackerUrl = CaltopoClient.GetTrackerCoordinationUrlPfx()
+        val oldDeviceName = R2CActivity.MyDeviceName
+        try {
+            CaltopoClient.SetTrackerUrlPfx("https://r2c-tracker.com/ncssar")
+            R2CActivity.MyDeviceName = "Kjt A5 Pro"
+            val peer = fixture.peerCoordinator as FakePeerCoordinator
+            peer.updateManagedVideoStreams(
+                "Training",
+                listOf(ManagedVideoStreamAdvertisement(
+                    "00000000-0000-0000-0000-000000000001",
+                    "NCS1m3",
+                    1920,
+                    1080,
+                    30.0,
+                    4_000_000,
+                    "h264"
+                ))
+            )
+            val drone = CtDroneSpec("RID-VIDEO")
+            setDroneTrackLabel(drone, "NCS1m3_123500Apr28")
+            val liveTrack = CaltopoLiveTrack(drone, 39.1, -121.1, 500.0, 1_000L)
+            liveTrack.mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus.up, null, null)
+
+            liveTrack.setLocalOwner(true)
+            val callback = CaltopoOp(null).apply {
+                responseCode = 200
+                response = "fake"
+                responseJson = org.json.JSONObject().put("id", "live-video-test")
+                setOperationIsDone(true)
+            }
+            startLiveTrackCompleteMethod().invoke(liveTrack, callback)
+
+            val point = fixture.calTopoSessionGateway.snapshotOperations()
+                .first { it.kind == "addLiveTrackPoint" }
+            assertEquals(
+                "https://r2c-tracker.com/t/Bz2DZg",
+                point.payload?.getString("cameraExternalUrl")
+            )
+            assertFalse(point.payload?.has("cameraThumbnailUrl") == true)
+        } finally {
+            CaltopoClient.SetTrackerUrlPfx(oldTrackerUrl)
+            R2CActivity.MyDeviceName = oldDeviceName
+        }
     }
 
     private fun setDroneTrackLabel(drone: CtDroneSpec, trackLabel: String) {

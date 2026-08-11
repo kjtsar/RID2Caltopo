@@ -85,6 +85,7 @@ import org.ncssar.rid2caltopo.data.PeerCoordinator
 import org.ncssar.rid2caltopo.data.VideoStreamViewRequest
 import org.ncssar.rid2caltopo.data.VideoMediaOffer
 import org.ncssar.rid2caltopo.data.ManagedVideoMediaPeer
+import org.ncssar.rid2caltopo.data.ManagedVideoStreamAdvertisement
 import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
 import org.ncssar.rid2caltopo.notam.NotamCenter
@@ -109,6 +110,9 @@ import org.ncssar.rid2caltopo.ui.SpokenWarningKind
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.ncssar.rid2caltopo.video.ManagedVideoStreamPresence
+import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog
+import org.ncssar.rid2caltopo.video.ManagedVideoThumbnailStore
+import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge
 import org.ncssar.rid2caltopo.video.nominalManagedVideoSourceFps
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.opendroneid.android.Constants
@@ -124,6 +128,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 private const val EXTRA_OPEN_STREAMS_QUALIFICATION =
@@ -181,6 +186,7 @@ private fun BluetoothDisabledDialog(
 @Composable
 private fun VideoStreamRequestDialog(
     request: VideoStreamViewRequest,
+    activeRequesterEmail: String?,
     preflightRouteKind: String?,
     estimatedUplinkBps: Long?,
     preflightFailure: String?,
@@ -207,6 +213,12 @@ private fun VideoStreamRequestDialog(
     } else {
         "Source details pending"
     }
+    val activeViewerWarning = if (!activeRequesterEmail.isNullOrBlank()) {
+        "The app is already streaming to $activeRequesterEmail. " +
+            "Starting this request will redirect that viewer.\n\n"
+    } else {
+        ""
+    }
     val qualityChoices = videoQualityChoices(request, estimatedUplinkBps)
     val emergencyFallback = qualityChoices.firstOrNull {
         it.capacity == LinkCapacity.FALLBACK
@@ -228,6 +240,7 @@ private fun VideoStreamRequestDialog(
                     "Incident: ${request.incidentName.ifBlank { "Not specified" }}\n" +
                 "Drone: ${request.droneDesignator.ifBlank { "Not specified" }}\n" +
                     "Source: $sourceDescription\n\n" +
+                    activeViewerWarning +
                     when {
                         !preflightFailure.isNullOrBlank() ->
                             "Link test unavailable: $preflightFailure\n\n" +
@@ -416,6 +429,7 @@ class R2CActivity :
     private var pendingVideoPreflightFailure by mutableStateOf<String?>(null)
     private val approvedVideoSelections = linkedMapOf<String, ApprovedVideoSelection>()
     private var managedVideoMediaPeer: ManagedVideoMediaPeer? = null
+    private var managedVideoRecordingDecoderSessionId: Long? = null
     private var activeRemoteVideoRequest by mutableStateOf<VideoStreamViewRequest?>(null)
     private var activeRemoteVideoSelection: ApprovedVideoSelection? = null
     private var activeRemoteVideoOfferSdp: String? = null
@@ -766,34 +780,35 @@ class R2CActivity :
                     }
                 }
                 LaunchedEffect(Unit) {
-                    StreamRegistry.streams.collect { streams ->
+                    while (isActive) {
+                        val streams = StreamRegistry.streams.value
+                        maintainManagedVideoSource(streams)
+                        val recordings = ManagedVideoSessionRecordingCatalog.snapshot(
+                            applicationContext
+                        )
+                        var advertisements = ManagedVideoStreamPresence.snapshot(
+                            streams,
+                            streamsViewModel::managedVideoSourceInfo,
+                            streamsViewModel::hasRecentManagedVideoFrame,
+                            recordings,
+                            ManagedVideoThumbnailStore::get,
+                        )
+                        if (activeRemoteVideoRequest == null) {
+                            refreshManagedVideoThumbnails(advertisements)
+                            advertisements = ManagedVideoStreamPresence.snapshot(
+                                streams,
+                                streamsViewModel::managedVideoSourceInfo,
+                                streamsViewModel::hasRecentManagedVideoFrame,
+                                recordings,
+                                ManagedVideoThumbnailStore::get,
+                            )
+                        }
                         R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
                             .updateManagedVideoStreams(
                                 CaltopoClient.GetIncident(),
-                                ManagedVideoStreamPresence.snapshot(
-                                    streams,
-                                    streamsViewModel::managedVideoSourceInfo,
-                                    streamsViewModel::hasRecentManagedVideoFrame,
-                                ),
+                                advertisements,
                             )
-                        maintainManagedVideoSource(streams)
-                        while (StreamRegistry.streams.value.values.any {
-                                it.state == org.ncssar.rid2caltopo.video.StreamState.LIVE &&
-                                    !it.isLocalPlayback
-                            }) {
-                            delay(2_000L)
-                            val refreshedStreams = StreamRegistry.streams.value
-                            maintainManagedVideoSource(refreshedStreams)
-                            R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
-                                .updateManagedVideoStreams(
-                                    CaltopoClient.GetIncident(),
-                                    ManagedVideoStreamPresence.snapshot(
-                                        refreshedStreams,
-                                        streamsViewModel::managedVideoSourceInfo,
-                                        streamsViewModel::hasRecentManagedVideoFrame,
-                                    ),
-                                )
-                        }
+                        delay(5_000L)
                     }
                 }
                 when (activeScreen) {
@@ -911,6 +926,7 @@ class R2CActivity :
                 }?.let { request ->
                     VideoStreamRequestDialog(
                         request = request,
+                        activeRequesterEmail = currentRemoteVideoRequesterEmail(),
                         preflightRouteKind = pendingVideoPreflightRouteKind,
                         estimatedUplinkBps = pendingVideoPreflightBps,
                         preflightFailure = pendingVideoPreflightFailure,
@@ -921,6 +937,7 @@ class R2CActivity :
                                     "quality=${choice.width}x${choice.height}@${choice.fps} " +
                                     "bitrate=${choice.bitrateBps}",
                             )
+                            redirectActiveManagedVideo(request.requesterEmail)
                             approvedVideoSelections[request.requestId] =
                                 ApprovedVideoSelection(request, choice)
                             R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
@@ -1525,6 +1542,7 @@ class R2CActivity :
             if (activeRemoteVideoRequest?.requestId == requestId) {
                 managedVideoMediaPeer?.close()
                 managedVideoMediaPeer = null
+                stopManagedVideoRecordingDecoder()
                 setVolumeControlStream(AudioManager.STREAM_ALARM)
                 activeRemoteVideoRequest = null
                 activeRemoteVideoSelection = null
@@ -1563,7 +1581,20 @@ class R2CActivity :
                     "Replacing media peer after browser reconnect request=${offer.requestId}",
                 )
             }
-            val sessionId = streamsViewModel.managedVideoRenderSessionId(
+            val recording = ManagedVideoSessionRecordingCatalog.find(
+                applicationContext,
+                approved.request.streamSessionId,
+            )
+            stopManagedVideoRecordingDecoder()
+            val sessionId = recording?.let {
+                FfmpegBridge.startRender(
+                    it.droneDesignator,
+                    it.file.toURI().toString(),
+                ).takeIf { decoderSessionId -> decoderSessionId > 0L }
+                    ?.also { decoderSessionId ->
+                        managedVideoRecordingDecoderSessionId = decoderSessionId
+                    }
+            } ?: streamsViewModel.managedVideoRenderSessionId(
                 approved.request.droneDesignator,
             )
             if (sessionId == null) {
@@ -1610,6 +1641,7 @@ class R2CActivity :
                         ) {
                             approvedVideoSelections.remove(requestId)
                             managedVideoMediaPeer = null
+                            stopManagedVideoRecordingDecoder()
                             activeRemoteVideoRequest = null
                             activeRemoteVideoSelection = null
                             activeRemoteVideoOfferSdp = null
@@ -1653,11 +1685,17 @@ class R2CActivity :
                     withContext(Dispatchers.Main) {
                         if (managedVideoMediaPeer === peer) {
                             managedVideoMediaPeer = null
+                            stopManagedVideoRecordingDecoder()
                         }
                     }
                 }
             }
         }
+    }
+
+    private fun stopManagedVideoRecordingDecoder() {
+        managedVideoRecordingDecoderSessionId?.let(FfmpegBridge::stop)
+        managedVideoRecordingDecoderSessionId = null
     }
 
     private fun terminateManagedVideo(reason: String = "Pilot terminated stream") {
@@ -1666,6 +1704,7 @@ class R2CActivity :
         managedVideoSourceRecoveryJob = null
         managedVideoMediaPeer?.close()
         managedVideoMediaPeer = null
+        stopManagedVideoRecordingDecoder()
         activeRemoteVideoRequest = null
         activeRemoteVideoSelection = null
         activeRemoteVideoOfferSdp = null
@@ -1678,12 +1717,74 @@ class R2CActivity :
             .sendVideoStreamTerminated(requestId, reason)
     }
 
+    private fun currentRemoteVideoRequesterEmail(): String? =
+        activeRemoteVideoRequest?.requesterEmail
+            ?: approvedVideoSelections.values.firstOrNull()?.request?.requesterEmail
+
+    private fun redirectActiveManagedVideo(replacementRequesterEmail: String) {
+        val reason = "Stream redirected to $replacementRequesterEmail"
+        val activeRequestId = activeRemoteVideoRequest?.requestId
+        if (activeRequestId != null) {
+            terminateManagedVideo(reason)
+        }
+        val coordinator = R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+        val awaitingMedia = approvedVideoSelections.keys
+            .filter { it != activeRequestId }
+            .toList()
+        awaitingMedia.forEach { requestId ->
+            approvedVideoSelections.remove(requestId)
+            coordinator.sendVideoStreamTerminated(requestId, reason)
+        }
+    }
+
+    private suspend fun refreshManagedVideoThumbnails(
+        advertisements: List<ManagedVideoStreamAdvertisement>,
+    ) {
+        for (advertisement in advertisements.take(8)) {
+            if (ManagedVideoThumbnailStore.get(advertisement.sessionId) != null) continue
+            val recording = if (advertisement.mediaKind == "recording") {
+                ManagedVideoSessionRecordingCatalog.find(
+                    applicationContext,
+                    advertisement.sessionId,
+                )
+            } else {
+                null
+            }
+            val ownedDecoder = recording?.let {
+                FfmpegBridge.startRender(
+                    it.droneDesignator,
+                    it.file.toURI().toString(),
+                ).takeIf { sessionId -> sessionId > 0L }
+            }
+            val decoderSessionId = ownedDecoder
+                ?: streamsViewModel.managedVideoRenderSessionId(
+                    advertisement.droneDesignator
+                )
+                ?: continue
+            try {
+                ManagedVideoThumbnailStore.capture(
+                    advertisement.sessionId,
+                    decoderSessionId,
+                )
+            } finally {
+                if (ownedDecoder != null) {
+                    FfmpegBridge.stop(ownedDecoder)
+                }
+            }
+        }
+    }
+
     private fun maintainManagedVideoSource(
         streams: Map<String, org.ncssar.rid2caltopo.video.StreamInfo>,
     ) {
         val request = activeRemoteVideoRequest
         val peer = managedVideoMediaPeer
         if (request == null || peer == null) {
+            managedVideoSourceRecoveryJob?.cancel()
+            managedVideoSourceRecoveryJob = null
+            return
+        }
+        if (managedVideoRecordingDecoderSessionId != null) {
             managedVideoSourceRecoveryJob?.cancel()
             managedVideoSourceRecoveryJob = null
             return

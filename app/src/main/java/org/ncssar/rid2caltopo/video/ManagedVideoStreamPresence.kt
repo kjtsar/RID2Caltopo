@@ -2,16 +2,24 @@ package org.ncssar.rid2caltopo.video
 
 import org.ncssar.rid2caltopo.data.ManagedVideoStreamAdvertisement
 import java.util.UUID
+import android.util.Base64
 
 object ManagedVideoStreamPresence {
     private val sessionIdBySourcePath = linkedMapOf<String, String>()
+    private var currentLiveDesignators = emptySet<String>()
 
     @Synchronized
     fun snapshot(
         streams: Map<String, StreamInfo>,
         sourceInfoProvider: (String) -> org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge.VideoSourceInfo? = { null },
         hasRecentFrame: (String) -> Boolean = { true },
+        recordings: List<ManagedVideoSessionRecording> = emptyList(),
+        thumbnailProvider: (String) -> ManagedVideoThumbnail? = { null },
     ): List<ManagedVideoStreamAdvertisement> {
+        // Stream inventory is intentionally independent of telemetry binding. A camera
+        // commonly starts publishing before its drone emits Remote ID; the tablet-level
+        // R2C link must expose it immediately, while track metadata is added only after
+        // a matching telemetry identity becomes available.
         val live = streams.values
             .filter {
                 it.state == StreamState.LIVE &&
@@ -21,19 +29,36 @@ object ManagedVideoStreamPresence {
             .sortedBy { it.designator.lowercase() }
             .take(4)
         val livePaths = live.mapTo(linkedSetOf()) { it.sourcePath }
+        currentLiveDesignators = live
+            .map { it.designator.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .toSet()
         sessionIdBySourcePath.keys.retainAll(livePaths)
-        return live.map { stream ->
+        val liveAdvertisements = live.map { stream ->
             val source = sourceInfoProvider(stream.designator)
+            val sessionId = sessionIdBySourcePath.getOrPut(stream.sourcePath) {
+                UUID.randomUUID().toString()
+            }
+            val thumbnail = thumbnailProvider(sessionId)
             ManagedVideoStreamAdvertisement(
-                sessionIdBySourcePath.getOrPut(stream.sourcePath) {
-                    UUID.randomUUID().toString()
-                },
+                sessionId,
                 stream.designator,
                 source?.width ?: 0,
                 source?.height ?: 0,
                 nominalManagedVideoSourceFps(source?.fps ?: 0.0),
                 source?.bitrateBps ?: 0,
                 source?.codec ?: "",
+                "live",
+                null,
+                0L,
+                thumbnail?.revision.orEmpty(),
+                thumbnail?.jpegBytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
+            )
+        }
+        return liveAdvertisements + recordings.map { recording ->
+            ManagedVideoSessionRecordingCatalog.advertisement(
+                recording,
+                thumbnailProvider(recording.sessionId),
             )
         }
     }
@@ -41,7 +66,22 @@ object ManagedVideoStreamPresence {
     @Synchronized
     internal fun resetForTests() {
         sessionIdBySourcePath.clear()
+        currentLiveDesignators = emptySet()
     }
+
+    @JvmStatic
+    @Synchronized
+    fun hasLiveDesignator(vararg candidates: String): Boolean = candidates.any {
+        it.trim().lowercase() in currentLiveDesignators
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun matchingLiveDesignator(vararg candidates: String): String? = candidates
+        .map { it.trim() }
+        .firstOrNull {
+            it.isNotEmpty() && it.lowercase() in currentLiveDesignators
+        }
 }
 
 /**

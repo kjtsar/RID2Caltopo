@@ -660,13 +660,17 @@ final class RIDTrackViewModel: ObservableObject {
 
     private func enqueuePublication(remoteID: String, label: String, observation: RidObservation) {
         let previous = publicationChains[remoteID]
+        let cameraMetadata = peerCoordinator?.caltopoCameraMetadata(
+            droneDesignator: label
+        )
         let task = Task { [caltopoPublisher] in
             _ = await previous?.value
             guard !Task.isCancelled else { return }
             await caltopoPublisher.publish(
                 remoteID: remoteID,
                 label: label,
-                observation: observation
+                observation: observation,
+                cameraMetadata: cameraMetadata
             )
         }
         publicationChains[remoteID] = task
@@ -704,7 +708,16 @@ final class RIDTrackViewModel: ObservableObject {
         ownershipActivationTasks.removeValue(forKey: remoteID)?.cancel()
         let publication = publicationChains.removeValue(forKey: remoteID)
         _ = await publication?.value
-        await caltopoPublisher.finish(remoteID: remoteID)
+        let identity = identityProvider?(remoteID)
+        let videoURL = peerCoordinator?.capturedVideoURL(matching: [
+            identity?.mappedID ?? "",
+            remoteID,
+        ])
+        let description = CaltopoArchiveDescription.build(capturedVideoURL: videoURL)
+        await caltopoPublisher.finish(
+            remoteID: remoteID,
+            description: description
+        )
     }
 }
 

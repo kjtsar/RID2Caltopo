@@ -12,6 +12,7 @@ import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog
 
 object MediaMTXRecordingSync {
     private const val TAG = "MediaMTXRecordingSync"
@@ -81,6 +82,11 @@ object MediaMTXRecordingSync {
                 sourceFile = mergedFile,
                 targetDir = targetRoot,
                 targetName = archiveRecordingFileName(streamPath, fragments.first()),
+            )
+            ManagedVideoSessionRecordingCatalog.retain(
+                context = context,
+                mergedFile = mergedFile,
+                streamPath = streamPath,
             )
             fragments.forEach { fragment ->
                 if (!fragment.delete()) {

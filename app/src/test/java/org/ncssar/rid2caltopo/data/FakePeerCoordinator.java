@@ -32,6 +32,7 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     @NonNull private final List<Event> events = Collections.synchronizedList(new ArrayList<>());
     @NonNull private final List<R2CMqttManager.PeerState> peers = Collections.synchronizedList(new ArrayList<>());
     @NonNull private final Set<String> locallyOwnedRemoteIds = ConcurrentHashMap.newKeySet();
+    @NonNull private volatile List<ManagedVideoStreamAdvertisement> managedVideoStreams = Collections.emptyList();
 
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
     @Nullable private volatile CoordinationIndicatorListener coordinationIndicatorListener;
@@ -133,6 +134,19 @@ public final class FakePeerCoordinator implements PeerCoordinator {
         if (listener != null) {
             listener.onCoordinationIndicatorStateChanged(getCoordinationIndicatorState());
         }
+    }
+
+    @Override
+    public void updateManagedVideoStreams(
+            @NonNull String incidentName,
+            @NonNull List<ManagedVideoStreamAdvertisement> streams) {
+        managedVideoStreams = Collections.unmodifiableList(new ArrayList<>(streams));
+    }
+
+    @NonNull
+    @Override
+    public List<ManagedVideoStreamAdvertisement> getManagedVideoStreams() {
+        return managedVideoStreams;
     }
 
     @NonNull

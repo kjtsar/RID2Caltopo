@@ -1,6 +1,16 @@
 import CryptoKit
 import Foundation
 
+public struct CaltopoCameraMetadata: Equatable, Sendable {
+    public let externalURL: URL
+    public let thumbnailURL: URL?
+
+    public init(externalURL: URL, thumbnailURL: URL? = nil) {
+        self.externalURL = externalURL
+        self.thumbnailURL = thumbnailURL
+    }
+}
+
 public struct CaltopoLiveConfiguration: Sendable, Equatable {
     public let domainAndPort: String
     public let mapID: String
@@ -161,8 +171,16 @@ public actor CaltopoLiveClient {
         return id
     }
 
-    public func publishPoint(remoteID: String, observation: RidObservation) async throws {
-        _ = try await perform(makePointRequest(remoteID: remoteID, observation: observation))
+    public func publishPoint(
+        remoteID: String,
+        observation: RidObservation,
+        cameraMetadata: CaltopoCameraMetadata? = nil
+    ) async throws {
+        _ = try await perform(makePointRequest(
+            remoteID: remoteID,
+            observation: observation,
+            cameraMetadata: cameraMetadata
+        ))
     }
 
     public func stopLiveTrack(liveTrackID: String, now: Date = Date()) async throws {
@@ -209,6 +227,7 @@ public actor CaltopoLiveClient {
         label: String,
         observations: [RidObservation],
         folderID: String,
+        description: String = "",
         now: Date = Date()
     ) async throws {
         guard !observations.isEmpty else {
@@ -220,6 +239,7 @@ public actor CaltopoLiveClient {
             label: label,
             observations: observations,
             folderID: folderID,
+            description: description,
             now: now
         ))
         try await stopLiveTrack(liveTrackID: liveTrackID, now: now)
@@ -488,6 +508,7 @@ public actor CaltopoLiveClient {
         label: String,
         observations: [RidObservation],
         folderID: String,
+        description: String = "",
         now: Date
     ) throws -> URLRequest {
         guard !liveTrackID.isEmpty else { throw CaltopoLiveClientError.missingLiveTrackID }
@@ -495,22 +516,26 @@ public actor CaltopoLiveClient {
         let coordinates: [[Double]] = observations.map {
             [$0.longitude, $0.latitude, $0.altitudeMeters ?? -1_000]
         }
+        var properties: [String: Any] = [
+            "class": "Shape",
+            "title": label,
+            "folderId": folderID,
+            "stroke": "#ff00ff",
+            "stroke-width": 2,
+            "stroke-opacity": 0.5,
+            "pattern": "solid",
+            "updated": String(updated),
+            "-updated-on": String(updated),
+        ]
+        if !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            properties["description"] = description
+        }
         return try makeSignedPostRequest(
             path: "/api/v1/map/\(configuration.mapID)/Shape/\(liveTrackID)",
             object: [
                 "id": liveTrackID,
                 "type": "Feature",
-                "properties": [
-                    "class": "Shape",
-                    "title": label,
-                    "folderId": folderID,
-                    "stroke": "#ff00ff",
-                    "stroke-width": 2,
-                    "stroke-opacity": 0.5,
-                    "pattern": "solid",
-                    "updated": String(updated),
-                    "-updated-on": String(updated),
-                ],
+                "properties": properties,
                 "geometry": [
                     "type": "LineString",
                     "coordinates": coordinates,
@@ -547,7 +572,11 @@ public actor CaltopoLiveClient {
         return request
     }
 
-    func makePointRequest(remoteID: String, observation: RidObservation) throws -> URLRequest {
+    func makePointRequest(
+        remoteID: String,
+        observation: RidObservation,
+        cameraMetadata: CaltopoCameraMetadata? = nil
+    ) throws -> URLRequest {
         var components = URLComponents()
         components.scheme = "https"
         components.host = hostAndPort.host
@@ -569,6 +598,15 @@ public actor CaltopoLiveClient {
         if !aircraft.isEmpty,
            let data = try? JSONSerialization.data(withJSONObject: aircraft, options: [.sortedKeys]) {
             queryItems.append(URLQueryItem(name: "aircraft", value: String(decoding: data, as: UTF8.self)))
+        }
+        if let cameraMetadata {
+            var camera = ["external_url": cameraMetadata.externalURL.absoluteString]
+            if let thumbnailURL = cameraMetadata.thumbnailURL {
+                camera["thumbnail_url"] = thumbnailURL.absoluteString
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: camera, options: [.sortedKeys]) {
+                queryItems.append(URLQueryItem(name: "camera", value: String(decoding: data, as: UTF8.self)))
+            }
         }
         components.queryItems = queryItems
         guard let url = components.url else { throw CaltopoLiveClientError.invalidURL }

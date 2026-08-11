@@ -413,6 +413,20 @@ final class AppleVideoFrameSource: ObservableObject {
         )
     }
 
+    func startPlayback(url: URL) {
+        stop()
+        currentURL = url
+        currentPath = url.lastPathComponent
+        streamDesignator = url.deletingLastPathComponent().lastPathComponent
+        renderDelayMilliseconds = nil
+        decoderDelayMilliseconds = nil
+        lagEstimator.reset()
+        recoveryPolicy.reset(at: Self.now)
+        decoderSelectionPolicy.reset()
+        installPlayer(url: url, beginsRecoveryAttempt: false)
+        AppleLog.info("Video", "Local managed-video playback requested file=\(url.lastPathComponent)")
+    }
+
     private func installPreferredDecoder(hlsURL: URL) {
         tearDownPlayer()
         tearDownNativeDecoder()

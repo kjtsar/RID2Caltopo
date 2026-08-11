@@ -252,7 +252,7 @@ public final class OwnershipTestPeerCoordinator implements PeerCoordinator {
         if (startedTrackRemoteIds.add(remoteId)) {
             gateway.startLiveTrack(deviceId, remoteId, null, null, null, null);
         }
-        gateway.addLiveTrackPoint(deviceId, lat, lng, eleMeters, null, null);
+        gateway.addLiveTrackPoint(deviceId, lat, lng, eleMeters, null, null, null);
         return true;
     }
 

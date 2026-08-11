@@ -306,6 +306,12 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         );
     }
 
+    @NonNull
+    @Override
+    public List<ManagedVideoStreamAdvertisement> getManagedVideoStreams() {
+        return managedVideoStreams;
+    }
+
     @Override
     public void respondToVideoStreamRequest(
             @NonNull String requestId,

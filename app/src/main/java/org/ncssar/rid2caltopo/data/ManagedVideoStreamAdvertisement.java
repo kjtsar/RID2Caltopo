@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.data;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 public final class ManagedVideoStreamAdvertisement {
     @NonNull public final String sessionId;
@@ -10,6 +11,11 @@ public final class ManagedVideoStreamAdvertisement {
     public final double sourceFps;
     public final long sourceBitrateBps;
     @NonNull public final String sourceCodec;
+    @NonNull public final String mediaKind;
+    @Nullable public final String recordedAt;
+    public final long durationMs;
+    @NonNull public final String thumbnailRevision;
+    @Nullable public final String thumbnailJpegBase64;
 
     public ManagedVideoStreamAdvertisement(
             @NonNull String sessionId,
@@ -19,6 +25,23 @@ public final class ManagedVideoStreamAdvertisement {
             double sourceFps,
             long sourceBitrateBps,
             @NonNull String sourceCodec) {
+        this(sessionId, droneDesignator, sourceWidth, sourceHeight, sourceFps,
+                sourceBitrateBps, sourceCodec, "live", null, 0L, "", null);
+    }
+
+    public ManagedVideoStreamAdvertisement(
+            @NonNull String sessionId,
+            @NonNull String droneDesignator,
+            int sourceWidth,
+            int sourceHeight,
+            double sourceFps,
+            long sourceBitrateBps,
+            @NonNull String sourceCodec,
+            @NonNull String mediaKind,
+            @Nullable String recordedAt,
+            long durationMs,
+            @NonNull String thumbnailRevision,
+            @Nullable String thumbnailJpegBase64) {
         this.sessionId = sessionId;
         this.droneDesignator = droneDesignator;
         this.sourceWidth = sourceWidth;
@@ -26,5 +49,10 @@ public final class ManagedVideoStreamAdvertisement {
         this.sourceFps = sourceFps;
         this.sourceBitrateBps = sourceBitrateBps;
         this.sourceCodec = sourceCodec;
+        this.mediaKind = mediaKind;
+        this.recordedAt = recordedAt;
+        this.durationMs = durationMs;
+        this.thumbnailRevision = thumbnailRevision;
+        this.thumbnailJpegBase64 = thumbnailJpegBase64;
     }
 }

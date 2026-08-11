@@ -11,10 +11,14 @@ package org.ncssar.rid2caltopo.data;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.ncssar.rid2caltopo.app.R2CActivity;
+import org.ncssar.rid2caltopo.app.R2CApplication;
+import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecording;
+import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog;
+import org.ncssar.rid2caltopo.video.ManagedVideoStreamPresence;
 
 import org.opendroneid.android.data.Util;
 
-import java.util.ArrayList;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Locale;
@@ -190,15 +194,55 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
     @NonNull
     public static String buildArchiveDescription(@Nullable CtDroneSpec droneSpec) {
+        return "";
+    }
+
+    @NonNull
+    public static String buildArchiveDescription(
+            @Nullable CtDroneSpec droneSpec,
+            @Nullable String capturedVideoUrl
+    ) {
         if (droneSpec == null) return "";
-        ArrayList<String> lines = new ArrayList<>(3);
-        String owner = droneSpec.getOwner().trim();
-        String org = droneSpec.getOrg().trim();
-        String model = droneSpec.getModel().trim();
-        if (!owner.isEmpty()) lines.add("Pilot Callsign: " + owner);
-        if (!org.isEmpty()) lines.add("Pilot Organization: " + org);
-        if (!model.isEmpty()) lines.add("Drone Model: " + model);
-        return String.join("\n", lines);
+        String videoUrl = capturedVideoUrl == null ? "" : capturedVideoUrl.trim();
+        return videoUrl.isEmpty() ? "" : "Video Stream: " + videoUrl;
+    }
+
+    @Nullable
+    private static String capturedVideoUrl(@NonNull CtDroneSpec droneSpec) {
+        if (R2CApplication.getAppCtxt() == null) return null;
+        ManagedVideoSessionRecording recording =
+                ManagedVideoSessionRecordingCatalog.findLatestForDesignator(
+                        R2CApplication.getAppCtxt(),
+                        droneSpec.getMappedId(),
+                        droneSpec.getRemoteId(),
+                        droneSpec.trackLabel().split("_", 2)[0]
+                );
+        if (recording == null) return null;
+        String videoDesignator = recording.getDroneDesignator();
+        return TrackerTabletLink.streamShortUrl(
+                CaltopoClient.GetTrackerCoordinationUrlPfx(),
+                R2CActivity.MyDeviceName,
+                videoDesignator
+        );
+    }
+
+    @Nullable
+    private static String activeCapturedVideoUrl(@NonNull CtDroneSpec droneSpec) {
+        if (!CaltopoClient.GetCaptureVideoStreamsFlag()) return null;
+        String mappedId = droneSpec.getMappedId();
+        String remoteId = droneSpec.getRemoteId();
+        String label = droneSpec.trackLabel().split("_", 2)[0];
+        String designator = ManagedVideoStreamPresence.matchingLiveDesignator(
+                mappedId,
+                remoteId,
+                label
+        );
+        if (designator == null) return null;
+        return TrackerTabletLink.streamShortUrl(
+                CaltopoClient.GetTrackerCoordinationUrlPfx(),
+                R2CActivity.MyDeviceName,
+                designator
+        );
     }
 
     /**
@@ -379,7 +423,13 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             jsonArray.put(pointArray);
         }
         String archiveFolderId = CaltopoMap.GetArchiveFolderId();
-        String archiveDescription = buildArchiveDescription(droneSpec);
+        String capturedVideoUrl = capturedVideoUrl(droneSpec);
+        String archiveDescription = buildArchiveDescription(
+                droneSpec,
+                capturedVideoUrl != null
+                        ? capturedVideoUrl
+                        : activeCapturedVideoUrl(droneSpec)
+        );
         CTDebug(TAG, String.format(Locale.US, "archiveTrackOnCaltopo(%s): Archiving track with %d points.",
                 trackLabel, size));
         if (null != startLiveTrackOp && startLiveTrackOp.isDone() && startLiveTrackOp.success()) {
@@ -716,11 +766,40 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                         myRemoteId, linePointsSentCount, point.lat, point.lng, (long)point.ele));
                 runtime.getCalTopoSessionGateway()
                         .addLiveTrackPoint(myRemoteId, point.lat, point.lng, point.ele, point.telemetry,
+                                activeVideoCameraMetadata(),
                                 this::forwardNextWaypoints);
             }
         } catch (Exception e) {
             CTError(TAG, "forwardNextWaypoints(): addLiveTrackPoint() raised: ", e);
         }
+    }
+
+    @Nullable
+    private CaltopoCameraMetadata activeVideoCameraMetadata() {
+        String mappedId = droneSpec.getMappedId().trim();
+        if (mappedId.isEmpty()) return null;
+        ManagedVideoStreamAdvertisement publishingVideo = runtime.getPeerCoordinator()
+                .getManagedVideoStreams()
+                .stream()
+                .filter(stream -> "live".equals(stream.mediaKind))
+                .filter(stream -> stream.droneDesignator.trim().equalsIgnoreCase(mappedId))
+                .findFirst()
+                .orElse(null);
+        if (publishingVideo == null) return null;
+        String tabletUrl = TrackerTabletLink.shortUrl(
+                CaltopoClient.GetTrackerCoordinationUrlPfx(),
+                R2CActivity.MyDeviceName
+        );
+        String thumbnailUrl = publishingVideo.thumbnailRevision.isEmpty()
+                ? null
+                : TrackerTabletLink.thumbnailUrl(
+                        CaltopoClient.GetTrackerCoordinationUrlPfx(),
+                        R2CActivity.MyDeviceName,
+                        publishingVideo.sessionId
+                );
+        return tabletUrl == null
+                ? null
+                : new CaltopoCameraMetadata(tabletUrl, thumbnailUrl);
     }
 
     private boolean isDuplicateOfPreviousPoint(

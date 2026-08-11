@@ -1,4 +1,5 @@
 Latest changes:
+- Fixed iPad remote viewing so gathered WebRTC network candidates are preserved in the one-shot media answer, with clearer ICE diagnostics when a routed connection cannot be established.
 - Added short R2C tablet links that open the authenticated current-session video inventory, including live and recently captured streams with thumbnails.
 - Made live streams available from the tablet link even before telemetry identifies the corresponding drone; CalTopo Live and Archived Tracks receive stream links only after a matching identity is available.
 - Added pilot/VO control for one remote viewer at a time, including explicit decline reasons and higher-priority viewer replacement.

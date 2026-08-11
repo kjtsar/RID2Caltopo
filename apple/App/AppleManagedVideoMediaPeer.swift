@@ -53,6 +53,7 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
     private var lastBytesSent: Int64 = 0
     private var lastFramesSent: Int64 = 0
     private var lastDiagnosticAt: CFTimeInterval = 0
+    private var localICECandidates: [RTCIceCandidate] = []
 
     init(
         answerSink: @escaping AnswerSink,
@@ -173,6 +174,7 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         selectedFPS = max(1, fps)
         selectedBitrateBps = max(150_000, bitrateBps)
         answerSent = false
+        localICECandidates.removeAll(keepingCapacity: true)
 
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
@@ -366,8 +368,32 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
               let answer = peer.localDescription,
               !answer.sdp.isEmpty
         else { return }
+        let completeAnswer = ManagedVideoSDP.withICECandidates(
+            answer.sdp,
+            candidates: localICECandidates.map {
+                ManagedVideoICECandidate(
+                    sdp: $0.sdp,
+                    mediaLineIndex: $0.sdpMLineIndex
+                )
+            }
+        )
+        guard ManagedVideoSDP.hasRoutableICECandidate(completeAnswer) else {
+            AppleLog.debug(
+                "VideoMedia",
+                "request=\(requestID) answer awaiting routed ICE candidate "
+                    + "gathering=\(String(describing: peer.iceGatheringState)) "
+                    + "gathered=\(localICECandidates.count)"
+            )
+            return
+        }
         answerSent = true
-        answerSink(requestID, answer.sdp)
+        AppleLog.info(
+            "VideoMedia",
+            "request=\(requestID) sending answer "
+                + "gathering=\(String(describing: peer.iceGatheringState)) "
+                + "gathered=\(localICECandidates.count)"
+        )
+        answerSink(requestID, completeAnswer)
     }
 
     private func startStatsOnQueue() {
@@ -518,6 +544,7 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         lastFramesSent = 0
         lastDiagnosticAt = 0
         answerSent = false
+        localICECandidates.removeAll(keepingCapacity: false)
     }
 
     private static func errorSuffix(_ error: Error?) -> String {
@@ -542,6 +569,10 @@ extension AppleManagedVideoMediaPeer: RTCPeerConnectionDelegate {
         queue.async { [weak self] in
             guard let self else { return }
             guard self.peer != nil else { return }
+            AppleLog.info(
+                "VideoMedia",
+                "request=\(self.requestID) ICE state=\(String(describing: newState))"
+            )
             if newState == .connected || newState == .completed {
                 self.startStatsOnQueue()
             } else if newState == .failed || newState == .closed {
@@ -551,6 +582,10 @@ extension AppleManagedVideoMediaPeer: RTCPeerConnectionDelegate {
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        AppleLog.debug(
+            "VideoMedia",
+            "request=\(requestID) ICE gathering=\(String(describing: newState))"
+        )
         guard newState == .complete else { return }
         queue.async { [weak self] in self?.maybeSendAnswerOnQueue() }
     }
@@ -559,11 +594,24 @@ extension AppleManagedVideoMediaPeer: RTCPeerConnectionDelegate {
         _ peerConnection: RTCPeerConnection,
         didGenerate candidate: RTCIceCandidate
     ) {
-        guard candidate.sdp.contains(" typ srflx ")
-            || candidate.sdp.contains(" typ relay ")
-        else { return }
-        queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-            self?.maybeSendAnswerOnQueue(allowPartialGathering: true)
+        queue.async { [weak self] in
+            guard let self, self.peer != nil else { return }
+            self.localICECandidates.append(candidate)
+            let type = candidate.sdp.contains(" typ relay ")
+                ? "relay"
+                : candidate.sdp.contains(" typ srflx ") ? "srflx" : "host"
+            AppleLog.debug(
+                "VideoMedia",
+                "request=\(self.requestID) gathered \(type) candidate "
+                    + "mline=\(candidate.sdpMLineIndex) "
+                    + "count=\(self.localICECandidates.count)"
+            )
+            guard ManagedVideoSDP.hasRoutableICECandidate(candidate.sdp) else {
+                return
+            }
+            self.queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+                self?.maybeSendAnswerOnQueue(allowPartialGathering: true)
+            }
         }
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}

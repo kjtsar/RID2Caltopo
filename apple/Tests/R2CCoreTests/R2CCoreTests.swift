@@ -2,6 +2,33 @@ import Foundation
 import Testing
 @testable import R2CCore
 
+@Test func managedVideoSDPAddsRoutableCandidateToItsMediaSection() {
+    let answer = """
+    v=0
+    m=video 9 UDP/TLS/RTP/SAVPF 96
+    a=mid:0
+    a=end-of-candidates
+    m=audio 9 UDP/TLS/RTP/SAVPF 111
+    a=mid:1
+    """
+    let candidate = ManagedVideoICECandidate(
+        sdp: "candidate:1 1 udp 1 203.0.113.1 5000 typ srflx raddr 0.0.0.0 rport 0",
+        mediaLineIndex: 0
+    )
+
+    let completed = ManagedVideoSDP.withICECandidates(
+        answer,
+        candidates: [candidate]
+    )
+
+    #expect(completed.contains(
+        "a=candidate:1 1 udp 1 203.0.113.1 5000 typ srflx "
+    ))
+    #expect(completed.range(of: "a=candidate:")!.lowerBound
+        < completed.range(of: "a=end-of-candidates")!.lowerBound)
+    #expect(ManagedVideoSDP.hasRoutableICECandidate(completed))
+}
+
 @Test func managedVideoPresenceRequiresRecentDecodedFrames() {
     #expect(!ManagedVideoPresencePolicy.hasRecentDecodedFrame(
         frameCount: 0,

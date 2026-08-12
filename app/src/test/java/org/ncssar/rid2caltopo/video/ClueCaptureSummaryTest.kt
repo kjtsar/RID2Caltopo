@@ -49,6 +49,18 @@ class ClueCaptureSummaryTest {
     }
 
     @Test
+    fun clueHeading_prefersMostRecentDerivedDroneHeading() {
+        val selection = selectClueHeading(
+            telemetry = null,
+            derivedHeadingDeg = 274.0,
+            ridTrackDeg = 90.0,
+        )
+
+        assertEquals(274.0, selection.headingDeg!!, 0.0)
+        assertEquals("Derived drone heading", selection.sourceLabel)
+    }
+
+    @Test
     fun streamTelemetryDisplayStateUsesPairedMappedIdBeforeStreamDesignator() {
         val streamState = DroneDisplayState(
             headingDeg = 90.0,

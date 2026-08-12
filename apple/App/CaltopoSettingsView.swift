@@ -20,6 +20,7 @@ struct CaltopoSettingsView: View {
     @ObservedObject private var spokenWarnings = AppleSpokenWarningCenter.shared
     @ObservedObject private var profileLifecycle = AppleCaltopoProfileLifecycle.shared
     @AppStorage("video.captureStreams") private var captureStreams = false
+    @AppStorage("video.remoteControlEnabled") private var remoteVideoControlEnabled = false
     @AppStorage(AppleDeviceIdentity.storedNameKey) private var deviceName = AppleDeviceIdentity.displayName
     @State private var showingTeamMaps = false
     @State private var showingImportConfig = false
@@ -167,6 +168,10 @@ struct CaltopoSettingsView: View {
             Section("Video") {
                 Toggle("Capture Streams", isOn: $captureStreams)
                 Text("When enabled, incoming streams are recorded as fMP4 under Files > RID2Caltopo > CapturedStreams. Changing this setting restarts the local media server.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Toggle("Remote Video Control", isOn: $remoteVideoControlEnabled)
+                Text("When enabled, an authenticated requester chooses video quality after the link test without a per-request approval prompt. Only one viewer can use this iPad at a time.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

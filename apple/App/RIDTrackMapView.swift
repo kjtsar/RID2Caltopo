@@ -1194,7 +1194,10 @@ struct RIDTrackMapView: View {
         let captureHeading = OperationalClueGeometry.selectedHeading(
             cameraYawDegrees: session.model.latestCameraYawDegrees,
             streamHeadingDegrees: session.model.latestStreamHeadingDegrees,
-            ridHeadingDegrees: captureObservation.headingDegrees
+            ridHeadingDegrees: captureObservation.headingDegrees,
+            derivedHeadingDegrees: OperationalMapGeometry.travelBearingDegrees(
+                points: captureTrack.points
+            )
         )
         capturingSnapshot = true
         Task {
@@ -1789,7 +1792,10 @@ private struct ClueSubmissionView: View {
                     : OperationalClueGeometry.selectedHeading(
                         cameraYawDegrees: nil,
                         streamHeadingDegrees: nil,
-                        ridHeadingDegrees: observation?.headingDegrees
+                        ridHeadingDegrees: observation?.headingDegrees,
+                        derivedHeadingDegrees: track.flatMap {
+                            OperationalMapGeometry.travelBearingDegrees(points: $0.points)
+                        }
                 )
                 cameraHeadingDegrees = selection.degrees ?? 0
                 cameraHeadingSource = Self.headingSourceLabel(selection)

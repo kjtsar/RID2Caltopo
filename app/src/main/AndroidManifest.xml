@@ -107,6 +107,10 @@
             android:stopWithTask="true"
             android:enabled="true"
             android:exported="false"/>
+        <receiver
+            android:name=".app.AppIdleAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
         <service android:name=".app.MediaMTXService"
             android:stopWithTask="true"
             android:exported="false"

@@ -104,6 +104,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final Pattern CallsignOptModelPattern = Pattern.compile(CALLSIGN_OPT_MODEL_REGEX);
     private static final double EARTH_RADIUS_METERS = 6371008.8;
     private static long MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
+    private static volatile long MostRecentRidMessageTimestampInMsec = System.currentTimeMillis();
     private static long InvalidWaypointCount = 0;
 
     @NonNull private final String remoteId;
@@ -890,6 +891,13 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         mostRecentAircraftMessageMsecTimestamp = Math.max(
                 mostRecentAircraftMessageMsecTimestamp,
                 nowWallMsec);
+        NoteRidMessageReceived(nowWallMsec);
+    }
+
+    public static void NoteRidMessageReceived(long nowWallMsec) {
+        MostRecentRidMessageTimestampInMsec = Math.max(
+                MostRecentRidMessageTimestampInMsec,
+                nowWallMsec);
     }
 
     /** notePeerTelemetryReceived()
@@ -974,6 +982,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     }
     public static long LastWaypointUpdateTimestampMsec() {
         return MostRecentWaypointTimestampInMsec;
+    }
+    public static long LastRidMessageTimestampMsec() {
+        return MostRecentRidMessageTimestampInMsec;
     }
     // ModelAbbreviator()
     //  Take any descriptive sentence as input and abbreviate it by preserving the

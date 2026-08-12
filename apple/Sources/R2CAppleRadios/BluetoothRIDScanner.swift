@@ -59,6 +59,7 @@ private struct BluetoothRIDBridgePacket: Sendable {
 private struct BluetoothRIDPipelineEvent: Sendable {
     let observation: RidObservation?
     let aircraftMessage: RidAircraftMessage?
+    let ridMessageReceivedAt: Date?
     let bridgePacket: BluetoothRIDBridgePacket?
     let decodeError: String?
     let diagnostic: BluetoothRIDIngressDiagnostic?
@@ -99,6 +100,7 @@ private actor BluetoothRIDPacketPipeline {
                 return BluetoothRIDPipelineEvent(
                     observation: nil,
                     aircraftMessage: nil,
+                    ridMessageReceivedAt: nil,
                     bridgePacket: BluetoothRIDBridgePacket(
                         classification: .relayPing,
                         transmitterID: packet.transmitterID,
@@ -159,6 +161,7 @@ private actor BluetoothRIDPacketPipeline {
             return BluetoothRIDPipelineEvent(
                 observation: result.observation,
                 aircraftMessage: aircraftMessage,
+                ridMessageReceivedAt: packet.receivedAt,
                 bridgePacket: bridgePacket,
                 decodeError: nil,
                 diagnostic: diagnosticIfDue(
@@ -172,6 +175,7 @@ private actor BluetoothRIDPacketPipeline {
             return BluetoothRIDPipelineEvent(
                 observation: nil,
                 aircraftMessage: nil,
+                ridMessageReceivedAt: nil,
                 bridgePacket: nil,
                 decodeError: String(describing: error),
                 diagnostic: diagnosticIfDue(
@@ -383,6 +387,7 @@ public final class BluetoothRIDScanner: ObservableObject, RidObservationProvider
 
     public nonisolated let observations: AsyncStream<RidObservation>
     public nonisolated let aircraftMessages: AsyncStream<RidAircraftMessage>
+    public nonisolated let ridMessageTimes: AsyncStream<Date>
 
     @Published public private(set) var state: State = .idle
     @Published public private(set) var observationCount = 0
@@ -399,6 +404,7 @@ public final class BluetoothRIDScanner: ObservableObject, RidObservationProvider
 
     private nonisolated let continuation: AsyncStream<RidObservation>.Continuation
     private nonisolated let aircraftMessageContinuation: AsyncStream<RidAircraftMessage>.Continuation
+    private nonisolated let ridMessageTimeContinuation: AsyncStream<Date>.Continuation
     private let packetContinuation: AsyncStream<BluetoothRIDRawPacket>.Continuation
     private var central: BluetoothRIDCentral!
     private var processingTask: Task<Void, Never>?
@@ -420,6 +426,12 @@ public final class BluetoothRIDScanner: ObservableObject, RidObservationProvider
         )
         aircraftMessages = aircraftMessagePair.stream
         aircraftMessageContinuation = aircraftMessagePair.continuation
+
+        let ridMessageTimePair = AsyncStream<Date>.makeStream(
+            bufferingPolicy: .bufferingNewest(2_048)
+        )
+        ridMessageTimes = ridMessageTimePair.stream
+        ridMessageTimeContinuation = ridMessageTimePair.continuation
 
         let packetPair = AsyncStream<BluetoothRIDRawPacket>.makeStream(
             bufferingPolicy: .bufferingNewest(2_048)
@@ -453,6 +465,7 @@ public final class BluetoothRIDScanner: ObservableObject, RidObservationProvider
     deinit {
         continuation.finish()
         aircraftMessageContinuation.finish()
+        ridMessageTimeContinuation.finish()
         packetContinuation.finish()
         processingTask?.cancel()
     }
@@ -482,6 +495,9 @@ public final class BluetoothRIDScanner: ObservableObject, RidObservationProvider
         }
         if let aircraftMessage = event.aircraftMessage {
             aircraftMessageContinuation.yield(aircraftMessage)
+        }
+        if let receivedAt = event.ridMessageReceivedAt {
+            ridMessageTimeContinuation.yield(receivedAt)
         }
         if let observation = event.observation {
             observationCount += 1

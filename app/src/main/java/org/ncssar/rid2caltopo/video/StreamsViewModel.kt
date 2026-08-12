@@ -410,7 +410,7 @@ private fun clueDistanceMeters(clue: PendingClue): Double {
     return 6_371_000.0 * angularDistance
 }
 
-private data class HeadingSelection(
+internal data class HeadingSelection(
     val headingDeg: Double?,
     val sourceLabel: String?,
 )
@@ -426,27 +426,21 @@ internal fun formatClueHeading(value: Double?): String? {
     return String.format(Locale.US, "%.1f", roundedTenths / 10.0)
 }
 
-private fun selectClueHeading(
+internal fun selectClueHeading(
     telemetry: StreamTelemetrySnapshot?,
-    displayHeadingDeg: Double?,
+    derivedHeadingDeg: Double?,
     ridTrackDeg: Double?,
 ): HeadingSelection {
+    val derivedHeading = normalizeClueHeading(derivedHeadingDeg)
+    if (derivedHeading != null) {
+        return HeadingSelection(derivedHeading, "Derived drone heading")
+    }
+
     val cameraYaw = normalizeClueHeading(telemetry?.cameraYawDeg)
     if (cameraYaw != null) return HeadingSelection(cameraYaw, "Camera yaw")
 
     val streamHeading = normalizeClueHeading(telemetry?.headingDeg)
     if (streamHeading != null) return HeadingSelection(streamHeading, "Stream heading")
-
-    val displayHeading = normalizeClueHeading(displayHeadingDeg)
-    if (displayHeading != null) {
-        val ridTrack = normalizeClueHeading(ridTrackDeg)
-        val label = if (ridTrack != null && abs(displayHeading - ridTrack) < 0.1) {
-            "RID aircraft track"
-        } else {
-            "Movement fallback"
-        }
-        return HeadingSelection(displayHeading, label)
-    }
 
     val ridTrack = normalizeClueHeading(ridTrackDeg)
     if (ridTrack != null) return HeadingSelection(ridTrack, "RID aircraft track")
@@ -717,6 +711,7 @@ class DroneSpecState(
 /** Display-ready values computed by [DroneAltitudeCoordinator] for use in labels and clues. */
 data class DroneDisplayState(
     val headingDeg: Double?,
+    val derivedHeadingDeg: Double? = null,
     val aglFt: Double?,
     /** True when the AGL value is DEM-sourced but the DEM data is stale or the drone has moved. */
     val aglStale: Boolean = false,
@@ -1767,7 +1762,7 @@ class StreamsViewModel(
         )
         val headingSelection = selectClueHeading(
             telemetry = telemetry,
-            displayHeadingDeg = displayState?.headingDeg,
+            derivedHeadingDeg = displayState?.derivedHeadingDeg,
             ridTrackDeg = droneSpec.lastPositionTelemetry?.aircraftTrackDeg,
         )
         val clueBearing = headingSelection.headingDeg
@@ -1981,6 +1976,27 @@ class StreamsViewModel(
         }?.also { requestDemClueProjectionRefresh(it.designator) }
     }
 
+    fun updateClueCameraHeading(headingDeg: Double) {
+        val normalizedHeading = normalizeClueHeading(headingDeg) ?: return
+        _pendingClue.value = _pendingClue.value?.let { clue ->
+            val projection = projectClueLocation(
+                droneLat = clue.droneLat,
+                droneLng = clue.droneLng,
+                droneAlt = clue.droneAlt,
+                headingDeg = normalizedHeading,
+                aglMeters = clue.aglMeters,
+                gimbalAngleDeg = clue.gimbalAngleDeg,
+            )
+            clue.copy(
+                lat = projection.lat,
+                lng = projection.lng,
+                alt = projection.alt,
+                headingDeg = normalizedHeading,
+                headingSourceLabel = "Operator adjusted",
+            )
+        }?.also { requestDemClueProjectionRefresh(it.designator) }
+    }
+
     fun submitClue() {
         val clue = pendingClue ?: return
         CTDebug(tag, String.format(
@@ -2096,6 +2112,7 @@ class StreamsViewModel(
                 val current = _pendingClue.value ?: return@withContext
                 if (current.designator != clue.designator ||
                     current.timestamp != clue.timestamp ||
+                    current.headingDeg != clue.headingDeg ||
                     current.gimbalAngleDeg != clue.gimbalAngleDeg) {
                     return@withContext
                 }

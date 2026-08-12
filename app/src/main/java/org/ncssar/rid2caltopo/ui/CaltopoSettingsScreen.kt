@@ -53,6 +53,7 @@ fun CaltopoSettingsScreen(
     val alarmVolumePercent by settingsViewModel.alarmVolumePercent.collectAsState()
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
+    val remoteVideoControlEnabled by settingsViewModel.remoteVideoControlEnabled.collectAsState()
     val standaloneR2cCoordinationEnabled by settingsViewModel.standaloneR2cCoordinationEnabled.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
     val proximityAlertSpacingFeet by settingsViewModel.proximityAlertSpacingFeet.collectAsState()
@@ -320,6 +321,17 @@ fun CaltopoSettingsScreen(
                     )
                     Text(if (captureIncomingVideo) "Yes" else "No")
                 }
+                LabeledSwitch(
+                    label = "Remote Video Control",
+                    checked = remoteVideoControlEnabled,
+                    onCheckedChange = settingsViewModel::onRemoteVideoControlEnabledChanged,
+                )
+                Text(
+                    "When enabled, an authenticated requester chooses video quality after the link test without a per-request approval prompt. Only one viewer can use this tablet at a time.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                )
 
                 LabeledSwitch(
                     label = "Standalone R2C coordination",

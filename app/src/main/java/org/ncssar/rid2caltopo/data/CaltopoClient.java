@@ -58,6 +58,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import org.ncssar.rid2caltopo.BuildConfig;
+import org.ncssar.rid2caltopo.app.AppIdleAlarmReceiver;
 import org.ncssar.rid2caltopo.app.MediaMTXService;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.R2CApplication;
@@ -418,7 +419,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static CopyOnWriteArrayList<CtDroneSpec.DroneSpecsChangedListener> DroneSpecsChangedListeners = new CopyOnWriteArrayList<>();
     private static CopyOnWriteArrayList<CtDroneSpec.DroneConfirmationCandidateListener> DroneConfirmationCandidateListeners = new CopyOnWriteArrayList<>();
     private static Uri DebugLogPath = null;
-    private static DelayedExec AppIdleDelay = new DelayedExec();
+    private static DelayedExec AppIdleDelay = new DelayedExec(false);
     private static volatile long AppActiveStartedAtMsec = System.currentTimeMillis();
     private static FirebaseAnalytics FBAnalytics;
     private static final Object ShutdownLock = new Object();
@@ -3849,6 +3850,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 CTDebug(TAG, "Shutdown(): UiUpdatePoll suspended.");
             }
             AppIdleDelay.stop();
+            Context context = R2CApplication.getAppCtxt();
+            if (context != null) AppIdleAlarmReceiver.cancel(context);
             CloseDebugOutputStreamForShutdown(shutdownDebugLogGeneration);
         } finally {
             synchronized (ShutdownLock) {
@@ -3969,33 +3972,41 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     /**
      * CheckIdle()
-     * Check to see if the app has received _any_ waypoints.   If MaxIdleTimeInMinutes()
-     * elapses and no waypoints, then let's assume the user just forgot to quit the app,
+     * Check to see if the app has received any decoded aircraft RID messages. If
+     * MaxIdleTimeInMinutes() elapses without one, assume the user forgot to quit the app,
      * so try to clean-up and exit to save their battery.   If MaxIdleTimeInMinutes == 0,
      * then this check is disabled.
      */
 
-    public static void CheckIdle() {
+    public static synchronized void CheckIdle() {
         long maxIdleInMinutes = GetMaxIdleTimeInMinutes();
         AppIdleDelay.stop();
-        if (maxIdleInMinutes <= 0) return;
-        long maxIdleInMsec = maxIdleInMinutes * 1000 * 60;
+        Context context = R2CApplication.getAppCtxt();
+        if (context != null) AppIdleAlarmReceiver.cancel(context);
+        if (IsExitRequested()) return;
         long appActiveStartedAtMsec = AppActiveStartedAtMsec;
-        long lastWaypointMsec = CtDroneSpec.LastWaypointUpdateTimestampMsec();
-        long idleBaselineMsec = Math.max(appActiveStartedAtMsec, lastWaypointMsec);
-        long idleInMsec = System.currentTimeMillis() - idleBaselineMsec;
-        if (idleInMsec < maxIdleInMsec) {
-            AppIdleDelay.start(CaltopoClient::CheckIdle,
-                    maxIdleInMsec - idleInMsec, 0);
+        long lastRidMessageMsec = CtDroneSpec.LastRidMessageTimestampMsec();
+        long nowMsec = System.currentTimeMillis();
+        long remainingMsec = ApplicationIdleTimeoutPolicy.remainingDelayMsec(
+                appActiveStartedAtMsec,
+                lastRidMessageMsec,
+                maxIdleInMinutes,
+                nowMsec);
+        if (remainingMsec == ApplicationIdleTimeoutPolicy.DISABLED) return;
+        if (remainingMsec > 0) {
+            AppIdleDelay.start(CaltopoClient::CheckIdle, remainingMsec, 0);
+            if (context != null) AppIdleAlarmReceiver.schedule(context, remainingMsec);
             return;
         }
+        long idleBaselineMsec = Math.max(appActiveStartedAtMsec, lastRidMessageMsec);
+        long idleInMsec = Math.max(0L, nowMsec - idleBaselineMsec);
         CaltopoClient.CTEvent(TAG, "MaxIdleExiting", null);
         CTWarn(TAG, String.format(Locale.US,
-                "CheckIdle(): app idle timeout expired after %.3f/%.3f minutes without valid RID updates (appActiveStarted=%s lastWaypoint=%s). Shutting down app and map to save battery.",
+                "CheckIdle(): app idle timeout expired after %.3f/%.3f minutes without RID messages (appActiveStarted=%s lastRidMessage=%s). Shutting down app and map to save battery.",
                 idleInMsec / 60000.0,
                 (double) maxIdleInMinutes,
                 TimeDatestampString(appActiveStartedAtMsec),
-                TimeDatestampString(lastWaypointMsec)));
+                TimeDatestampString(lastRidMessageMsec)));
         QuitApplication();
     }
 

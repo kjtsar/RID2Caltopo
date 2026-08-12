@@ -583,6 +583,10 @@ struct ContentView: View {
                     to: bluetoothScanner.aircraftMessages,
                     sourceID: "bluetooth"
                 )
+                ridTracks.bindRIDMessageTimes(
+                    to: bluetoothScanner.ridMessageTimes,
+                    sourceID: "bluetooth"
+                )
                 ridTracks.configureClueArchiveProvider(clueStore.archiveClues)
                 _ = orgConfigImporter.restoreActiveProfile(
                     caltopoSettings: caltopoSettings,
@@ -763,8 +767,12 @@ struct ContentView: View {
             .task {
                 await monitorOperationalState()
             }
-            .task(id: idleTimeoutFingerprint) {
-                await monitorIdleTimeout()
+            .onChange(of: idleTimeoutFingerprint, initial: true) {
+                AppleApplicationCleanupCenter.shared.configureIdleTimeout(
+                    appStartedAt: appStartedAt,
+                    lastRIDMessageAt: ridTracks.lastRIDMessageAt,
+                    maximumIdleMinutes: orgConfigSettings.maximumIdleMinutes
+                )
             }
             .task(id: profileLifecycle.mutualAidExpiresAt) {
                 await enforceMutualAidExpiryAtDeadline()
@@ -1002,40 +1010,7 @@ struct ContentView: View {
     }
 
     private var idleTimeoutFingerprint: String {
-        "\(orgConfigSettings.maximumIdleMinutes)|\(ridTracks.lastValidRIDUpdateAt?.timeIntervalSince1970 ?? 0)"
-    }
-
-    private func monitorIdleTimeout() async {
-        guard let deadline = ApplicationIdleTimeoutPolicy.deadline(
-            appStartedAt: appStartedAt,
-            lastValidRIDUpdateAt: ridTracks.lastValidRIDUpdateAt,
-            maximumIdleMinutes: orgConfigSettings.maximumIdleMinutes
-        ) else { return }
-
-        let delay = deadline.timeIntervalSinceNow
-        if delay > 0 {
-            try? await Task.sleep(for: .seconds(delay))
-        }
-        guard !Task.isCancelled,
-              ApplicationIdleTimeoutPolicy.isExpired(
-                appStartedAt: appStartedAt,
-                lastValidRIDUpdateAt: ridTracks.lastValidRIDUpdateAt,
-                maximumIdleMinutes: orgConfigSettings.maximumIdleMinutes,
-                now: Date()
-              )
-        else { return }
-
-        let baseline = max(appStartedAt, ridTracks.lastValidRIDUpdateAt ?? appStartedAt)
-        let idleMinutes = Date().timeIntervalSince(baseline) / 60
-        AppleLog.warning(
-            "Lifecycle",
-            String(
-                format: "Maximum idle timeout expired after %.3f/%.3f minutes without valid RID updates; closing the application session",
-                idleMinutes,
-                Double(orgConfigSettings.maximumIdleMinutes)
-            )
-        )
-        AppleApplicationCleanupCenter.shared.quitPrimaryWindow(reason: "maximum idle timeout")
+        "\(orgConfigSettings.maximumIdleMinutes)"
     }
 
     private var bluetoothStatus: String {
@@ -1922,7 +1897,8 @@ struct ContentView: View {
         let markerDescription = TrackerTabletLink.markerDescription(
             trackerURLPrefix: argumentValue("--tracker-url")
                 ?? orgConfigSettings.trackerURLPrefix,
-            tabletName: AppleDeviceIdentity.displayName
+            tabletName: AppleDeviceIdentity.displayName,
+            trackerConnected: peerCoordinator.status == .healthy
         )
         ridTracks.publishLocalDeviceMarker(
             CaltopoDeviceMarker(

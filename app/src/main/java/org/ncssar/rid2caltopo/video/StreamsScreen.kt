@@ -660,6 +660,7 @@ fun StreamsScreen(
                         coordinateDisplayFormat = viewModel.coordinateDisplayFormat,
                         onTitleChanged = viewModel::updateClueTitle,
                         onDescriptionChanged = viewModel::updateClueDescription,
+                        onCameraHeadingChanged = viewModel::updateClueCameraHeading,
                         onGimbalAngleChanged = viewModel::updateClueGimbalAngle,
                         onSubmit = viewModel::submitClue,
                         onSubmitLocalMarkerOnly = viewModel::submitLocalMarkerOnly,

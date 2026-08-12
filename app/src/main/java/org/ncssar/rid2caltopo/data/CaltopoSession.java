@@ -833,41 +833,51 @@ public class CaltopoSession {
 				EncodeParm("lat", latStr) + "&" +
 				EncodeParm("lng", lngStr) + "&" +
 				EncodeParm("elevation", ele.toString()));
-        if (telemetry != null || cameraMetadata != null) {
-            appendTelemetryJson(urlBuilder, telemetry, cameraMetadata);
-        }
+        JSONObject queryParameters = buildPositionQueryParameters(telemetry, cameraMetadata);
+        appendPositionQueryParameters(urlBuilder, queryParameters);
         String url = urlBuilder.toString();
 
 		CaltopoOp op = new CaltopoOp(onComplete);
-		SendRequest(op, CtsMethod_t.GET, url, null, true);
+		SendRequest(op, positionReportMethod(), url, null, true);
 		return op;
 	}
 
-    private static void appendTelemetryJson(@NonNull StringBuilder sb,
-                                            @Nullable CtDroneSpec.PositionTelemetry telemetry,
-                                            @Nullable CaltopoCameraMetadata cameraMetadata) {
-        JSONObject aircraft = new JSONObject();
-        JSONObject camera = new JSONObject();
+    @NonNull
+    static CtsMethod_t positionReportMethod() {
+		return CtsMethod_t.GET;
+    }
+
+    @NonNull
+    static JSONObject buildPositionQueryParameters(
+            @Nullable CtDroneSpec.PositionTelemetry telemetry,
+            @Nullable CaltopoCameraMetadata cameraMetadata) {
+        JSONObject parameters = new JSONObject();
         try {
             if (telemetry != null) {
-                putFinite(aircraft, "altitude_rate", telemetry.aircraftAltitudeRateFpm);
-                putFinite(aircraft, "gs", telemetry.aircraftGsKnots);
-                putFinite(aircraft, "track", telemetry.aircraftTrackDeg);
+                putFinite(parameters, "aircraft:altitude_rate", telemetry.aircraftAltitudeRateFpm);
+                putFinite(parameters, "aircraft:gs", telemetry.aircraftGsKnots);
+                putFinite(parameters, "aircraft:track", telemetry.aircraftTrackDeg);
             }
             if (cameraMetadata != null) {
-                putString(camera, "external_url", cameraMetadata.externalUrl);
-                putString(camera, "thumbnail_url", cameraMetadata.thumbnailUrl);
+                putString(parameters, "camera:external_url", cameraMetadata.externalUrl);
+                putString(parameters, "camera:thumbnail_url", cameraMetadata.thumbnailUrl);
             }
         } catch (Exception e) {
-            CTError(TAG, "appendTelemetryJson() JSON put raised", e);
-            return;
+			CTError(TAG, "buildPositionQueryParameters() JSON put raised", e);
+            return parameters;
         }
+        return parameters;
+    }
 
-        if (aircraft.length() > 0) {
-            sb.append("&").append(EncodeParm("aircraft", aircraft.toString()));
-        }
-        if (camera.length() > 0) {
-            sb.append("&").append(EncodeParm("camera", camera.toString()));
+    private static void appendPositionQueryParameters(@NonNull StringBuilder urlBuilder,
+                                                      @NonNull JSONObject parameters) {
+        Iterator<String> keys = parameters.keys();
+        while (keys.hasNext()) {
+            String name = keys.next();
+            Object value = parameters.opt(name);
+            if (value != null) {
+                urlBuilder.append("&").append(EncodeParm(name, value.toString()));
+            }
         }
     }
 

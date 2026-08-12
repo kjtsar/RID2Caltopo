@@ -22,7 +22,13 @@ All require the following environment variables be set: CTCRED_ID, CTCRED_SECRET
 
 * uploadImage.py <map_id> <image_file>
 
+* testLiveTrack.py <map_id> [--lat <lat>] [--lng <lng>] [--elevation <meters>]
+                   [--hold-seconds <seconds>] [--settle-seconds <seconds>]
+                   [--only <variant>]
+       Creates a temporary LiveTrack, compares the supported position-report request
+       shapes, verifies each HTTP response, optionally leaves it visible for inspection,
+       and removes the temporary LiveTrack.
+
 FIXME:  Not all of these are guaranteed to work... some were experiments.  createFolder.py
  demonstrates better argument checking and more user friendliness than most, which all should
  probably be brought up to the same level of completeness some day...
-

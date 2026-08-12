@@ -63,6 +63,16 @@ public final class TrackerTabletLink {
             @Nullable String trackerUrlPrefix,
             @Nullable String tabletName
     ) {
+        return markerDescription(trackerUrlPrefix, tabletName, true);
+    }
+
+    @NonNull
+    public static String markerDescription(
+            @Nullable String trackerUrlPrefix,
+            @Nullable String tabletName,
+            boolean trackerConnected
+    ) {
+        if (!trackerConnected) return "";
         String url = shortUrl(trackerUrlPrefix, tabletName);
         return url == null ? "" : "R2C tablet: " + url;
     }

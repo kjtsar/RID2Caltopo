@@ -25,6 +25,14 @@ class TrackerTabletLinkTest {
             ),
         )
         assertEquals("", TrackerTabletLink.markerDescription("", "Kjt A5 Pro"))
+        assertEquals(
+            "",
+            TrackerTabletLink.markerDescription(
+                "https://r2c-tracker.com/ncssar/",
+                "Kjt A5 Pro",
+                false,
+            ),
+        )
     }
 
     @Test

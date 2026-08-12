@@ -45,6 +45,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /** CaltopoMap class
  *   Support bringing up the map session and creating the drone track folders (if not
@@ -337,9 +339,12 @@ public class CaltopoMap {
 
     @NonNull
     static String buildMyDeviceMarkerDescription() {
+        PeerCoordinator.CoordinationIndicatorState state =
+                getCurrentRuntime().getPeerCoordinator().getCoordinationIndicatorState();
         return TrackerTabletLink.markerDescription(
                 CaltopoClient.GetTrackerCoordinationUrlPfx(),
-                R2CActivity.MyDeviceName
+                R2CActivity.MyDeviceName,
+                state == PeerCoordinator.CoordinationIndicatorState.HEALTHY
         );
     }
 
@@ -1429,6 +1434,8 @@ public class CaltopoMap {
 
     private static void LookForExistingLiveTracks() {
         if (null == FolderId || null == ArchiveFolderId) return;
+        java.util.Set<String> recoveringTrackIds = CaltopoInterruptedTrackJournal.recover(
+                GetMapId(), ArchiveFolderId, getCurrentRuntime());
         publishMyDeviceMarkerIfPossible(GetMyLocation());
         long timeNowInMilliseconds = System.currentTimeMillis();
         long maxTrackAgeInMilliseconds = CaltopoClient.GetNewTrackDelayInSeconds() * 1000;
@@ -1439,6 +1446,7 @@ public class CaltopoMap {
 
         while (0 != MyLiveTracksInThisMap.length()) {
             JSONObject feature = (JSONObject)MyLiveTracksInThisMap.remove(0);
+            if (recoveringTrackIds.contains(feature.optString("id", ""))) continue;
             JSONObject prop = feature.optJSONObject("properties");
             if (null == prop) continue;
 
@@ -1481,9 +1489,16 @@ public class CaltopoMap {
      */
     public static void ArchiveFeature(@NonNull JSONObject feature, @NonNull String featureClass,
                                long timeNowInMilliseconds, long maxWaitInMilliseconds) {
+        ArchiveFeature(feature, featureClass, timeNowInMilliseconds, maxWaitInMilliseconds, null);
+    }
+
+    static void ArchiveFeature(@NonNull JSONObject feature, @NonNull String featureClass,
+                               long timeNowInMilliseconds, long maxWaitInMilliseconds,
+                               @Nullable Consumer<Boolean> onComplete) {
         String timeString = String.valueOf(timeNowInMilliseconds);
         if (null == ArchiveFolderId) {
             CTError(TAG, "archiveFeature(): can't archive - folder not created yet.");
+            if (onComplete != null) onComplete.accept(false);
             return;
         }
         try {
@@ -1491,6 +1506,7 @@ public class CaltopoMap {
             if (trackId.isEmpty()) {
                 CTError(TAG, "archiveFeature(): id for feature is empty - this shouldn't happen.\n  " +
                         feature.toString(4));
+                if (onComplete != null) onComplete.accept(false);
                 return;
             }
             JSONObject prop = feature.optJSONObject("properties");
@@ -1506,25 +1522,38 @@ public class CaltopoMap {
             prop.put("updated", timeString);
             prop.put("-updated-on", timeString);
             prop.put("class", "Shape");  // convert from LiveTrack to shape.
+            AtomicReference<CaltopoOp> deleteOp = new AtomicReference<>();
             CaltopoOp op = getCurrentRuntime().getCalTopoSessionGateway()
-                    .editObjectWithId("Shape", trackId, feature, archiveOp ->
-                            onArchiveFeatureEditFinished(trackId, archiveOp));
+                    .editObjectWithId("Shape", trackId, feature, archiveOp -> {
+                        onArchiveFeatureEditFinished(trackId, archiveOp);
+                        if (!archiveOp.success()) {
+                            if (onComplete != null) onComplete.accept(false);
+                            return;
+                        }
+                        if (!featureClass.equals("LiveTrack")) {
+                            if (onComplete != null) onComplete.accept(true);
+                            return;
+                        }
+                        CTInfo(TAG, String.format(Locale.US, "archiveFeature(): Stopping liveTrack %s....", trackId));
+                        deleteOp.set(getCurrentRuntime().getCalTopoSessionGateway()
+                                .deleteLiveTrackWithId(trackId, finishedDeleteOp -> {
+                                    CTInfo(TAG, String.format(Locale.US,
+                                            "archiveFeature(): delete liveTrackId=%s success=%s responseCode=%d",
+                                            trackId, finishedDeleteOp.success(), finishedDeleteOp.responseCode));
+                                    if (onComplete != null) onComplete.accept(finishedDeleteOp.success());
+                                }, 400, 404));
+                    });
             if (maxWaitInMilliseconds > 0) {
                 op.syncOp(maxWaitInMilliseconds);
                 maxWaitInMilliseconds = maxWaitInMilliseconds - (System.currentTimeMillis() - timeNowInMilliseconds);
-            }
-            if (featureClass.equals("LiveTrack")) {
-                CTInfo(TAG, String.format(Locale.US, "archiveFeature(): Stopping liveTrack %s....", trackId));
-                op = getCurrentRuntime().getCalTopoSessionGateway()
-                        .deleteLiveTrackWithId(trackId, deleteOp ->
-                                CTInfo(TAG, String.format(Locale.US,
-                                        "archiveFeature(): delete liveTrackId=%s success=%s responseCode=%d",
-                                        trackId, deleteOp.success(), deleteOp.responseCode)),
-                                400, 404);  // Then delete LiveTrack; 400/404 = already gone, treat as success.
-                if (maxWaitInMilliseconds > 0) op.syncOp(maxWaitInMilliseconds);
+                CaltopoOp startedDeleteOp = deleteOp.get();
+                if (startedDeleteOp != null && maxWaitInMilliseconds > 0) {
+                    startedDeleteOp.syncOp(maxWaitInMilliseconds);
+                }
             }
         } catch (Exception e) {
             CTError(TAG, "archiveFeature() raised:", e);
+            if (onComplete != null) onComplete.accept(false);
         }
     }
 

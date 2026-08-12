@@ -1106,6 +1106,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                             (Build.MANUFACTURER + " " + Build.MODEL).trim()));
             message.put("incidentName", managedVideoIncidentName);
             message.put("timeZone", ZoneId.systemDefault().getId());
+            message.put(
+                    "remoteControlEnabled",
+                    RemoteVideoControlPrefs.isEnabled(R2CApplication.getAppCtxt()));
             message.put("streams", streams);
             sendJson(message);
         } catch (Exception e) {
@@ -1233,6 +1236,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                             managedVideoThumbnailPreviewUntilMs,
                             nowMs() + previewTtlSeconds * 1_000L
                     );
+                    CTDebug(TAG, "Managed video thumbnail preview lease renewed ttlSec="
+                            + previewTtlSeconds);
                     break;
                 case "video_preflight_offer":
                     onVideoPreflightOffer(jo);
@@ -1374,6 +1379,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             listener.onVideoMediaOffer(new VideoMediaOffer(
                     requestId,
                     streamSessionId,
+                    jo.optString("requesterEmail").trim(),
+                    jo.optString("routeKind", "unknown").trim(),
+                    jo.optInt("selectedWidth", 0),
+                    jo.optInt("selectedHeight", 0),
+                    jo.optDouble("selectedFps", 0.0),
+                    jo.optLong("selectedBitrateBps", 0L),
                     sdp,
                     jo.optJSONArray("iceServers")));
         }

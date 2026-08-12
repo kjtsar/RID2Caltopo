@@ -605,6 +605,7 @@ public class OpenDroneIdDataManager {
                 ac, rssi, macAddress, message.msgCounter);
 
         if (!isDroneScoutBridgePing) {
+            CtDroneSpec.NoteRidMessageReceived(currentTime);
             noteActiveAircraftMessage(ac, currentTime);
         }
 

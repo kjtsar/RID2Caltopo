@@ -588,24 +588,25 @@ public actor CaltopoLiveClient {
             URLQueryItem(name: "lng", value: String(format: "%.7f", observation.longitude)),
             URLQueryItem(name: "elevation", value: String(Int64(observation.altitudeMeters ?? -1_000))),
         ]
-        var aircraft: [String: Double] = [:]
         if let speed = observation.speedMetersPerSecond, speed.isFinite {
-            aircraft["gs"] = speed * 1.943_844_49
+            queryItems.append(URLQueryItem(
+                name: "aircraft:gs",
+                value: String(speed * 1.943_844_49)
+            ))
         }
         if let heading = observation.headingDegrees, heading.isFinite {
-            aircraft["track"] = heading
-        }
-        if !aircraft.isEmpty,
-           let data = try? JSONSerialization.data(withJSONObject: aircraft, options: [.sortedKeys]) {
-            queryItems.append(URLQueryItem(name: "aircraft", value: String(decoding: data, as: UTF8.self)))
+            queryItems.append(URLQueryItem(name: "aircraft:track", value: String(heading)))
         }
         if let cameraMetadata {
-            var camera = ["external_url": cameraMetadata.externalURL.absoluteString]
+            queryItems.append(URLQueryItem(
+                name: "camera:external_url",
+                value: cameraMetadata.externalURL.absoluteString
+            ))
             if let thumbnailURL = cameraMetadata.thumbnailURL {
-                camera["thumbnail_url"] = thumbnailURL.absoluteString
-            }
-            if let data = try? JSONSerialization.data(withJSONObject: camera, options: [.sortedKeys]) {
-                queryItems.append(URLQueryItem(name: "camera", value: String(decoding: data, as: UTF8.self)))
+                queryItems.append(URLQueryItem(
+                    name: "camera:thumbnail_url",
+                    value: thumbnailURL.absoluteString
+                ))
             }
         }
         components.queryItems = queryItems

@@ -35,8 +35,10 @@ public enum TrackerTabletLink {
 
     public static func markerDescription(
         trackerURLPrefix: String,
-        tabletName: String
+        tabletName: String,
+        trackerConnected: Bool = true
     ) -> String {
+        guard trackerConnected else { return "" }
         guard let url = shortURL(
             trackerURLPrefix: trackerURLPrefix,
             tabletName: tabletName

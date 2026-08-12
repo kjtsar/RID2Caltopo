@@ -150,6 +150,12 @@ private struct AppleVideoPreflightOffer: Decodable {
 private struct AppleVideoMediaOffer: Decodable {
     let requestId: String
     let streamSessionId: String
+    let requesterEmail: String?
+    let routeKind: String?
+    let selectedWidth: Int?
+    let selectedHeight: Int?
+    let selectedFps: Double?
+    let selectedBitrateBps: Int64?
     let sdp: String
     let iceServers: [AppleVideoICEServer]
 }
@@ -239,6 +245,7 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     private var usePeers = false
+    private var remoteControlledVideoRequests: [String: AppleVideoStreamViewRequest] = [:]
     private var standaloneR2CCoordinationEnabled = false
     private var trackerURLPrefix = ""
     private var trackerAPIKey = ""
@@ -1049,6 +1056,7 @@ final class AppleTrackerCoordinator: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             lastVideoPreflightOfferByRequestID.removeValue(forKey: requestID)
             approvedVideoStreamRequests.removeValue(forKey: requestID)
+            remoteControlledVideoRequests.removeValue(forKey: requestID)
             stopLocalMediaSession(requestID: requestID)
             if pendingVideoStreamRequest?.requestId == requestID {
                 clearVideoStreamRequest()
@@ -1117,6 +1125,14 @@ final class AppleTrackerCoordinator: ObservableObject {
                 )
                 return true
             }
+            if !request.consentRequired {
+                remoteControlledVideoRequests[request.requestId] = request
+                AppleLog.info(
+                    "VideoApproval",
+                    "Remote-controlled request=\(request.requestId); requester selects quality"
+                )
+                return true
+            }
             pendingVideoStreamRequest = request
             videoPreflightPeer.cancel()
             resetVideoPreflightState()
@@ -1168,7 +1184,30 @@ final class AppleTrackerCoordinator: ObservableObject {
                 )
                 return
             }
-            guard let approval = approvedVideoStreamRequests[offer.requestId],
+            let remoteApproval = remoteControlledVideoRequests[offer.requestId].flatMap {
+                request -> AppleApprovedVideoStream? in
+                let width = offer.selectedWidth ?? 0
+                let height = offer.selectedHeight ?? 0
+                let fps = offer.selectedFps ?? 0
+                let bitrateBps = offer.selectedBitrateBps ?? 0
+                guard request.streamSessionId == offer.streamSessionId,
+                      width > 0, height > 0, fps > 0, bitrateBps > 0
+                else { return nil }
+                return AppleApprovedVideoStream(
+                    request: request,
+                    quality: AppleVideoQualityChoice(
+                        id: "requester-selected",
+                        label: "Requester selected",
+                        width: width,
+                        height: height,
+                        fps: fps,
+                        bitrateBps: bitrateBps,
+                        capacity: "enough"
+                    )
+                )
+            }
+            guard let approval = approvedVideoStreamRequests[offer.requestId]
+                    ?? remoteApproval,
                   approval.request.streamSessionId == offer.streamSessionId
             else {
                 AppleLog.warning(
@@ -1191,7 +1230,9 @@ final class AppleTrackerCoordinator: ObservableObject {
                 )
                 return
             }
-            let approvedRoute = mediaRouteKindByRequestID[offer.requestId] ?? "unknown"
+            let approvedRoute = mediaRouteKindByRequestID[offer.requestId]
+                ?? offer.routeKind
+                ?? "unknown"
             stopLocalMediaSession(requestID: offer.requestId)
             let peer = AppleManagedVideoMediaPeer(
                 answerSink: { [weak self] requestID, sdp in
@@ -1223,7 +1264,11 @@ final class AppleTrackerCoordinator: ObservableObject {
                 managedVideoRecordingSourceRequestIDs.insert(offer.requestId)
             }
             mediaRouteKindByRequestID[offer.requestId] = approvedRoute
+            remoteControlledVideoRequests.removeValue(forKey: offer.requestId)
             source.setManagedVideoFrameConsumer(peer)
+            AppleSpokenWarningCenter.shared.speak(
+                "Now sharing video stream with \(approval.request.requesterEmail)"
+            )
             peer.start(
                 requestID: offer.requestId,
                 offerSDP: offer.sdp,
@@ -1658,6 +1703,9 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
         let payload: [String: Any] = [
             "type": "video_stream_advertisement",
+            "remoteControlEnabled": UserDefaults.standard.bool(
+                forKey: "video.remoteControlEnabled"
+            ),
             "incidentName": managedVideoIncidentName,
             "deviceName": AppleDeviceIdentity.displayName,
             "timeZone": TimeZone.current.identifier,

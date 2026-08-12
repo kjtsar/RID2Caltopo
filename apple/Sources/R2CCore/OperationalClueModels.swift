@@ -120,8 +120,15 @@ public enum OperationalClueGeometry {
     public static func selectedHeading(
         cameraYawDegrees: Double?,
         streamHeadingDegrees: Double?,
-        ridHeadingDegrees: Double?
+        ridHeadingDegrees: Double?,
+        derivedHeadingDegrees: Double? = nil
     ) -> OperationalClueHeadingSelection {
+        if let derivedHeading = RidHeading.normalized(derivedHeadingDegrees) {
+            return OperationalClueHeadingSelection(
+                degrees: derivedHeading,
+                sourceLabel: "Derived drone heading"
+            )
+        }
         if let cameraYaw = RidHeading.normalized(cameraYawDegrees) {
             return OperationalClueHeadingSelection(
                 degrees: cameraYaw,

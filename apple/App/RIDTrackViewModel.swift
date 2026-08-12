@@ -20,6 +20,7 @@ final class RIDTrackViewModel: ObservableObject {
     @Published private(set) var caltopoRTTMilliseconds: Int64?
     @Published private(set) var altitudeDisplayByAircraftID: [String: OperationalAircraftAltitudeDisplay] = [:]
     @Published private(set) var lastValidRIDUpdateAt: Date?
+    @Published private(set) var lastRIDMessageAt: Date?
 
     private let store = RidTrackStore()
     private let archiveStore = AppleTrackArchiveStore()
@@ -32,6 +33,7 @@ final class RIDTrackViewModel: ObservableObject {
     private var lastHorizontalAccuracyCodeByAircraftID: [String: UInt8] = [:]
     private var observationTasks: [String: Task<Void, Never>] = [:]
     private var aircraftMessageTasks: [String: Task<Void, Never>] = [:]
+    private var ridMessageTimeTasks: [String: Task<Void, Never>] = [:]
     private var agingTask: Task<Void, Never>?
     private var demoTask: Task<Void, Never>?
     private var caltopoEventTask: Task<Void, Never>?
@@ -115,6 +117,16 @@ final class RIDTrackViewModel: ObservableObject {
                 if await self.store.noteAircraftMessage(message) {
                     self.tracks = await self.store.snapshot()
                 }
+            }
+        }
+    }
+
+    func bindRIDMessageTimes(to messageTimes: AsyncStream<Date>, sourceID: String) {
+        guard ridMessageTimeTasks[sourceID] == nil else { return }
+        ridMessageTimeTasks[sourceID] = Task { [weak self] in
+            for await receivedAt in messageTimes {
+                guard !Task.isCancelled, let self else { return }
+                self.noteRIDMessage(receivedAt: receivedAt)
             }
         }
     }
@@ -205,6 +217,11 @@ final class RIDTrackViewModel: ObservableObject {
             policy.activeTimeout = TimeInterval(max(1, activeTimeoutSeconds))
             await store.updatePolicy(policy)
         }
+    }
+
+    private func noteRIDMessage(receivedAt: Date) {
+        lastRIDMessageAt = max(lastRIDMessageAt ?? receivedAt, receivedAt)
+        AppleApplicationCleanupCenter.shared.noteRIDMessage(receivedAt: receivedAt)
     }
 
     func configureClueArchiveProvider(
@@ -555,6 +572,8 @@ final class RIDTrackViewModel: ObservableObject {
         observationTasks.removeAll()
         aircraftMessageTasks.values.forEach { $0.cancel() }
         aircraftMessageTasks.removeAll()
+        ridMessageTimeTasks.values.forEach { $0.cancel() }
+        ridMessageTimeTasks.removeAll()
         caltopoEventTask?.cancel()
         caltopoEventTask = nil
         coordinationEventTask?.cancel()

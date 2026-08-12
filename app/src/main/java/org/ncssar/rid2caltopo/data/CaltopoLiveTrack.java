@@ -99,6 +99,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     private CtDroneSpec droneSpec;
     private boolean shuttingDown = false;
     private int consecutiveUpdateFails = 0;
+    private long lastInterruptedJournalWriteMs = 0L;
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
     private CaltopoMap.MapStatusListener.mapStatus mapStatus;
 
@@ -395,7 +396,15 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                         "archiveTrackOnCaltopo(): no longer owner; deleting orphaned live track '%s' for remoteId=%s",
                         liveTrackId, myRemoteId));
                 try {
-                    runtime.getCalTopoSessionGateway().deleteLiveTrackWithId(liveTrackId, null, 400, 404);
+                    String orphanedLiveTrackId = liveTrackId;
+                    runtime.getCalTopoSessionGateway().deleteLiveTrackWithId(
+                            orphanedLiveTrackId,
+                            deleteOp -> {
+                                if (deleteOp.success()) {
+                                    CaltopoInterruptedTrackJournal.remove(orphanedLiveTrackId);
+                                }
+                            },
+                            400, 404);
                 } catch (Exception e) {
                     CTError(TAG, "archiveTrackOnCaltopo(): deleteLiveTrackWithId() raised: ", e);
                 }
@@ -432,6 +441,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         );
         CTDebug(TAG, String.format(Locale.US, "archiveTrackOnCaltopo(%s): Archiving track with %d points.",
                 trackLabel, size));
+        persistInterruptedPublication(archiveDescription, true);
         if (null != startLiveTrackOp && startLiveTrackOp.isDone() && startLiveTrackOp.success()) {
             // convert the LiveTrack to a Shape w/archive properties and add in all the waypoints.
             JSONObject feature = startLiveTrackOp.responseJson;
@@ -451,7 +461,15 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             } catch (JSONException e) {
                 CTError(TAG, "archiveTrackCaltopo() JSONObject.put() raised - for no apparent reason.", e);
             }
-            CaltopoMap.ArchiveFeature(feature, "LiveTrack", System.currentTimeMillis(), maxWaitInMilliseconds);
+            String archivedLiveTrackId = liveTrackId;
+            CaltopoMap.ArchiveFeature(
+                    feature,
+                    "LiveTrack",
+                    System.currentTimeMillis(),
+                    maxWaitInMilliseconds,
+                    success -> {
+                        if (success) CaltopoInterruptedTrackJournal.remove(archivedLiveTrackId);
+                    });
         } else {
             // for some reason, we weren't able to start the live track, so this will likely block as well
             try {
@@ -477,6 +495,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
         startLiveTrackOp = null;
         active = false;
+        lastInterruptedJournalWriteMs = 0L;
     }
 
     private void clearLiveTrackState() {
@@ -485,6 +504,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
         startLiveTrackOp = null;
         active = false;
+        lastInterruptedJournalWriteMs = 0L;
     }
 
     public String getTrackLabel() {
@@ -619,6 +639,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         } else try {
             CTDebug(TAG, "startLiveTrackComplete(): succeeded. ResponseCode: " + op.responseCode + " response: " + op.response);
             liveTrackId = op.id();
+            persistInterruptedPublication("", true);
             CTDebug(TAG, String.format(Locale.US, "startLiveTrackComplete(%s): liveTrackId: '%s'",
                     trackLabel, liveTrackId));
             if (!localOwner || shuttingDown || !active) {
@@ -683,6 +704,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             return;
         }
         linePoints.add(new QueuedPoint(lat, lng, altitudeMeters, timestampMsec, telemetry));
+        persistInterruptedPublication("", false);
         long notifyStartedAtMs = System.currentTimeMillis();
         notifyLocalTrackPoint(lat, lng, altitudeMeters, timestampMsec);
         logSideEffectIfSlow("queueWaypoint.notifyLocalTrackPoint", myRemoteId, droneSpec.getMappedId(),
@@ -724,6 +746,33 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         }
         logSideEffectIfSlow("queueWaypoint.total", myRemoteId, droneSpec.getMappedId(),
                 System.currentTimeMillis() - startedAtMs);
+    }
+
+    private void persistInterruptedPublication(@NonNull String description, boolean force) {
+        if (liveTrackId == null || liveTrackId.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        if (!force && now - lastInterruptedJournalWriteMs < 5_000L) return;
+        JSONArray points = new JSONArray();
+        try {
+            for (QueuedPoint point : linePoints) {
+                JSONArray coordinate = new JSONArray();
+                coordinate.put(point.lng);
+                coordinate.put(point.lat);
+                coordinate.put(point.ele);
+                points.put(coordinate);
+            }
+        } catch (JSONException error) {
+            CTError(TAG, "Could not serialize interrupted LiveTrack points", error);
+            return;
+        }
+        CaltopoInterruptedTrackJournal.save(
+                CaltopoMap.GetMapId(),
+                myRemoteId,
+                liveTrackId,
+                droneSpec.trackLabel(),
+                description,
+                points);
+        lastInterruptedJournalWriteMs = now;
     }
 
     /** forwardNextWaypoints():

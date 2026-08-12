@@ -126,32 +126,14 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
     }
 
     private func setMicrophoneEnabledOnQueue(_ enabled: Bool) {
-        guard let audioSender else {
+        guard audioSender != nil, let audioTrack else {
             microphoneStateSink(requestID, false, "VoIP audio path unavailable")
             return
         }
         if enabled {
-            configureWebRTCAudioRoutingOnQueue(microphoneEnabled: true)
-            let constraints = RTCMediaConstraints(
-                mandatoryConstraints: nil,
-                optionalConstraints: [
-                    "googEchoCancellation": "true",
-                    "googAutoGainControl": "true",
-                    "googNoiseSuppression": "true",
-                ]
-            )
-            let source = factory.audioSource(with: constraints)
-            let track = factory.audioTrack(with: source, trackId: "r2c-audio-\(requestID)")
-            track.isEnabled = true
-            audioSource = source
-            audioTrack = track
-            audioSender.track = track
+            audioTrack.isEnabled = true
         } else {
-            audioTrack?.isEnabled = false
-            audioSender.track = nil
-            audioTrack = nil
-            audioSource = nil
-            configureWebRTCAudioRoutingOnQueue(microphoneEnabled: false)
+            audioTrack.isEnabled = false
         }
         AppleLog.info("VideoMedia", "request=\(requestID) microphone=\(enabled ? "enabled" : "disabled")")
         microphoneStateSink(requestID, enabled, nil)
@@ -266,6 +248,26 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
                         return
                     }
                     self.audioSender = transceiver.sender
+                    let audioConstraints = RTCMediaConstraints(
+                        mandatoryConstraints: nil,
+                        optionalConstraints: [
+                            "googEchoCancellation": "true",
+                            "googAutoGainControl": "true",
+                            "googNoiseSuppression": "true",
+                        ]
+                    )
+                    let audioSource = self.factory.audioSource(with: audioConstraints)
+                    let audioTrack = self.factory.audioTrack(
+                        with: audioSource,
+                        trackId: "r2c-audio-\(requestID)"
+                    )
+                    // Negotiate a real bidirectional audio sender in the first
+                    // answer, but do not capture operator audio until they
+                    // explicitly enable the microphone control.
+                    audioTrack.isEnabled = false
+                    self.audioSource = audioSource
+                    self.audioTrack = audioTrack
+                    transceiver.sender.track = audioTrack
                     if let remoteAudioTrack = transceiver.receiver.track as? RTCAudioTrack {
                         remoteAudioTrack.isEnabled = true
                     }
@@ -296,36 +298,31 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         active: Bool = true
     ) {
         let configuration = RTCAudioSessionConfiguration.webRTC()
-        if microphoneEnabled {
-            configuration.category = AVAudioSession.Category.playAndRecord.rawValue
-            configuration.mode = AVAudioSession.Mode.voiceChat.rawValue
-            configuration.categoryOptions = [.allowBluetoothHFP, .defaultToSpeaker]
-        } else {
-            // A receive-only remote-video session must not open the hardware
-            // microphone while the operator-facing microphone control is off.
-            configuration.category = AVAudioSession.Category.playback.rawValue
-            configuration.mode = AVAudioSession.Mode.default.rawValue
-            configuration.categoryOptions = []
-        }
+        // WebRTC's iOS VoiceProcessingIO device requires a full-duplex voice
+        // session even when this peer is only rendering incoming audio. The
+        // separately negotiated local track remains disabled until explicit
+        // operator consent, so microphone-off still sends zero audio RTP.
+        configuration.category = AVAudioSession.Category.playAndRecord.rawValue
+        configuration.mode = AVAudioSession.Mode.voiceChat.rawValue
+        configuration.categoryOptions = [.allowBluetoothHFP, .defaultToSpeaker]
         RTCAudioSessionConfiguration.setWebRTC(configuration)
         let audioSession = RTCAudioSession.sharedInstance()
         // This app also owns an AVPlayer/native decoder pipeline. Explicitly
         // gate WebRTC's VoIP audio unit so it is not left waiting behind that
         // pipeline and so it is torn down again when remote viewing ends.
         audioSession.useManualAudio = true
-        if !active {
-            audioSession.isAudioEnabled = false
-        }
+        // WebRTC does not reliably rebuild its voice-processing audio unit when
+        // an already-running session changes between playback and full duplex.
+        // Stop it before applying the new category, then restart it below.
+        audioSession.isAudioEnabled = false
         audioSession.lockForConfiguration()
         defer { audioSession.unlockForConfiguration() }
         do {
             // Applying a category alone does not start WebRTC's audio device.
-            // Keep the session active for receive-only audio and switch to
-            // play-and-record when the operator explicitly enables the mic.
+            // Keep one full-duplex session active for receive audio; the local
+            // track above remains the operator-controlled microphone gate.
             try audioSession.setConfiguration(configuration, active: active)
-            if active {
-                audioSession.isAudioEnabled = true
-            }
+            audioSession.isAudioEnabled = active
             let route = audioSession.currentRoute.outputs
                 .map { "\($0.portType.rawValue):\($0.portName)" }
                 .joined(separator: ",")

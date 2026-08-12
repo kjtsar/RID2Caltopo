@@ -15,6 +15,7 @@ import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
+import org.ncssar.rid2caltopo.video.MINIMUM_TRAVEL_BEARING_DISPLACEMENT_METERS
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import androidx.compose.runtime.snapshotFlow
 
@@ -181,7 +182,7 @@ internal class DroneAltitudeCoordinator(
         if (anchor != null) {
             val distAndBearing = FloatArray(2)
             Location.distanceBetween(anchor.first, anchor.second, lat, lng, distAndBearing)
-            if (distAndBearing[0] >= SIGNIFICANT_HEADING_MOVE_M) {
+            if (distAndBearing[0] >= MINIMUM_TRAVEL_BEARING_DISPLACEMENT_METERS) {
                 fallbackHeading[designator] = normalizeDegrees(distAndBearing[1].toDouble())
                 fallbackHeadingAnchor[designator] = Pair(lat, lng)
             }
@@ -544,6 +545,7 @@ internal class DroneAltitudeCoordinator(
 
         displayStateByDesignator[designator] = DroneDisplayState(
             headingDeg = headingDeg,
+            derivedHeadingDeg = fallbackHeading[designator],
             aglFt = aglFt,
             aglStale = aglStale,
             aglUsesDem = usingDemAgl,
@@ -582,7 +584,6 @@ internal class DroneAltitudeCoordinator(
 
     companion object {
         private const val FT_TO_METERS = 0.3048
-        private const val SIGNIFICANT_HEADING_MOVE_M = 16.0 * FT_TO_METERS
         private const val DEM_RETRY_INTERVAL_MS = 2_000L
         private const val METERS_TO_FEET = 3.28084
         private const val CALIBRATE_ATO_TARGET_FT = 50.0

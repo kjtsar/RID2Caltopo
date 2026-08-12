@@ -27,11 +27,22 @@ actor AppleCaltopoPublisher {
     private var configuredConfiguration: AppleCaltopoConfiguration?
     private var lastDeviceMarkerPublishedAt: Date?
     private var publishedDeviceMarkerID: String?
+    private var lastInterruptedJournalWriteAt: [String: Date] = [:]
+    private var pendingInterruptedRecoveries: [CaltopoInterruptedPublication] = []
+    private let interruptedJournal: CaltopoInterruptedPublicationJournal
 
-    init() {
+    init(interruptedJournal: CaltopoInterruptedPublicationJournal? = nil) {
         let pair = AsyncStream<AppleCaltopoPublisherEvent>.makeStream(bufferingPolicy: .bufferingNewest(128))
         events = pair.stream
         continuation = pair.continuation
+        if let interruptedJournal {
+            self.interruptedJournal = interruptedJournal
+        } else {
+            let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            self.interruptedJournal = CaltopoInterruptedPublicationJournal(
+                fileURL: root.appendingPathComponent("caltopo-interrupted-publications.json")
+            )
+        }
     }
 
     deinit {
@@ -64,6 +75,7 @@ actor AppleCaltopoPublisher {
         finishingRemoteIDs.removeAll()
         startTasks.values.forEach { $0.cancel() }
         startTasks.removeAll()
+        pendingInterruptedRecoveries.removeAll()
         configuredConfiguration = configuration
         self.trackFolderName = normalizedFolderName
         trackFolderID = nil
@@ -75,7 +87,18 @@ actor AppleCaltopoPublisher {
             return
         }
         do {
-            client = try CaltopoLiveClient(configuration: liveConfiguration)
+            let configuredClient = try CaltopoLiveClient(configuration: liveConfiguration)
+            client = configuredClient
+            pendingInterruptedRecoveries = await interruptedJournal.entries(mapID: configuration.mapID)
+            do {
+                try await ensureFolders(client: configuredClient)
+                await recoverInterruptedPublications(client: configuredClient)
+            } catch {
+                AppleLog.warning(
+                    "CalTopo",
+                    "Interrupted LiveTrack recovery will retry after map reconnect: \(error.localizedDescription)"
+                )
+            }
             continuation.yield(.ready)
         } catch {
             client = nil
@@ -93,6 +116,7 @@ actor AppleCaltopoPublisher {
         }
         do {
             try await ensureFolders(client: client)
+            await recoverInterruptedPublications(client: client)
             try await client.publishDeviceMarker(marker, folderID: trackFolderID, now: now)
             guard generation == configurationGeneration else {
                 try? await client.deleteMarker(markerID: marker.id)
@@ -145,6 +169,7 @@ actor AppleCaltopoPublisher {
         guard let client else { return }
         do {
             try await ensureFolders(client: client)
+            await recoverInterruptedPublications(client: client)
             var saved = observations[remoteID, default: []]
             if saved.last != observation {
                 saved.append(observation)
@@ -175,8 +200,10 @@ actor AppleCaltopoPublisher {
                 startTasks.removeValue(forKey: remoteID)
                 guard !finishingRemoteIDs.contains(remoteID) else { return }
                 liveTrackIDs[remoteID] = liveTrackID
+                await persistInterruptedPublication(remoteID: remoteID, force: true)
                 continuation.yield(.trackStarted(remoteID))
             }
+            await persistInterruptedPublication(remoteID: remoteID)
             let requestStarted = Date()
             try await client.publishPoint(
                 remoteID: remoteID,
@@ -212,6 +239,7 @@ actor AppleCaltopoPublisher {
                 liveTrackID = nil
             }
             guard let liveTrackID else { return }
+            await persistInterruptedPublication(remoteID: remoteID, description: description, force: true)
             try await ensureFolders(client: client)
             guard let archiveFolderID else {
                 throw CaltopoLiveClientError.missingResult
@@ -226,6 +254,7 @@ actor AppleCaltopoPublisher {
             liveTrackIDs.removeValue(forKey: remoteID)
             labels.removeValue(forKey: remoteID)
             observations.removeValue(forKey: remoteID)
+            try await interruptedJournal.remove(liveTrackID: liveTrackID)
             continuation.yield(.trackStopped(remoteID))
         } catch is CancellationError {
             return
@@ -256,6 +285,7 @@ actor AppleCaltopoPublisher {
         guard let client, let liveTrackID else { return }
         do {
             try await client.stopLiveTrack(liveTrackID: liveTrackID)
+            try await interruptedJournal.remove(liveTrackID: liveTrackID)
             continuation.yield(.trackStopped(remoteID))
             AppleLog.info("CalTopo", "Discarded ignored aircraft remoteId=\(remoteID) liveTrackId=\(liveTrackID)")
         } catch {
@@ -292,6 +322,67 @@ actor AppleCaltopoPublisher {
         guard generation == configurationGeneration else { throw CancellationError() }
         trackFolderID = resolved.active
         archiveFolderID = resolved.archive
+    }
+
+    private func persistInterruptedPublication(
+        remoteID: String,
+        description: String = "",
+        force: Bool = false
+    ) async {
+        guard let configuration = configuredConfiguration,
+              let liveTrackID = liveTrackIDs[remoteID]
+        else { return }
+        let now = Date()
+        if !force,
+           let lastWrite = lastInterruptedJournalWriteAt[remoteID],
+           now.timeIntervalSince(lastWrite) < 5 {
+            return
+        }
+        let entry = CaltopoInterruptedPublication(
+            mapID: configuration.mapID,
+            remoteID: remoteID,
+            liveTrackID: liveTrackID,
+            label: labels[remoteID] ?? remoteID,
+            description: description,
+            observations: observations[remoteID] ?? []
+        )
+        do {
+            try await interruptedJournal.upsert(entry)
+            lastInterruptedJournalWriteAt[remoteID] = now
+        } catch {
+            AppleLog.warning("CalTopo", "Could not persist interrupted LiveTrack \(liveTrackID): \(error.localizedDescription)")
+        }
+    }
+
+    private func recoverInterruptedPublications(client: CaltopoLiveClient) async {
+        guard let archiveFolderID, !pendingInterruptedRecoveries.isEmpty else { return }
+        let generation = configurationGeneration
+        var deferred: [CaltopoInterruptedPublication] = []
+        for entry in pendingInterruptedRecoveries {
+            do {
+                try await client.archiveLiveTrack(
+                    liveTrackID: entry.liveTrackID,
+                    label: entry.label,
+                    observations: entry.observations,
+                    folderID: archiveFolderID,
+                    description: entry.description
+                )
+                try await interruptedJournal.remove(liveTrackID: entry.liveTrackID)
+                AppleLog.info(
+                    "CalTopo",
+                    "Recovered interrupted LiveTrack remoteId=\(entry.remoteID) liveTrackId=\(entry.liveTrackID) points=\(entry.points.count)"
+                )
+            } catch {
+                deferred.append(entry)
+                AppleLog.warning(
+                    "CalTopo",
+                    "Interrupted LiveTrack recovery deferred liveTrackId=\(entry.liveTrackID): \(error.localizedDescription)"
+                )
+            }
+        }
+        if generation == configurationGeneration {
+            pendingInterruptedRecoveries = deferred
+        }
     }
 
     private static func normalizedTrackFolderName(_ value: String) -> String {

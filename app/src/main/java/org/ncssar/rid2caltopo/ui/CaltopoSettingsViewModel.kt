@@ -19,6 +19,7 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
+import org.ncssar.rid2caltopo.data.RemoteVideoControlPrefs
 import org.ncssar.rid2caltopo.notam.NotamAuthManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
@@ -55,6 +56,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     private val _captureIncomingVideo = MutableStateFlow(CaltopoClient.GetCaptureVideoStreamsFlag())
     val captureIncomingVideo = _captureIncomingVideo.asStateFlow()
+    private val _remoteVideoControlEnabled = MutableStateFlow(
+        RemoteVideoControlPrefs.isEnabled(R2CApplication.getAppCtxt())
+    )
+    val remoteVideoControlEnabled = _remoteVideoControlEnabled.asStateFlow()
     private val _predictiveHeadEnabled = MutableStateFlow(CaltopoClient.GetPredictiveHeadEnabled())
     val predictiveHeadEnabled = _predictiveHeadEnabled.asStateFlow()
     private val _proximityAlertSpacingFeet = MutableStateFlow(CaltopoClient.GetProximityAlertSpacingFeet().toString())
@@ -301,6 +306,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _externalDisplayAutoOpen.value = enabled
     }
 
+    fun onRemoteVideoControlEnabledChanged(enabled: Boolean) {
+        _remoteVideoControlEnabled.value = enabled
+    }
+
     fun onExternalDisplayReturnToPhoneOnlyChanged(enabled: Boolean) {
         _externalDisplayReturnToPhoneOnly.value = enabled
     }
@@ -362,6 +371,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetStandaloneR2cCoordinationEnabled(_standaloneR2cCoordinationEnabled.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)
+        RemoteVideoControlPrefs.setEnabled(
+            R2CApplication.getAppCtxt(),
+            _remoteVideoControlEnabled.value,
+        )
         CaltopoClient.SetPredictiveHeadEnabled(_predictiveHeadEnabled.value)
         _proximityAlertSpacingFeet.value.toLongOrNull()?.let { CaltopoClient.SetProximityAlertSpacingFeet(it) }
         CaltopoClient.SetCaltopoDomainAndPort(_caltopoDomainAndPort.value)

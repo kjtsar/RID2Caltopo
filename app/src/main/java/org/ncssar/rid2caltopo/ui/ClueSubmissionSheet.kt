@@ -61,6 +61,7 @@ fun ClueSubmissionSheet(
     coordinateDisplayFormat: CoordinateDisplayFormat,
     onTitleChanged: (String) -> Unit,
     onDescriptionChanged: (String) -> Unit,
+    onCameraHeadingChanged: (Double) -> Unit,
     onGimbalAngleChanged: (Double) -> Unit,
     onCancel: () -> Unit,
     onSubmitLocalMarkerOnly: () -> Unit,
@@ -85,6 +86,7 @@ fun ClueSubmissionSheet(
             coordinateDisplayFormat = coordinateDisplayFormat,
             onTitleChange = onTitleChanged,
             onDescriptionChange = onDescriptionChanged,
+            onCameraHeadingChange = onCameraHeadingChanged,
             onGimbalAngleChange = onGimbalAngleChanged,
             onSubmitLocalMarkerOnly = onSubmitLocalMarkerOnly,
             onSubmit = onSubmit,
@@ -100,6 +102,7 @@ fun ClueSheetContent (
     coordinateDisplayFormat: CoordinateDisplayFormat,
     onTitleChange: (String) -> Unit,
     onDescriptionChange: (String) -> Unit,
+    onCameraHeadingChange: (Double) -> Unit,
     onGimbalAngleChange: (Double) -> Unit,
     onSubmitLocalMarkerOnly: () -> Unit,
     onSubmit: () -> Unit,
@@ -246,6 +249,17 @@ fun ClueSheetContent (
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                Text(
+                    text = "Camera heading: ${formatClueHeading(clue.headingDeg) ?: "0.0"}°",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Slider(
+                    value = (clue.headingDeg ?: 0.0).toFloat(),
+                    onValueChange = { onCameraHeadingChange(it.toDouble()) },
+                    valueRange = 0f..359f,
+                    steps = 358,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 Text(
                     text = "Gimbal angle: ${clue.gimbalAngleDeg.toInt()}°",
                     style = MaterialTheme.typography.bodyLarge

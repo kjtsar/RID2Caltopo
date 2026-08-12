@@ -428,6 +428,7 @@ class R2CActivity :
     private var pendingVideoPreflightBps by mutableStateOf<Long?>(null)
     private var pendingVideoPreflightFailure by mutableStateOf<String?>(null)
     private val approvedVideoSelections = linkedMapOf<String, ApprovedVideoSelection>()
+    private val remoteControlledVideoRequests = linkedMapOf<String, VideoStreamViewRequest>()
     private var managedVideoMediaPeer: ManagedVideoMediaPeer? = null
     private var managedVideoRecordingDecoderSessionId: Long? = null
     private var activeRemoteVideoRequest by mutableStateOf<VideoStreamViewRequest?>(null)
@@ -1486,6 +1487,14 @@ class R2CActivity :
 
     override fun onVideoStreamRequest(request: VideoStreamViewRequest) {
         runOnUiThread {
+            if (!request.consentRequired) {
+                remoteControlledVideoRequests[request.requestId] = request
+                CaltopoClient.CTDebug(
+                    "ManagedVideoApproval",
+                    "Remote-controlled request=${request.requestId}; requester selects quality",
+                )
+                return@runOnUiThread
+            }
             pendingVideoStreamRequest = request
             pendingVideoPreflightRouteKind = null
             pendingVideoPreflightBps = null
@@ -1546,6 +1555,7 @@ class R2CActivity :
                 pendingVideoPreflightFailure = null
             }
             approvedVideoSelections.remove(requestId)
+            remoteControlledVideoRequests.remove(requestId)
             if (activeRemoteVideoRequest?.requestId == requestId) {
                 managedVideoMediaPeer?.close()
                 managedVideoMediaPeer = null
@@ -1561,6 +1571,25 @@ class R2CActivity :
 
     override fun onVideoMediaOffer(offer: VideoMediaOffer) {
         runOnUiThread {
+            val remoteRequest = remoteControlledVideoRequests[offer.requestId]
+            val remoteSelection = remoteRequest?.takeIf {
+                it.streamSessionId == offer.streamSessionId &&
+                    offer.selectedWidth > 0 && offer.selectedHeight > 0 &&
+                    offer.selectedFps > 0.0 && offer.selectedBitrateBps > 0L
+            }?.let { request ->
+                ApprovedVideoSelection(
+                    request,
+                    VideoQualityChoice(
+                        preset = "Requester selected",
+                        label = "Requester selected",
+                        width = offer.selectedWidth,
+                        height = offer.selectedHeight,
+                        fps = offer.selectedFps,
+                        bitrateBps = offer.selectedBitrateBps,
+                        capacity = LinkCapacity.ENOUGH,
+                    ),
+                )
+            }
             val activeSelection = activeRemoteVideoSelection
                 ?.takeIf { it.request.requestId == offer.requestId }
             if (activeSelection != null && activeRemoteVideoOfferSdp == offer.sdp) {
@@ -1574,7 +1603,9 @@ class R2CActivity :
             // The tracker can replay the same pending offer through its direct,
             // notification, and reconnect paths; consuming approval on receipt
             // lets a later replay incorrectly terminate a legitimate attempt.
-            val approved = approvedVideoSelections[offer.requestId] ?: activeSelection
+            val approved = approvedVideoSelections[offer.requestId]
+                ?: activeSelection
+                ?: remoteSelection
             if (approved == null) {
                 CaltopoClient.CTWarn(
                     "ManagedVideoMedia",
@@ -1617,9 +1648,15 @@ class R2CActivity :
             activeRemoteVideoMicrophoneEnabled = false
             activeRemoteVideoMicrophoneError = null
             activeRemoteVideoRequest = approved.request
+            remoteControlledVideoRequests.remove(offer.requestId)
             activeRemoteVideoSelection = approved
             activeRemoteVideoOfferSdp = offer.sdp
             setVolumeControlStream(AudioManager.STREAM_VOICE_CALL)
+            SpokenWarningCenter.requestSpokenPhrase(
+                kind = SpokenWarningKind.VideoStreamRequest,
+                sourceKey = "sharing-${offer.requestId}",
+                phrase = "Now sharing video stream with ${approved.request.requesterEmail}",
+            )
             lateinit var peer: ManagedVideoMediaPeer
             peer = ManagedVideoMediaPeer(object : ManagedVideoMediaPeer.Sink {
                 override fun sendAnswer(requestId: String, sdp: String) {

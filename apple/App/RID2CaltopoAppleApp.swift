@@ -13,11 +13,31 @@ final class AppleApplicationCleanupCenter {
     private var markerCleanupTask: Task<Void, Never>?
     private var fullCleanupTask: Task<Void, Never>?
     private var fullCleanupCompleted = false
+    private var idleTimeoutTask: Task<Void, Never>?
+    private var idleAppStartedAt = Date()
+    private var idleLastRIDMessageAt: Date?
+    private var maximumIdleMinutes = 0
 
     func register(markerCleanup: @escaping Cleanup, fullCleanup: @escaping Cleanup) {
         self.markerCleanup = markerCleanup
         self.fullCleanup = fullCleanup
         fullCleanupCompleted = false
+    }
+
+    func configureIdleTimeout(
+        appStartedAt: Date,
+        lastRIDMessageAt: Date?,
+        maximumIdleMinutes: Int
+    ) {
+        idleAppStartedAt = appStartedAt
+        idleLastRIDMessageAt = maxDate(idleLastRIDMessageAt, lastRIDMessageAt)
+        self.maximumIdleMinutes = maximumIdleMinutes
+        scheduleIdleTimeoutCheck()
+    }
+
+    func noteRIDMessage(receivedAt: Date) {
+        idleLastRIDMessageAt = maxDate(idleLastRIDMessageAt, receivedAt)
+        if idleTimeoutTask == nil { scheduleIdleTimeoutCheck() }
     }
 
     func removeMarkerForBackgrounding() {
@@ -43,6 +63,8 @@ final class AppleApplicationCleanupCenter {
 
     private func performFullCleanup(reason: String, dismissWindow: Bool) {
         guard !fullCleanupCompleted, fullCleanupTask == nil, let fullCleanup else { return }
+        idleTimeoutTask?.cancel()
+        idleTimeoutTask = nil
         AppleLog.info("Lifecycle", "Closing primary application session reason=\(reason)")
         fullCleanupTask = runWithBackgroundTime(name: "Close RID2Caltopo session") {
             await fullCleanup()
@@ -52,6 +74,60 @@ final class AppleApplicationCleanupCenter {
                 self.dismissPrimaryWindow()
             }
             self.fullCleanupTask = nil
+        }
+    }
+
+    private func scheduleIdleTimeoutCheck() {
+        idleTimeoutTask?.cancel()
+        idleTimeoutTask = nil
+        guard let remaining = ApplicationIdleTimeoutPolicy.remainingDelay(
+            appStartedAt: idleAppStartedAt,
+            lastRIDMessageAt: idleLastRIDMessageAt,
+            maximumIdleMinutes: maximumIdleMinutes,
+            now: Date()
+        ) else { return }
+
+        idleTimeoutTask = Task { @MainActor in
+            if remaining > 0 {
+                try? await Task.sleep(for: .seconds(remaining))
+            }
+            guard !Task.isCancelled else { return }
+            self.idleTimeoutTask = nil
+            self.checkIdleTimeout()
+        }
+    }
+
+    private func checkIdleTimeout() {
+        let now = Date()
+        guard ApplicationIdleTimeoutPolicy.isExpired(
+            appStartedAt: idleAppStartedAt,
+            lastRIDMessageAt: idleLastRIDMessageAt,
+            maximumIdleMinutes: maximumIdleMinutes,
+            now: now
+        ) else {
+            scheduleIdleTimeoutCheck()
+            return
+        }
+
+        let baseline = max(idleAppStartedAt, idleLastRIDMessageAt ?? idleAppStartedAt)
+        let idleMinutes = now.timeIntervalSince(baseline) / 60
+        AppleLog.warning(
+            "Lifecycle",
+            String(
+                format: "Maximum idle timeout expired after %.3f/%.3f minutes without RID messages; closing the application session",
+                idleMinutes,
+                Double(maximumIdleMinutes)
+            )
+        )
+        quitPrimaryWindow(reason: "maximum idle timeout")
+    }
+
+    private func maxDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?): max(lhs, rhs)
+        case let (lhs?, nil): lhs
+        case let (nil, rhs?): rhs
+        case (nil, nil): nil
         }
     }
 

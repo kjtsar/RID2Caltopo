@@ -1729,6 +1729,12 @@ private func proximityDrone(
     #expect(OperationalClueGeometry.selectedHeading(
         cameraYawDegrees: 725,
         streamHeadingDegrees: 180,
+        ridHeadingDegrees: 90,
+        derivedHeadingDegrees: 274
+    ) == OperationalClueHeadingSelection(degrees: 274, sourceLabel: "Derived drone heading"))
+    #expect(OperationalClueGeometry.selectedHeading(
+        cameraYawDegrees: 725,
+        streamHeadingDegrees: 180,
         ridHeadingDegrees: 90
     ) == OperationalClueHeadingSelection(degrees: 5, sourceLabel: "Camera yaw"))
     #expect(OperationalClueGeometry.selectedHeading(
@@ -2820,10 +2826,14 @@ private func proximityDrone(
         remoteID: "RID01",
         observation: observation,
         cameraMetadata: CaltopoCameraMetadata(
-            externalURL: try #require(URL(string: "https://r2c-tracker.com/t/Bz2DZg"))
+            externalURL: try #require(URL(string: "https://r2c-tracker.com/t/Bz2DZg")),
+            thumbnailURL: try #require(URL(
+                string: "https://r2c-tracker.com/ncssar/api/v1/video/thumbnail/session-1"
+            ))
         )
     )
     let url = try #require(request.url)
+    #expect(request.httpMethod == "GET")
     let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
     #expect(components.path == "/api/v1/position/report/DRONE")
     let values = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
@@ -2831,14 +2841,13 @@ private func proximityDrone(
     #expect(values["lat"] == "39.7392000")
     #expect(values["lng"] == "-104.9903000")
     #expect(values["elevation"] == "1600")
-    let aircraftData = try #require(values["aircraft"]?.data(using: .utf8))
-    let aircraft = try #require(JSONSerialization.jsonObject(with: aircraftData) as? [String: Double])
-    #expect(abs((aircraft["gs"] ?? 0) - 19.4384449) < 0.000001)
-    #expect(aircraft["track"] == 92)
-    let cameraData = try #require(values["camera"]?.data(using: .utf8))
-    let camera = try #require(JSONSerialization.jsonObject(with: cameraData) as? [String: String])
-    #expect(camera["external_url"] == "https://r2c-tracker.com/t/Bz2DZg")
-    #expect(camera["thumbnail_url"] == nil)
+    #expect(request.httpBody == nil)
+    #expect(abs((Double(values["aircraft:gs"] ?? "") ?? 0) - 19.4384449) < 0.000001)
+    #expect(values["aircraft:track"] == "92.0")
+    #expect(values["camera:external_url"] == "https://r2c-tracker.com/t/Bz2DZg")
+    #expect(values["camera:thumbnail_url"] == "https://r2c-tracker.com/ncssar/api/v1/video/thumbnail/session-1")
+    #expect(values["aircraft"] == nil)
+    #expect(values["camera"] == nil)
 }
 
 @Test func caltopoStopRequestMatchesAndroidLiveTrackDelete() async throws {
@@ -3030,6 +3039,11 @@ private func proximityDrone(
     #expect(TrackerTabletLink.markerDescription(
         trackerURLPrefix: "",
         tabletName: "Kjt A5 Pro"
+    ).isEmpty)
+    #expect(TrackerTabletLink.markerDescription(
+        trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
+        tabletName: "Kjt A5 Pro",
+        trackerConnected: false
     ).isEmpty)
     #expect(TrackerTabletLink.thumbnailURL(
         trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
@@ -3782,12 +3796,12 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
     let startedAt = Date(timeIntervalSince1970: 1_000)
     #expect(ApplicationIdleTimeoutPolicy.deadline(
         appStartedAt: startedAt,
-        lastValidRIDUpdateAt: nil,
+        lastRIDMessageAt: nil,
         maximumIdleMinutes: 2
     ) == Date(timeIntervalSince1970: 1_120))
     #expect(ApplicationIdleTimeoutPolicy.deadline(
         appStartedAt: startedAt,
-        lastValidRIDUpdateAt: nil,
+        lastRIDMessageAt: nil,
         maximumIdleMinutes: 0
     ) == nil)
 }
@@ -3809,26 +3823,32 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
     )
 }
 
-@Test func applicationIdleTimeoutRestartsAfterEachValidRIDUpdate() {
+@Test func applicationIdleTimeoutUsesRemainingTimeSinceLatestRIDMessage() {
     let startedAt = Date(timeIntervalSince1970: 1_000)
     let lastUpdateAt = Date(timeIntervalSince1970: 1_075)
     #expect(ApplicationIdleTimeoutPolicy.deadline(
         appStartedAt: startedAt,
-        lastValidRIDUpdateAt: lastUpdateAt,
+        lastRIDMessageAt: lastUpdateAt,
         maximumIdleMinutes: 2
     ) == Date(timeIntervalSince1970: 1_195))
     #expect(!ApplicationIdleTimeoutPolicy.isExpired(
         appStartedAt: startedAt,
-        lastValidRIDUpdateAt: lastUpdateAt,
+        lastRIDMessageAt: lastUpdateAt,
         maximumIdleMinutes: 2,
         now: Date(timeIntervalSince1970: 1_194)
     ))
     #expect(ApplicationIdleTimeoutPolicy.isExpired(
         appStartedAt: startedAt,
-        lastValidRIDUpdateAt: lastUpdateAt,
+        lastRIDMessageAt: lastUpdateAt,
         maximumIdleMinutes: 2,
         now: Date(timeIntervalSince1970: 1_195)
     ))
+    #expect(ApplicationIdleTimeoutPolicy.remainingDelay(
+        appStartedAt: startedAt,
+        lastRIDMessageAt: lastUpdateAt,
+        maximumIdleMinutes: 2,
+        now: Date(timeIntervalSince1970: 1_135)
+    ) == 60)
 }
 @Test func managedVideoApprovalWaitsUntilPreflightIsReady() {
     #expect(!ManagedVideoQualityPolicy.shouldPresentApproval(
@@ -3849,4 +3869,38 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
 
     let emergency = ManagedVideoQualityPolicy.senderBitrates(targetBps: 200_000)
     #expect(emergency.startupBps == emergency.maximumBps)
+}
+
+@Test func interruptedCaltopoPublicationJournalSurvivesRelaunchAndClearsAfterRecovery() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let fileURL = root.appendingPathComponent("caltopo-interrupted-publications.json")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let observation = RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "RID-RECOVERY",
+        receivedAt: Date(timeIntervalSince1970: 1_786_503_975),
+        latitude: 39.153080,
+        longitude: -121.132828,
+        altitudeMeters: 527
+    )
+    let entry = CaltopoInterruptedPublication(
+        mapID: "map-a",
+        remoteID: "RID-RECOVERY",
+        liveTrackID: "live-recovery",
+        label: "200615Aug11",
+        observations: [observation]
+    )
+
+    let firstProcess = CaltopoInterruptedPublicationJournal(fileURL: fileURL)
+    try await firstProcess.upsert(entry)
+
+    let relaunchedProcess = CaltopoInterruptedPublicationJournal(fileURL: fileURL)
+    let recovered = await relaunchedProcess.entries(mapID: "map-a")
+    #expect(recovered == [entry])
+    #expect(recovered[0].observations == [observation])
+
+    try await relaunchedProcess.remove(liveTrackID: "live-recovery")
+    let afterSuccessfulRecovery = CaltopoInterruptedPublicationJournal(fileURL: fileURL)
+    #expect(await afterSuccessfulRecovery.entries(mapID: "map-a").isEmpty)
 }

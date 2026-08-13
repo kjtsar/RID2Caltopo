@@ -470,7 +470,9 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
         as: UTF8.self
     )
     #expect(enabled.contains("pathDefaults:\n  record: yes"))
-    #expect(enabled.contains("recordPath: '/tmp/stream archive/%path/%Y-%m-%d_%H-%M-%S-%f'"))
+    #expect(enabled.contains(
+        "recordPath: '/tmp/stream archive/%path/%path_%d%b%Y_%H%M%S-%f'"
+    ))
     #expect(enabled.contains("recordFormat: fmp4"))
 }
 
@@ -3055,6 +3057,19 @@ private func proximityDrone(
         tabletName: "Kjt A5 Pro",
         videoStream: "NCS1m3"
     )?.absoluteString == "https://r2c-tracker.com/s/QHkyEQ")
+    #expect(TrackerTabletLink.recordingShortURL(
+        trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
+        tabletName: "Kjt A5 Pro",
+        sessionID: "00000000-0000-0000-0000-000000000002"
+    )?.absoluteString == "https://r2c-tracker.com/v/8fiw1A")
+}
+
+@Test func managedVideoRecordingIdentitySurvivesCatalogRebuild() {
+    let path = "/app/Documents/RID2Caltopo/CapturedStreams/1sar7/1sar7_12Aug2026_092051.mp4"
+    #expect(
+        ManagedVideoRecordingIdentity.sessionID(forPath: path) ==
+            ManagedVideoRecordingIdentity.sessionID(forPath: path)
+    )
 }
 
 @Test func caltopoArchiveDescriptionIncludesOnlyCapturedVideo() throws {
@@ -3859,6 +3874,60 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
         routeKind: "routed",
         failure: nil
     ))
+}
+
+@Test func managedVideoPreflightAcceptsOperatorAndRemoteControlledRequests() {
+    #expect(ManagedVideoPreflightRequestPolicy.shouldAcceptOffer(
+        requestID: "operator-request",
+        pendingOperatorRequestID: "operator-request",
+        remoteControlledRequestIDs: []
+    ))
+    #expect(ManagedVideoPreflightRequestPolicy.shouldAcceptOffer(
+        requestID: "remote-request",
+        pendingOperatorRequestID: nil,
+        remoteControlledRequestIDs: ["remote-request"]
+    ))
+    #expect(!ManagedVideoPreflightRequestPolicy.shouldAcceptOffer(
+        requestID: "unknown-request",
+        pendingOperatorRequestID: "operator-request",
+        remoteControlledRequestIDs: ["remote-request"]
+    ))
+}
+
+@Test func managedVideoIncidentScopeMigrationRecoversTodaysMapRecordings() {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: -7 * 60 * 60)!
+    let now = Date(timeIntervalSince1970: 1_786_578_340)
+    let resolution = ManagedVideoIncidentScopePolicy.resolve(
+        scopeKey: "map:4J0LF02",
+        startsByScope: [
+            "incident:training": 1_786_518_000,
+            "map:4J0LF02": now.timeIntervalSince1970,
+        ],
+        migrationCompleted: false,
+        now: now,
+        calendar: calendar
+    )
+
+    #expect(resolution.startedAt == calendar.startOfDay(for: now))
+    #expect(
+        resolution.startsByScope["map:4J0LF02"] ==
+            resolution.startedAt.timeIntervalSince1970
+    )
+    #expect(resolution.migrationCompleted)
+}
+
+@Test func managedVideoIncidentScopeKeepsLaterMapChangesBounded() {
+    let now = Date(timeIntervalSince1970: 1_786_600_000)
+    let resolution = ManagedVideoIncidentScopePolicy.resolve(
+        scopeKey: "map:NEW",
+        startsByScope: ["map:OLD": 1_786_500_000],
+        migrationCompleted: true,
+        now: now
+    )
+
+    #expect(resolution.startedAt == now)
+    #expect(resolution.migrationCompleted)
 }
 
 @Test func managedVideoSenderStartsBelowSelectedCeiling() {

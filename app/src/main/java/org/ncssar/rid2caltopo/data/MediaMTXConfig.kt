@@ -24,7 +24,10 @@ object MediaMTXConfig {
             }
         }
 
-        val recordPath = File(recordingRoot, "%path/%Y-%m-%d_%H-%M-%S-%f").absolutePath
+        val recordPath = File(
+            recordingRoot,
+            "%path/%path_%d%b%Y_%H%M%S-%f",
+        ).absolutePath
         recordSettings.add("record: yes")
         recordSettings.add("recordPath: '${yamlSingleQuoted(recordPath)}'")
         recordSettings.add("recordFormat: $RECORD_FORMAT_FMP4")

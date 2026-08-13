@@ -747,6 +747,7 @@ struct ContentView: View {
             .onChange(of: managedVideoPresenceFingerprint, initial: true) {
                 peerCoordinator.updateManagedVideoStreams(
                     incidentName: currentIncidentName,
+                    incidentKey: currentIncidentKey,
                     sessions: streamRegistry.sessions
                 )
             }
@@ -754,6 +755,7 @@ struct ContentView: View {
                 while !Task.isCancelled {
                     peerCoordinator.updateManagedVideoStreams(
                         incidentName: currentIncidentName,
+                        incidentKey: currentIncidentKey,
                         sessions: streamRegistry.sessions
                     )
                     try? await Task.sleep(for: .seconds(2))
@@ -1661,6 +1663,16 @@ struct ContentView: View {
         return orgConfigSettings.incident.isEmpty ? "Not selected" : orgConfigSettings.incident
     }
 
+    private var currentIncidentKey: String {
+        let mapID = caltopoSettings.mapID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        if !mapID.isEmpty {
+            return "map:\(mapID)"
+        }
+        return "incident:\(currentIncidentName.lowercased())"
+    }
+
     private var operationalMapView: some View {
         RIDTrackMapView(
             model: ridTracks,
@@ -1863,7 +1875,7 @@ struct ContentView: View {
             }
             .sorted()
             .joined(separator: ",")
-        return "\(currentIncidentName)|\(streamRegistry.managedPresenceRevision)|\(streams)"
+        return "\(currentIncidentKey)|\(currentIncidentName)|\(streamRegistry.managedPresenceRevision)|\(streams)"
     }
 
     private func configurePeerCoordinator() {

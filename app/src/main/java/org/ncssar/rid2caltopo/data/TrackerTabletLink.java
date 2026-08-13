@@ -103,6 +103,31 @@ public final class TrackerTabletLink {
     }
 
     @Nullable
+    public static String recordingShortUrl(
+            @Nullable String trackerUrlPrefix,
+            @Nullable String tabletName,
+            @Nullable String sessionId
+    ) {
+        String organization = organizationDesignator(trackerUrlPrefix);
+        String tablet = normalize(tabletName);
+        String session = normalize(sessionId);
+        if (organization == null || tablet.isEmpty() || session.isEmpty()) return null;
+        try {
+            URI tracker = URI.create(trackerUrlPrefix.trim());
+            if (tracker.getScheme() == null || tracker.getRawAuthority() == null) return null;
+            return new URI(
+                    tracker.getScheme(),
+                    tracker.getRawAuthority(),
+                    "/v/" + recordingCode(organization, tablet, session),
+                    null,
+                    null
+            ).toASCIIString();
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    @Nullable
     public static String thumbnailUrl(
             @Nullable String trackerUrlPrefix,
             @Nullable String tabletName,
@@ -150,6 +175,22 @@ public final class TrackerTabletLink {
         String material = "/" + normalize(organization)
                 + "/streams/" + normalize(tabletName)
                 + "/" + normalize(videoStream);
+        byte[] digest = MessageDigest.getInstance("SHA-256")
+                .digest(material.getBytes(StandardCharsets.UTF_8));
+        byte[] prefix = new byte[CODE_DIGEST_BYTES];
+        System.arraycopy(digest, 0, prefix, 0, CODE_DIGEST_BYTES);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(prefix);
+    }
+
+    @NonNull
+    static String recordingCode(
+            @NonNull String organization,
+            @NonNull String tabletName,
+            @NonNull String sessionId
+    ) throws Exception {
+        String material = "/" + normalize(organization)
+                + "/streams/" + normalize(tabletName)
+                + "/session/" + normalize(sessionId);
         byte[] digest = MessageDigest.getInstance("SHA-256")
                 .digest(material.getBytes(StandardCharsets.UTF_8));
         byte[] prefix = new byte[CODE_DIGEST_BYTES];

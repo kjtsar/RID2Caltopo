@@ -68,6 +68,18 @@ class TrackerTabletLinkTest {
     }
 
     @Test
+    fun recordingShortUrl_targetsOneStableSession() {
+        assertEquals(
+            "https://r2c-tracker.com/v/8fiw1A",
+            TrackerTabletLink.recordingShortUrl(
+                "https://r2c-tracker.com/ncssar/",
+                "Kjt A5 Pro",
+                "00000000-0000-0000-0000-000000000002",
+            ),
+        )
+    }
+
+    @Test
     fun markerPalette_usesGreenYellowBlueHealthContract() {
         assertEquals(
             "#2E7D32",

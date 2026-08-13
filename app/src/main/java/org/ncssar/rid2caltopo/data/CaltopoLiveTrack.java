@@ -219,11 +219,10 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                         droneSpec.trackLabel().split("_", 2)[0]
                 );
         if (recording == null) return null;
-        String videoDesignator = recording.getDroneDesignator();
-        return TrackerTabletLink.streamShortUrl(
+        return TrackerTabletLink.recordingShortUrl(
                 CaltopoClient.GetTrackerCoordinationUrlPfx(),
                 R2CActivity.MyDeviceName,
-                videoDesignator
+                recording.getSessionId()
         );
     }
 

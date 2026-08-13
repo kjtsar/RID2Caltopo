@@ -1,4 +1,7 @@
 Latest changes:
+- Made newly archived CalTopo drone-track descriptions link to the exact captured recording by stable session ID, so multiple videos from the same drone no longer collapse onto one list after an app restart.
+- Named newly captured Android and iOS video files with the drone designator, local day, and start time (for example, `1sar7mn4pr_12Aug2026_092051.mp4`) while continuing to recognize existing recordings.
+- Fixed first-time map-scoped video catalog migration on iOS so recordings captured earlier today for the current incident remain available after updating the app.
 - Added a persistent Remote Video Control setting on Android and iOS. When enabled, an authenticated requester can review the measured route and bandwidth-safe quality choices and start the single allowed stream without a pilot/VO approval prompt; the device still shows its sharing/microphone legend and announces the requester's email address.
 - Fixed iPad two-way stream audio so microphone changes use the already-negotiated VoIP path without interrupting the active audio session.
 - Made interrupted CalTopo LiveTracks recover into archived tracks after an app termination, update, or relaunch instead of leaving stale live objects behind.

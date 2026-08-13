@@ -69,6 +69,29 @@ public enum TrackerTabletLink {
         return components.url
     }
 
+    public static func recordingShortURL(
+        trackerURLPrefix: String,
+        tabletName: String,
+        sessionID: String
+    ) -> URL? {
+        let trimmedPrefix = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let organization = organizationDesignator(from: trimmedPrefix),
+              !normalize(tabletName).isEmpty,
+              !normalize(sessionID).isEmpty,
+              var components = URLComponents(string: trimmedPrefix),
+              components.scheme != nil,
+              components.host != nil
+        else { return nil }
+        components.path = "/v/" + recordingCode(
+            organization: organization,
+            tabletName: tabletName,
+            sessionID: sessionID
+        )
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
     public static func thumbnailURL(
         trackerURLPrefix: String,
         tabletName: String,
@@ -109,6 +132,20 @@ public enum TrackerTabletLink {
         videoStream: String
     ) -> String {
         let material = "/\(normalize(organization))/streams/\(normalize(tabletName))/\(normalize(videoStream))"
+        let digest = SHA256.hash(data: Data(material.utf8))
+        return Data(digest.prefix(codeDigestBytes))
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    public static func recordingCode(
+        organization: String,
+        tabletName: String,
+        sessionID: String
+    ) -> String {
+        let material = "/\(normalize(organization))/streams/\(normalize(tabletName))/session/\(normalize(sessionID))"
         let digest = SHA256.hash(data: Data(material.utf8))
         return Data(digest.prefix(codeDigestBytes))
             .base64EncodedString()

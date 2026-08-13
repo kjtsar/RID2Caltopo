@@ -4,6 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog
 
 class MediaMTXConfigTest {
     @Test
@@ -30,7 +31,30 @@ class MediaMTXConfigTest {
         assertTrue(config.contains("pathDefaults:\n  record: yes"))
         assertTrue(config.contains("recordFormat: fmp4"))
         assertFalse(config.contains("\nrecord: yes"))
-        assertTrue(config.contains("%path/%Y-%m-%d_%H-%M-%S-%f"))
+        assertTrue(config.contains("%path/%path_%d%b%Y_%H%M%S-%f"))
         assertTrue(config.contains("/tmp/mediamtx-recordings"))
+    }
+
+    @Test
+    fun archiveTimestampIncludesDayAndTimeForOldAndNewFragments() {
+        assertTrue(
+            MediaMTXRecordingSync.archiveTimestampFromFragmentName(
+                "2026-08-12_09-20-51-000001.mp4"
+            ) == "12Aug2026_092051"
+        )
+        assertTrue(
+            MediaMTXRecordingSync.archiveTimestampFromFragmentName(
+                "1sar7mn4pr_12Aug2026_092051-000001.mp4"
+            ) == "12Aug2026_092051"
+        )
+    }
+
+    @Test
+    fun recordingSessionIdentitySurvivesCatalogRebuild() {
+        val path = "/app/files/managed-video/map/1sar7_12Aug2026_092051.mp4"
+        assertTrue(
+            ManagedVideoSessionRecordingCatalog.sessionIdForPath(path) ==
+                ManagedVideoSessionRecordingCatalog.sessionIdForPath(path)
+        )
     }
 }

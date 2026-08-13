@@ -249,14 +249,31 @@ object MediaMTXRecordingSync {
         streamPath.substringAfterLast('/').ifBlank { "recording" }
 
     private fun recordingTimestamp(firstFragment: File): String {
-        val match = Regex("""^\d{4}-\d{2}-\d{2}_(\d{2})-(\d{2})-(\d{2})""")
-            .find(firstFragment.name)
-            ?: return ""
-        return match.groupValues.drop(1).joinToString(separator = "")
+        return archiveTimestampFromFragmentName(firstFragment.name).orEmpty()
     }
 
     private fun fallbackTimestamp(): String =
-        SimpleDateFormat("HHmmss", Locale.US).format(Date())
+        SimpleDateFormat("ddMMMyyyy_HHmmss", Locale.US).format(Date())
+
+    internal fun archiveTimestampFromFragmentName(name: String): String? {
+        Regex("""(?:^|_)(\d{2}[A-Z][a-z]{2}\d{4})_(\d{6})(?:-|\.)""")
+            .find(name)
+            ?.let { return "${it.groupValues[1]}_${it.groupValues[2]}" }
+        val match = Regex(
+            """(?:^|_)(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})"""
+        ).find(name) ?: return null
+        val month = listOf(
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ).getOrNull(match.groupValues[2].toIntOrNull()?.minus(1) ?: -1) ?: return null
+        return buildString {
+            append(match.groupValues[3])
+            append(month)
+            append(match.groupValues[1])
+            append('_')
+            append(match.groupValues.drop(4).joinToString(separator = ""))
+        }
+    }
 
     private fun ensureTargetDir(root: DocumentFile, streamPath: String): DocumentFile {
         var current = root

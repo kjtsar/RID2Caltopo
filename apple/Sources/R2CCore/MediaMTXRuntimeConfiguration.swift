@@ -14,7 +14,7 @@ public enum MediaMTXRuntimeConfiguration {
         if captureStreams {
             let escapedPath = recordingRoot.path.replacingOccurrences(of: "'", with: "''")
             settings += [
-                "  recordPath: '\(escapedPath)/%path/%Y-%m-%d_%H-%M-%S-%f'",
+                "  recordPath: '\(escapedPath)/%path/%path_%d%b%Y_%H%M%S-%f'",
                 "  recordFormat: fmp4",
             ]
         }

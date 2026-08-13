@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.util.Base64
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.ManagedVideoStreamAdvertisement
 import java.io.File
 import java.nio.file.Files
@@ -24,26 +25,23 @@ data class ManagedVideoSessionRecording(
 )
 
 /**
- * App-private catalog of captures made during this process lifetime.
+ * App-private catalog of captures made during the current incident.
  *
  * MediaMTX fragments still follow the normal archive path. A merged copy is
- * retained here only until the next app process starts so an authorized
+ * retained here across app restarts during the same incident so an authorized
  * browser can request direct WebRTC playback without cloud media storage.
  */
 object ManagedVideoSessionRecordingCatalog {
     private const val TAG = "ManagedVideoRecordingCatalog"
     private const val ROOT_NAME = "managed-video-session-recordings"
-    private var initialized = false
+    private var initializedIncidentKey = ""
 
     @Synchronized
     fun initialize(context: Context) {
-        if (initialized) return
-        val root = root(context)
-        if (root.exists()) {
-            root.deleteRecursively()
-        }
-        root.mkdirs()
-        initialized = true
+        val incidentKey = currentIncidentKey()
+        if (initializedIncidentKey == incidentKey) return
+        activeRoot(context, incidentKey).mkdirs()
+        initializedIncidentKey = incidentKey
     }
 
     @Synchronized
@@ -58,7 +56,7 @@ object ManagedVideoSessionRecordingCatalog {
             .substringAfterLast('/')
             .replace(Regex("[^A-Za-z0-9._-]"), "_")
             .ifBlank { "recording" }
-        val destination = File(root(context), "${safePath}__${mergedFile.name}")
+        val destination = File(activeRoot(context), "${safePath}__${mergedFile.name}")
         val temporary = File(destination.parentFile, ".${destination.name}.tmp")
         return try {
             mergedFile.copyTo(temporary, overwrite = true)
@@ -80,7 +78,7 @@ object ManagedVideoSessionRecordingCatalog {
     @Synchronized
     fun snapshot(context: Context): List<ManagedVideoSessionRecording> {
         initialize(context)
-        return root(context)
+        return activeRoot(context)
             .walkTopDown()
             .filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) }
             .mapNotNull(::readRecording)
@@ -152,7 +150,7 @@ object ManagedVideoSessionRecordingCatalog {
                 ?: 0.0
             val designator = file.name.substringBefore("__").ifBlank { "Recording" }
             ManagedVideoSessionRecording(
-                sessionId = UUID.nameUUIDFromBytes(file.absolutePath.toByteArray()).toString(),
+                sessionId = sessionIdForPath(file.absolutePath),
                 droneDesignator = designator,
                 file = file,
                 recordedAt = Instant.ofEpochMilli(file.lastModified()),
@@ -171,6 +169,23 @@ object ManagedVideoSessionRecordingCatalog {
     }
 
     private fun root(context: Context): File = File(context.filesDir, ROOT_NAME)
+
+    internal fun sessionIdForPath(path: String): String =
+        UUID.nameUUIDFromBytes(path.toByteArray()).toString()
+
+    private fun activeRoot(
+        context: Context,
+        incidentKey: String = currentIncidentKey(),
+    ): File {
+        val scopeID = UUID.nameUUIDFromBytes(incidentKey.toByteArray()).toString()
+        return File(root(context), scopeID)
+    }
+
+    private fun currentIncidentKey(): String {
+        val mapId = CaltopoMap.GetMapId().trim()
+        if (mapId.isNotEmpty()) return "map:$mapId"
+        return "incident:${CaltopoClient.GetIncident().trim().lowercase()}"
+    }
 }
 
 data class ManagedVideoThumbnail(

@@ -120,7 +120,7 @@ private enum AppleManagedVideoRecordingCatalog {
             else { return nil }
             let designator = url.deletingLastPathComponent().lastPathComponent
             return AppleManagedVideoRecording(
-                sessionId: stableSessionID(url.path),
+                sessionId: ManagedVideoRecordingIdentity.sessionID(forPath: url.path),
                 droneDesignator: designator.isEmpty ? "Recording" : designator,
                 url: url,
                 recordedAt: modified,
@@ -132,13 +132,6 @@ private enum AppleManagedVideoRecordingCatalog {
         .map { $0 }
     }
 
-    private static func stableSessionID(_ value: String) -> String {
-        let hex = SHA256.hash(data: Data(value.utf8))
-            .prefix(16)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20).prefix(12))"
-    }
 }
 
 private struct AppleVideoPreflightOffer: Decodable {
@@ -277,7 +270,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var managedVideoIncidentName = ""
     private var managedVideoStreams: [AppleManagedVideoStreamAdvertisement] = []
     private var managedVideoSourcesBySessionID: [String: AppleVideoFrameSource] = [:]
-    private let managedVideoSessionStartedAt = Date()
+    private var managedVideoIncidentScopeKey = ""
+    private var managedVideoIncidentStartedAt = Date()
     private var managedVideoRecordingsBySessionID: [String: AppleManagedVideoRecording] = [:]
     private var managedVideoThumbnailTasks: [String: Task<Void, Never>] = [:]
     private var managedVideoThumbnailPreviewUntil = Date.distantPast
@@ -789,8 +783,33 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
     }
 
+    private func updateManagedVideoIncidentScope(_ incidentKey: String) {
+        let normalizedKey = incidentKey.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard normalizedKey != managedVideoIncidentScopeKey else { return }
+        let defaults = UserDefaults.standard
+        let scopesPreference = "managedVideo.incidentStartedAtByScope"
+        let migrationPreference = "managedVideo.mapScopedIncidentStartMigrationV2"
+        let startsByScope = defaults.dictionary(
+            forKey: scopesPreference
+        ) as? [String: TimeInterval] ?? [:]
+        let resolution = ManagedVideoIncidentScopePolicy.resolve(
+            scopeKey: normalizedKey,
+            startsByScope: startsByScope,
+            migrationCompleted: defaults.bool(forKey: migrationPreference),
+            now: Date()
+        )
+        managedVideoIncidentStartedAt = resolution.startedAt
+        defaults.set(resolution.startsByScope, forKey: scopesPreference)
+        defaults.set(resolution.migrationCompleted, forKey: migrationPreference)
+        managedVideoRecordingsBySessionID.removeAll()
+        managedVideoIncidentScopeKey = normalizedKey
+    }
+
     func updateManagedVideoStreams(
         incidentName: String,
+        incidentKey: String,
         sessions: [AppleLiveStreamSession]
     ) {
         // Stream inventory is intentionally independent of telemetry binding. A camera
@@ -826,6 +845,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         managedVideoIncidentName = incidentName.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
+        updateManagedVideoIncidentScope(incidentKey)
         var updatedStreams = live.map { session in
             let sessionID = managedSessionIDBySourcePath[session.sourcePath]
                 ?? UUID().uuidString.lowercased()
@@ -880,9 +900,25 @@ final class AppleTrackerCoordinator: ObservableObject {
                 currentSources[sessionID] = source
             }
         }
-        let recordings = AppleManagedVideoRecordingCatalog.snapshot(
-            sessionStartedAt: managedVideoSessionStartedAt
+        var recordings = AppleManagedVideoRecordingCatalog.snapshot(
+            sessionStartedAt: managedVideoIncidentStartedAt
         )
+        let recordingIDs = Set(recordings.map(\.sessionId))
+        let now = Date()
+        recordings += managedVideoRecordingsBySessionID.values.filter { recording in
+            guard !recordingIDs.contains(recording.sessionId),
+                  let values = try? recording.url.resourceValues(forKeys: [
+                      .isRegularFileKey,
+                      .contentModificationDateKey,
+                  ]),
+                  values.isRegularFile == true,
+                  let modified = values.contentModificationDate
+            else { return false }
+            return modified >= managedVideoIncidentStartedAt
+                && now.timeIntervalSince(modified) < 10
+        }
+        recordings.sort { $0.recordedAt > $1.recordedAt }
+        recordings = Array(recordings.prefix(20))
         managedVideoRecordingsBySessionID = Dictionary(
             uniqueKeysWithValues: recordings.map { ($0.sessionId, $0) }
         )
@@ -1400,6 +1436,18 @@ final class AppleTrackerCoordinator: ObservableObject {
                 AppleLog.warning("TrackerPeer", "Ignoring incomplete video preflight offer")
                 return
             }
+            guard ManagedVideoPreflightRequestPolicy.shouldAcceptOffer(
+                requestID: offer.requestId,
+                pendingOperatorRequestID: pendingVideoStreamRequest?.requestId,
+                remoteControlledRequestIDs: Set(remoteControlledVideoRequests.keys)
+            ) else {
+                AppleLog.warning(
+                    "TrackerPeer",
+                    "Ignoring video preflight offer without matching request="
+                        + offer.requestId
+                )
+                return
+            }
             if lastVideoPreflightOfferByRequestID[offer.requestId] == offer.sdp {
                 AppleLog.debug(
                     "TrackerPeer",
@@ -1422,13 +1470,6 @@ final class AppleTrackerCoordinator: ObservableObject {
                     return
                 }
                 resetVideoPreflightState()
-            } else {
-                AppleLog.warning(
-                    "TrackerPeer",
-                    "Ignoring video preflight offer without matching request="
-                        + offer.requestId
-                )
-                return
             }
             videoPreflightPeer.start(
                 requestID: offer.requestId,
@@ -1782,10 +1823,10 @@ final class AppleTrackerCoordinator: ObservableObject {
                               .lowercased()
                       )
                   }) {
-            return TrackerTabletLink.streamShortURL(
+            return TrackerTabletLink.recordingShortURL(
                 trackerURLPrefix: trackerURLPrefix,
                 tabletName: AppleDeviceIdentity.displayName,
-                videoStream: recording.droneDesignator
+                sessionID: recording.sessionId
             )
         }
         guard UserDefaults.standard.bool(forKey: "video.captureStreams"),

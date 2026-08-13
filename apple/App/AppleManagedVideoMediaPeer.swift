@@ -163,6 +163,7 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         // The browser is already relay-only. Allow the tablet to contribute
         // host or server-reflexive candidates and avoid double TURN allocation.
         configuration.iceTransportPolicy = .all
+        configuration.continualGatheringPolicy = .gatherContinually
         configuration.iceServers = iceServers.map {
             RTCIceServer(
                 urlStrings: $0.urls,

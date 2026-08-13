@@ -1,4 +1,5 @@
 import Foundation
+import R2CCore
 @preconcurrency import WebRTC
 
 struct AppleVideoICEServer: Decodable, Sendable {
@@ -58,6 +59,7 @@ final class AppleManagedVideoPreflightPeer: NSObject, @unchecked Sendable {
     private var answerSent = false
     private var probeStartedAt: TimeInterval = 0
     private var nextSequence: UInt32 = 0
+    private var localICECandidates: [RTCIceCandidate] = []
     private var acknowledgedBytes: Int64 = 0
     private var acknowledgedBytesAfterWarmup: Int64 = 0
     private var probeStarted = false
@@ -105,6 +107,7 @@ final class AppleManagedVideoPreflightPeer: NSObject, @unchecked Sendable {
         answerSent = false
         probeStarted = false
         resultSent = false
+        localICECandidates.removeAll(keepingCapacity: true)
         acknowledgedBytes = 0
         acknowledgedBytesAfterWarmup = 0
         nextSequence = 0
@@ -115,6 +118,10 @@ final class AppleManagedVideoPreflightPeer: NSObject, @unchecked Sendable {
         // routed. Let the tablet contribute its fastest reachable candidate
         // instead of requiring a second TURN allocation.
         configuration.iceTransportPolicy = .all
+        // Match the media peer's late-candidate tolerance. A first gathering
+        // pass may finish before the active interface is reported, especially
+        // while Wi-Fi path state is changing.
+        configuration.continualGatheringPolicy = .gatherContinually
         configuration.iceServers = iceServers.map {
             RTCIceServer(
                 urlStrings: $0.urls,
@@ -221,12 +228,30 @@ final class AppleManagedVideoPreflightPeer: NSObject, @unchecked Sendable {
         else {
             return
         }
+        let completeAnswer = ManagedVideoSDP.withICECandidates(
+            localDescription.sdp,
+            candidates: localICECandidates.map {
+                ManagedVideoICECandidate(
+                    sdp: $0.sdp,
+                    mediaLineIndex: $0.sdpMLineIndex
+                )
+            }
+        )
+        guard ManagedVideoSDP.hasRoutableICECandidate(completeAnswer) else {
+            AppleLog.debug(
+                "VideoPreflight",
+                "Answer awaiting routed ICE candidate request=\(requestID) "
+                    + "gathering=\(String(describing: peer.iceGatheringState)) "
+                    + "gathered=\(localICECandidates.count)"
+            )
+            return
+        }
         answerSent = true
         AppleLog.info(
             "VideoPreflight",
             "Sending gathered answer request=\(requestID)"
         )
-        answerSink(requestID, localDescription.sdp)
+        answerSink(requestID, completeAnswer)
     }
 
     private func attachOnQueue(_ dataChannel: RTCDataChannel) {
@@ -431,11 +456,15 @@ extension AppleManagedVideoPreflightPeer: RTCPeerConnectionDelegate {
         _ peerConnection: RTCPeerConnection,
         didGenerate candidate: RTCIceCandidate
     ) {
-        guard candidate.sdp.contains(" typ srflx ")
-            || candidate.sdp.contains(" typ relay ")
-        else { return }
-        queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-            self?.maybeSendAnswerOnQueue(allowPartialGathering: true)
+        queue.async { [weak self] in
+            guard let self, self.peer != nil else { return }
+            self.localICECandidates.append(candidate)
+            guard ManagedVideoSDP.hasRoutableICECandidate(candidate.sdp) else {
+                return
+            }
+            self.queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+                self?.maybeSendAnswerOnQueue(allowPartialGathering: true)
+            }
         }
     }
 

@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.video.ffmpeg
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FfmpegProbeServiceRenderDelayTest {
@@ -62,5 +63,19 @@ class FfmpegProbeServiceRenderDelayTest {
                 hasRecentReaderWait = false,
             )
         )
+    }
+
+    @Test
+    fun auxiliaryRenderSession_isTrackedDuringNativeStartAndAfterRegistration() {
+        val tracker = AuxiliaryRenderSessionTracker()
+
+        assertTrue(tracker.reserve("drone-1"))
+        assertTrue(tracker.isTracked("drone-1", 658L))
+        assertTrue(tracker.complete("drone-1", 658L))
+        assertTrue(tracker.isTracked("drone-1", 658L))
+        assertFalse(tracker.isTracked("drone-1", 659L))
+
+        tracker.remove(658L)
+        assertFalse(tracker.isTracked("drone-1", 658L))
     }
 }

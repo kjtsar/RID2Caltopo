@@ -135,6 +135,34 @@ internal fun shouldRecoverRenderedNoProgress(
         !hasRecentReaderWait
 }
 
+internal class AuxiliaryRenderSessionTracker {
+    private val startingDesignators = mutableSetOf<String>()
+    private val sessions = mutableMapOf<Long, String>()
+
+    fun reserve(designator: String): Boolean = startingDesignators.add(designator)
+
+    fun complete(designator: String, sessionId: Long): Boolean {
+        startingDesignators.remove(designator)
+        if (sessionId <= 0L) return false
+        sessions[sessionId] = designator
+        return true
+    }
+
+    fun isTracked(designator: String, sessionId: Long): Boolean =
+        designator in startingDesignators || sessions[sessionId] == designator
+
+    fun remove(sessionId: Long) {
+        sessions.remove(sessionId)
+    }
+
+    fun sessionIds(): Set<Long> = sessions.keys.toSet()
+
+    fun clear() {
+        startingDesignators.clear()
+        sessions.clear()
+    }
+}
+
 private data class UpstreamRepublishMarker(
     val observedAtMs: Long,
     val previousPublisherConnId: String?,
@@ -198,6 +226,7 @@ class FfmpegProbeService(
     private val sourcePathByDesignator = mutableMapOf<String, String>()
     private val renderEnabledDesignators = mutableSetOf<String>()
     private val startingRenderDesignators = mutableSetOf<String>()
+    private val auxiliaryRenderSessions = AuxiliaryRenderSessionTracker()
     private val activeRenderSurfaceByDesignator = mutableMapOf<String, Surface>()
     private val renderSurfaceCandidatesByDesignator = mutableMapOf<String, MutableList<Surface>>()
     private val retiringSessionIds = mutableSetOf<Long>()
@@ -622,6 +651,39 @@ class FfmpegProbeService(
         renderSessions[designator] ?: suspendedRenderSessions[designator]
     }
 
+    /**
+     * Start a file-backed decoder owned by a managed-video consumer rather
+     * than by the on-screen stream renderer.
+     *
+     * Native start emits session_started synchronously. Reserve the
+     * designator before entering native code, then register the returned ID,
+     * so the global lifecycle listener cannot retire the new decoder as an
+     * untracked session in that interval.
+     */
+    fun startAuxiliaryRenderSession(designator: String, inputUrl: String): Long? {
+        synchronized(stateLock) {
+            if (!auxiliaryRenderSessions.reserve(designator)) {
+                CTWarn(tag, "FFmpeg auxiliary render start already pending for $designator")
+                return null
+            }
+        }
+        val sessionId = try {
+            FfmpegBridge.startRender(designator, inputUrl)
+        } catch (error: RuntimeException) {
+            CTWarn(
+                tag,
+                "Unable to start managed auxiliary FFmpeg render for $designator: " +
+                    (error.message ?: error.javaClass.simpleName)
+            )
+            0L
+        }
+        synchronized(stateLock) {
+            if (!auxiliaryRenderSessions.complete(designator, sessionId)) return null
+        }
+        CTDebug(tag, "Started managed auxiliary FFmpeg render for $designator sessionId=$sessionId")
+        return sessionId
+    }
+
     fun videoSourceInfo(designator: String): FfmpegBridge.VideoSourceInfo? {
         val sessionId = activeRenderSessionId(designator) ?: return null
         return FfmpegBridge.videoSourceInfo(sessionId)
@@ -642,6 +704,7 @@ class FfmpegProbeService(
             val snapshot = renderSessions.values
                 .plus(suspendedRenderSessions.values)
                 .plus(managedRenderSessions.keys)
+                .plus(auxiliaryRenderSessions.sessionIds())
                 .distinct()
             renderSessions.clear()
             suspendedRenderSessions.clear()
@@ -652,6 +715,7 @@ class FfmpegProbeService(
             activeRenderSurfaceByDesignator.clear()
             renderSurfaceCandidatesByDesignator.clear()
             managedRenderSessions.clear()
+            auxiliaryRenderSessions.clear()
             retiringSessionIds.clear()
             telemetryByDesignator.clear()
             remoteIdCandidatesByDesignator.clear()
@@ -786,6 +850,7 @@ class FfmpegProbeService(
             if (sessionId == suspendedRenderSessions[designator]) return@synchronized null
             val managed = managedRenderSessions[sessionId]
             if (managed != null && managed.designator == designator) return@synchronized null
+            if (auxiliaryRenderSessions.isTracked(designator, sessionId)) return@synchronized null
             if (startingRenderDesignators.contains(designator)) return@synchronized null
             "untracked"
         }
@@ -1422,6 +1487,7 @@ class FfmpegProbeService(
                 suspendedRenderSessions.remove(designator)
             }
             managedRenderSessions.remove(sessionId)
+            auxiliaryRenderSessions.remove(sessionId)
             if (isLocalFile &&
                 eofObserved &&
                 renderSessions[designator] == null &&

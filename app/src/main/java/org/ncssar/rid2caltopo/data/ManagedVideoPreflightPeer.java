@@ -108,6 +108,12 @@ final class ManagedVideoPreflightPeer implements AutoCloseable {
             // reachable candidate; the selected pair still traverses the
             // browser relay, so the bandwidth probe remains a routed test.
             configuration.iceTransportsType = PeerConnection.IceTransportsType.ALL;
+            // Android can report an initial COMPLETE gathering pass before
+            // NetworkMonitor publishes the already-connected Wi-Fi network.
+            // Keep gathering so that late host/srflx/relay candidates can
+            // complete this same preflight instead of showing a false failure.
+            configuration.continualGatheringPolicy =
+                    PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY;
             peer = factory.createPeerConnection(
                     configuration,
                     new PeerObserver(generation));
@@ -202,8 +208,14 @@ final class ManagedVideoPreflightPeer implements AutoCloseable {
         boolean hasRoutableCandidate =
                 ManagedVideoSdp.hasRoutableIceCandidate(completeDescription);
         if (!completeDescription.contains("a=candidate:") || !hasRoutableCandidate) {
-            if (allowPartialGathering) return;
-            deferFailure(generation, "A routed ICE candidate was not available.");
+            CaltopoClient.CTDebug(
+                    TAG,
+                    "Preflight answer awaiting routed ICE candidate request="
+                            + requestId + " ice=" + activePeer.iceGatheringState()
+                            + " gathered=" + localIceCandidates.size());
+            // Do not fail the request on the first COMPLETE-without-candidates
+            // callback. Continual gathering can still deliver the Wi-Fi
+            // candidate; the connection timeout remains the bounded failure.
             return;
         }
         answerSent = true;

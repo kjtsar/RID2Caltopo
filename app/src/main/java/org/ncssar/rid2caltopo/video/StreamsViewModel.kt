@@ -1439,6 +1439,9 @@ class StreamsViewModel(
     fun managedVideoRenderSessionId(designator: String): Long? =
         ffmpegProbeService?.activeRenderSessionId(designator)
 
+    fun startManagedVideoRecordingSession(designator: String, inputUrl: String): Long? =
+        ffmpegProbeService?.startAuxiliaryRenderSession(designator, inputUrl)
+
     fun managedVideoSourceInfo(designator: String) =
         ffmpegProbeService?.videoSourceInfo(designator)
 

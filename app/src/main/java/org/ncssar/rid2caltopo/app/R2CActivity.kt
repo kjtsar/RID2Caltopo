@@ -1625,11 +1625,10 @@ class R2CActivity :
             )
             stopManagedVideoRecordingDecoder()
             val sessionId = recording?.let {
-                FfmpegBridge.startRender(
+                streamsViewModel.startManagedVideoRecordingSession(
                     it.droneDesignator,
                     it.file.toURI().toString(),
-                ).takeIf { decoderSessionId -> decoderSessionId > 0L }
-                    ?.also { decoderSessionId ->
+                )?.also { decoderSessionId ->
                         managedVideoRecordingDecoderSessionId = decoderSessionId
                     }
             } ?: streamsViewModel.managedVideoRenderSessionId(
@@ -1799,10 +1798,10 @@ class R2CActivity :
                 null
             }
             val ownedDecoder = recording?.let {
-                FfmpegBridge.startRender(
+                streamsViewModel.startManagedVideoRecordingSession(
                     it.droneDesignator,
                     it.file.toURI().toString(),
-                ).takeIf { sessionId -> sessionId > 0L }
+                )
             }
             val decoderSessionId = ownedDecoder
                 ?: streamsViewModel.managedVideoRenderSessionId(

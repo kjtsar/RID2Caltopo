@@ -24,7 +24,7 @@ object MediaMTXRecordingSync {
 
     @JvmStatic
     fun syncAll(context: Context, streamPath: String? = null) {
-        val todaysTrackDir = CaltopoClient.GetTodaysTrackDir() ?: return
+        val todaysTrackDir = CaltopoClient.GetTodaysTrackDir()
         val stagingRoot = getRecordingStagingDir(context)
         if (!stagingRoot.exists()) return
 
@@ -35,6 +35,7 @@ object MediaMTXRecordingSync {
                 syncStreamPath(context, todaysTrackDir, File(stagingRoot, streamPath), streamPath)
             }
             deleteEmptyDirectories(stagingRoot)
+            CaltopoClient.CTDebug(TAG, "syncAll() completed path=$streamPath")
         } catch (e: Exception) {
             CaltopoClient.CTError(TAG, "syncAll() raised for path=$streamPath", e)
         }
@@ -42,7 +43,7 @@ object MediaMTXRecordingSync {
 
     private fun syncDirectoryTree(
         context: Context,
-        todaysTrackDir: DocumentFile,
+        todaysTrackDir: DocumentFile?,
         root: File,
         relativePath: String,
     ) {
@@ -61,7 +62,7 @@ object MediaMTXRecordingSync {
 
     private fun syncStreamPath(
         context: Context,
-        todaysTrackDir: DocumentFile,
+        todaysTrackDir: DocumentFile?,
         sourceRoot: File,
         streamPath: String,
     ) {
@@ -72,17 +73,23 @@ object MediaMTXRecordingSync {
             .orEmpty()
         if (fragments.isEmpty()) return
 
-        val targetRoot = ensureTargetDir(todaysTrackDir, streamPath)
         val mergedFile = tempMergedRecordingFile(context, streamPath, fragments.first())
 
         try {
             remuxMp4Sequence(fragments, mergedFile)
-            copyFileInto(
-                resolver = context.contentResolver,
-                sourceFile = mergedFile,
-                targetDir = targetRoot,
-                targetName = archiveRecordingFileName(streamPath, fragments.first()),
-            )
+            if (todaysTrackDir != null) {
+                copyFileInto(
+                    resolver = context.contentResolver,
+                    sourceFile = mergedFile,
+                    targetDir = ensureTargetDir(todaysTrackDir, streamPath),
+                    targetName = archiveRecordingFileName(streamPath, fragments.first()),
+                )
+            } else {
+                CaltopoClient.CTWarn(
+                    TAG,
+                    "Track archive unavailable; retaining recording for tracker access only path=$streamPath",
+                )
+            }
             ManagedVideoSessionRecordingCatalog.retain(
                 context = context,
                 mergedFile = mergedFile,

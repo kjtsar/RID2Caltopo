@@ -59,6 +59,12 @@ public class MediaMTXService extends Service {
     private static final String ACTION_RESTART_SERVICE = "RESTART_SERVICE";
     private static final String CHANNEL_ID = "streaming";
     private static final int MEDIA_MTX_NOTIFICATION_ID = 2;
+    private static final ExecutorService recordingSyncExecutor =
+            Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "mediamtx-recording-sync");
+                thread.setDaemon(true);
+                return thread;
+            });
     private static boolean listenersRegistered = false;
     private static boolean recordingListenerRegistered = false;
     private static int processPid = 0;
@@ -329,11 +335,12 @@ public class MediaMTXService extends Service {
             final Context appContext = getApplicationContext();
             MediaMTXStructuredDispatcher.addListener(event -> {
                 if (!CaltopoClient.GetCaptureVideoStreamsFlag()) return Unit.INSTANCE;
-                if (event instanceof MediaMTXEvent.StreamStopped) {
-                    MediaMTXEvent.StreamStopped stopped = (MediaMTXEvent.StreamStopped) event;
-                    if (stopped.getPublisherConnId() != null && !stopped.getPublisherConnId().isEmpty()) {
-                        MediaMTXRecordingSync.syncAll(appContext, stopped.getPath());
-                    }
+                if (event instanceof MediaMTXEvent.RecordFileCompleted) {
+                    MediaMTXEvent.RecordFileCompleted completed =
+                            (MediaMTXEvent.RecordFileCompleted) event;
+                    CTDebug(TAG, "Recording file complete path=" + completed.getFilePath());
+                    recordingSyncExecutor.execute(
+                            () -> MediaMTXRecordingSync.syncAll(appContext, completed.getPath()));
                 }
                 return Unit.INSTANCE;
             });

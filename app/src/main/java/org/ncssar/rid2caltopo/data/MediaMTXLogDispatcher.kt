@@ -37,6 +37,9 @@ object MediaMtxLogParser {
         Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+closed:\s*(.+)""")
     private val rtmpPublishCommandRegex =
         Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+RTMP control:\s+received command '([^']+)'\s+\(id=\d+\)\s+during publish on path '([^']+)'""")
+    private val recordFileCompleteRegex = Regex(
+        """\[path ([^\]]+)]\s+\[recorder]\s+record file complete path=(.+) durationMs=(\d+)"""
+    )
 
     fun parseLine(state: MediaMtxParserState, line: String): MediaMtxParserResult {
         val pendingRunOnReadyPaths = LinkedHashSet(state.pendingRunOnReadyPaths)
@@ -86,6 +89,18 @@ object MediaMtxLogParser {
                 "s" -> (numeric * 1000.0).toLong()
                 else -> null
             }
+        }
+
+        val recordFileCompleteMatch = recordFileCompleteRegex.find(line)
+        if (recordFileCompleteMatch != null) {
+            return MediaMtxParserResult(
+                MediaMTXEvent.RecordFileCompleted(
+                    path = recordFileCompleteMatch.groupValues[1],
+                    filePath = recordFileCompleteMatch.groupValues[2],
+                    durationMs = recordFileCompleteMatch.groupValues[3].toLongOrNull() ?: 0L,
+                ),
+                updatedState(),
+            )
         }
 
         val match = pathRegex.find(line)

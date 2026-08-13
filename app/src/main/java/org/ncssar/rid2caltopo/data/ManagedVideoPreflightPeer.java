@@ -48,7 +48,6 @@ final class ManagedVideoPreflightPeer implements AutoCloseable {
     }
 
     private static final int CHUNK_BYTES = 16 * 1024;
-    private static final long MAX_BUFFERED_BYTES = 2L * 1024L * 1024L;
     private static final long PROBE_DURATION_MS = 4_000L;
     private static final long PROBE_WARMUP_MS = 500L;
     private static final long CONNECT_TIMEOUT_MS = 15_000L;
@@ -302,7 +301,9 @@ final class ManagedVideoPreflightPeer implements AutoCloseable {
         }
         for (
                 int burst = 0;
-                burst < 16 && activeChannel.bufferedAmount() < MAX_BUFFERED_BYTES;
+                ManagedVideoProbeQueuePolicy.maySend(
+                        burst,
+                        activeChannel.bufferedAmount());
                 burst++
         ) {
             ByteBuffer payload = ByteBuffer.allocateDirect(CHUNK_BYTES);

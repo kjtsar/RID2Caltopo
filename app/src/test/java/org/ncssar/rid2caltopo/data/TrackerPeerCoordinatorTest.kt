@@ -298,6 +298,34 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun recordingDownloadRequest_preservesRemoteControlConsentPolicy() {
+        var received: RecordingDownloadRequest? = null
+        coordinator.setVideoStreamRequestListener(object : PeerCoordinator.VideoStreamRequestListener {
+            override fun onVideoStreamRequest(request: VideoStreamViewRequest) = Unit
+            override fun onRecordingDownloadRequest(request: RecordingDownloadRequest) {
+                received = request
+            }
+        })
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        transport.receive(
+            JSONObject()
+                .put("type", "recording_download_request")
+                .put("requestId", "download-1")
+                .put("requesterEmail", "command@ncssar.example")
+                .put("streamSessionId", "recording-1")
+                .put("droneDesignator", "NCS1m3")
+                .put("uploadPath", "/recording-downloads/download-1/content")
+                .put("consentRequired", false)
+                .toString()
+        )
+
+        assertEquals("download-1", received?.requestId)
+        assertEquals("/recording-downloads/download-1/content", received?.uploadPath)
+        assertFalse(received?.consentRequired ?: true)
+    }
+
+    @Test
     fun managedVideoRequest_withoutMatchingSource_reportsNoSuchStream() {
         var deliveryCount = 0
         coordinator.setVideoStreamRequestListener { deliveryCount += 1 }

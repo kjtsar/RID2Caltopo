@@ -751,6 +751,12 @@ internal fun anomalyPolicyChanged(
     next: AnomalyPolicyUpdate,
 ): Boolean = previous != next
 
+internal fun shouldKeepFfmpegRender(
+    streamsUiActive: Boolean,
+    normalRenderSelected: Boolean,
+    managedVideoSourceRequired: Boolean,
+): Boolean = managedVideoSourceRequired || (streamsUiActive && normalRenderSelected)
+
 class StreamsViewModel(
     application: Application
 ) : AndroidViewModel(application),
@@ -868,6 +874,7 @@ class StreamsViewModel(
     private val _streamsUiActive = MutableStateFlow(false)
     private val streamsUiConsumerLock = Any()
     private val streamsUiConsumers = mutableSetOf<Any>()
+    private val managedVideoSourceConsumers = mutableSetOf<String>()
 
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
@@ -1507,6 +1514,22 @@ class StreamsViewModel(
             if (becameInactive) {
                 syncStreamSessions(currentResyncSnapshot())
             }
+        }
+    }
+
+    fun setManagedVideoSourceRequired(designator: String, required: Boolean) {
+        val normalized = designator.trim()
+        if (normalized.isEmpty()) return
+        val changed = synchronized(streamsUiConsumerLock) {
+            if (required) {
+                managedVideoSourceConsumers.add(normalized)
+            } else {
+                managedVideoSourceConsumers.remove(normalized)
+            }
+        }
+        if (changed) {
+            CTDebug(tag, "Managed video source $normalized required=$required")
+            syncStreamSessions(currentResyncSnapshot())
         }
     }
 
@@ -2498,6 +2521,9 @@ class StreamsViewModel(
         val activeLiveStreams = liveStreams.filter(::isStreamVisible)
         val liveDesignators = liveRevisions.keys
         val streamsUiActive = _streamsUiActive.value
+        val managedVideoSources = synchronized(streamsUiConsumerLock) {
+            managedVideoSourceConsumers.toSet()
+        }
         val added = activeLiveStreams.map { it.designator }.toSet() - lastLiveRevisions.keys
         val republished = activeLiveStreams
             .filter { info ->
@@ -2555,7 +2581,12 @@ class StreamsViewModel(
                 info.publisherConnId != null &&
                 info.publisherConnId != previousPublisherConnId
             val republishDetected = designator in republished
-            val useFfmpeg = streamsUiActive && shouldUseFfmpegRender(designator)
+            val keepForManagedVideo = designator in managedVideoSources
+            val useFfmpeg = shouldKeepFfmpegRender(
+                streamsUiActive = streamsUiActive,
+                normalRenderSelected = shouldUseFfmpegRender(designator),
+                managedVideoSourceRequired = keepForManagedVideo,
+            )
             val wasUsingFfmpeg = renderRouteByDesignator[designator] == true
             if (info.isLocalPlayback && (newlyLive || wasUsingFfmpeg != useFfmpeg)) {
                 CTDebug(
@@ -2568,7 +2599,7 @@ class StreamsViewModel(
             ffmpegProbeService?.updateSourcePath(designator, info.sourcePath)
             renderRouteByDesignator[designator] = useFfmpeg
             ffmpegProbeService?.setRenderEnabled(designator, useFfmpeg)
-            if (!streamsUiActive) {
+            if (!streamsUiActive && !keepForManagedVideo) {
                 ffmpegProbeService?.onStreamStopped(designator)
                 streamSessionService.onStreamStopped(designator)
                 CTDebug(tag, "Stream $designator live -> streams UI inactive, discarding packets")

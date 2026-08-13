@@ -39,7 +39,6 @@ final class AppleManagedVideoPreflightPeer: NSObject, @unchecked Sendable {
     typealias FailureSink = @Sendable (String, String) -> Void
 
     private static let chunkBytes = 16 * 1024
-    private static let maximumBufferedBytes: UInt64 = 2 * 1024 * 1024
     private static let probeDuration: TimeInterval = 4.0
     private static let probeWarmupDuration: TimeInterval = 0.5
     private static let connectionTimeout: TimeInterval = 12.0
@@ -305,7 +304,11 @@ final class AppleManagedVideoPreflightPeer: NSObject, @unchecked Sendable {
             probeTimer = nil
             return
         }
-        for _ in 0..<16 where channel.bufferedAmount < Self.maximumBufferedBytes {
+        for chunkIndex in 0..<ManagedVideoProbeQueuePolicy.maximumChunksPerBurst
+        where ManagedVideoProbeQueuePolicy.maySend(
+            chunksSentInBurst: chunkIndex,
+            bufferedBytes: channel.bufferedAmount
+        ) {
             var sequence = nextSequence.bigEndian
             var payload = Data(bytes: &sequence, count: MemoryLayout<UInt32>.size)
             payload.append(Data(count: Self.chunkBytes - payload.count))

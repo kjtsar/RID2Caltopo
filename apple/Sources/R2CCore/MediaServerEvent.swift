@@ -16,6 +16,7 @@ public enum MediaServerEvent: Equatable, Sendable {
         detail: String?
     )
     case hlsStreamStarted(path: String)
+    case recordFileCompleted(path: String, filePath: String, durationMilliseconds: Int)
 }
 
 /// Lifecycle seam implemented by the future Go mobile bridge.

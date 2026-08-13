@@ -112,4 +112,43 @@ class SpokenWarningCenterTest {
 
         assertNull(SpokenWarningCenter.requests.value)
     }
+
+    @Test
+    fun consume_deliversWarningOnlyOnceAcrossHostRecreation() {
+        SpokenWarningCenter.requestSpokenPhrase(
+            kind = SpokenWarningKind.VideoStreamRequest,
+            sourceKey = "sharing-request-a",
+            phrase = "Now sharing video stream with requester@example.org",
+            nowMs = 1_000L,
+        )
+        val emitted = SpokenWarningCenter.requests.value
+
+        val firstHost = SpokenWarningCenter.consume(emitted!!.requestId)
+        val recreatedHost = SpokenWarningCenter.consume(emitted.requestId)
+
+        assertEquals(emitted, firstHost)
+        assertNull(recreatedHost)
+        assertNull(SpokenWarningCenter.requests.value)
+    }
+
+    @Test
+    fun consume_doesNotClearANewerWarning() {
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.Altitude,
+            sourceKey = "flight-a",
+            nowMs = 1_000L,
+        )
+        val older = SpokenWarningCenter.requests.value!!
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.Proximity,
+            sourceKey = "pair-a",
+            nowMs = 2_000L,
+        )
+        val newer = SpokenWarningCenter.requests.value!!
+
+        assertNull(SpokenWarningCenter.consume(older.requestId))
+        assertTrue(newer === SpokenWarningCenter.requests.value)
+        assertEquals(newer, SpokenWarningCenter.consume(newer.requestId))
+        assertNull(SpokenWarningCenter.requests.value)
+    }
 }

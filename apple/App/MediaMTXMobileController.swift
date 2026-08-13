@@ -139,6 +139,9 @@ final class MediaMTXViewModel: ObservableObject {
                     case let .streamError(path, _, detail):
                         if let path { activePublisherPaths.remove(path) }
                         status = "Error \(path ?? "stream"): \(detail)"
+                    case let .recordFileCompleted(path, filePath, _):
+                        status = "Recorded \(path)"
+                        AppleLog.info("MediaMTX", "Recording file complete path=\(filePath)")
                     default:
                         break
                     }

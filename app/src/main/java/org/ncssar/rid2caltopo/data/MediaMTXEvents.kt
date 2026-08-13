@@ -50,4 +50,10 @@ sealed class MediaMTXEvent {
         val path: String,
         val timestamp: Instant = Instant.now()
     ) : MediaMTXEvent()
+    data class RecordFileCompleted(
+        val path: String,
+        val filePath: String,
+        val durationMs: Long,
+        val timestamp: Instant = Instant.now()
+    ) : MediaMTXEvent()
 }

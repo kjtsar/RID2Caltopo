@@ -1,9 +1,28 @@
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamState
 
 class StreamsViewModelResyncTest {
+    @Test
+    fun managedVideoConsumerKeepsDecoderWhenStreamsUiIsInactive() {
+        assertTrue(
+            shouldKeepFfmpegRender(
+                streamsUiActive = false,
+                normalRenderSelected = false,
+                managedVideoSourceRequired = true,
+            )
+        )
+        assertFalse(
+            shouldKeepFfmpegRender(
+                streamsUiActive = false,
+                normalRenderSelected = true,
+                managedVideoSourceRequired = false,
+            )
+        )
+    }
     @Test
     fun chooseResyncSnapshot_prefersLastSyncedMapWhenFlowSnapshotIsMomentarilyEmpty() {
         val lastSynced = mapOf(

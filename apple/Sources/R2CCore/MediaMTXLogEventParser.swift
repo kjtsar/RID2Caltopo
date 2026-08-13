@@ -16,6 +16,17 @@ public struct MediaMTXLogEventParser: Sendable {
             return .serverStarted(version: captures[0])
         }
 
+        if let captures = captures(
+            #"\[path ([^\]]+)]\s+\[recorder]\s+record file complete path=(.+) durationMs=(\d+)"#,
+            in: line
+        ) {
+            return .recordFileCompleted(
+                path: captures[0],
+                filePath: captures[1],
+                durationMilliseconds: Int(captures[2]) ?? 0
+            )
+        }
+
         if let captures = captures(#"\[path ([^\]]+)]\s+closing existing publisher"#, in: line) {
             return .streamPublisherHandoff(
                 path: captures[0],

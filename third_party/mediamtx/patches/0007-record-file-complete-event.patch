@@ -1,0 +1,24 @@
+diff --git a/internal/recorder/format_fmp4_segment.go b/internal/recorder/format_fmp4_segment.go
+index a55b8f35..3a7431a8 100644
+--- a/internal/recorder/format_fmp4_segment.go
++++ b/internal/recorder/format_fmp4_segment.go
+@@ -159,6 +159,7 @@ func (s *formatFMP4Segment) close() error {
+ 
+ 		if err2 == nil {
+ 			s.f.ri.onSegmentComplete(s.path, duration)
++			s.f.ri.Log(logger.Info, "record file complete path=%s durationMs=%d", s.path, duration.Milliseconds())
+ 		}
+ 	}
+ 
+diff --git a/internal/recorder/format_mpegts_segment.go b/internal/recorder/format_mpegts_segment.go
+index 96dd0b76..40bd892f 100644
+--- a/internal/recorder/format_mpegts_segment.go
++++ b/internal/recorder/format_mpegts_segment.go
+@@ -42,6 +42,7 @@ func (s *formatMPEGTSSegment) close() error {
+ 		if err2 == nil {
+ 			duration := s.lastDTS - s.startDTS
+ 			s.onSegmentComplete(s.path, duration)
++			s.log.Log(logger.Info, "record file complete path=%s durationMs=%d", s.path, duration.Milliseconds())
+ 		}
+ 	}
+ 

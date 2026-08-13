@@ -26,6 +26,13 @@ object MediaMTXStructuredDispatcher {
             .replace("\\t", "\t")
     }
 
+    private fun extractLongField(json: String, field: String): Long? =
+        Regex("\"${Regex.escape(field)}\"\\s*:\\s*(\\d+)")
+            .find(json)
+            ?.groupValues
+            ?.get(1)
+            ?.toLongOrNull()
+
     internal fun parseEventJson(json: String): MediaMTXEvent? {
         val type = extractStringField(json, "type") ?: return null
         return when (type) {
@@ -60,6 +67,11 @@ object MediaMTXStructuredDispatcher {
             }
             "server_started" -> MediaMTXEvent.ServerStarted(extractStringField(json, "version") ?: return null)
             "hls_started" -> MediaMTXEvent.HlsStreamStarted(extractStringField(json, "path") ?: return null)
+            "record_file_completed" -> MediaMTXEvent.RecordFileCompleted(
+                path = extractStringField(json, "path") ?: return null,
+                filePath = extractStringField(json, "filePath") ?: return null,
+                durationMs = extractLongField(json, "durationMs") ?: 0L,
+            )
             else -> null
         }
     }

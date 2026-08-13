@@ -84,6 +84,7 @@ import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.data.PeerCoordinator
 import org.ncssar.rid2caltopo.data.VideoStreamViewRequest
 import org.ncssar.rid2caltopo.data.VideoMediaOffer
+import org.ncssar.rid2caltopo.data.RecordingDownloadRequest
 import org.ncssar.rid2caltopo.data.ManagedVideoMediaPeer
 import org.ncssar.rid2caltopo.data.ManagedVideoStreamAdvertisement
 import org.ncssar.rid2caltopo.airspace.AirspaceCenter
@@ -424,6 +425,7 @@ class R2CActivity :
     private var bluetoothDisabled by mutableStateOf(false)
     private var launchDisclaimerAccepted by mutableStateOf(false)
     private var pendingVideoStreamRequest by mutableStateOf<VideoStreamViewRequest?>(null)
+    private var pendingRecordingDownloadRequest by mutableStateOf<RecordingDownloadRequest?>(null)
     private var pendingVideoPreflightRouteKind by mutableStateOf<String?>(null)
     private var pendingVideoPreflightBps by mutableStateOf<Long?>(null)
     private var pendingVideoPreflightFailure by mutableStateOf<String?>(null)
@@ -431,6 +433,7 @@ class R2CActivity :
     private val remoteControlledVideoRequests = linkedMapOf<String, VideoStreamViewRequest>()
     private var managedVideoMediaPeer: ManagedVideoMediaPeer? = null
     private var managedVideoRecordingDecoderSessionId: Long? = null
+    private val managedVideoLiveSourcesByRequestId = linkedMapOf<String, String>()
     private var activeRemoteVideoRequest by mutableStateOf<VideoStreamViewRequest?>(null)
     private var activeRemoteVideoSelection: ApprovedVideoSelection? = null
     private var activeRemoteVideoOfferSdp: String? = null
@@ -967,11 +970,41 @@ class R2CActivity :
                                 .respondToVideoStreamRequest(
                                     request.requestId, false, 0, 0, 0.0, 0L,
                                 )
+                            releaseManagedVideoLiveSource(request.requestId)
                             pendingVideoStreamRequest = null
                             pendingVideoPreflightRouteKind = null
                             pendingVideoPreflightBps = null
                             pendingVideoPreflightFailure = null
                         },
+                    )
+                }
+                pendingRecordingDownloadRequest?.let { request ->
+                    AlertDialog(
+                        onDismissRequest = {},
+                        title = { Text("Recording Download Request") },
+                        text = {
+                            Text(
+                                "${request.requesterEmail} requested the recorded video for " +
+                                    "${request.droneDesignator}. Approve transfer to the authorized tracker account?"
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                                    .respondToRecordingDownloadRequest(request.requestId, true)
+                                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                                    .uploadRecordingDownload(request)
+                                pendingRecordingDownloadRequest = null
+                            }) { Text("Approve transfer") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                                    .respondToRecordingDownloadRequest(request.requestId, false)
+                                pendingRecordingDownloadRequest = null
+                            }) { Text("Decline") }
+                        },
+                        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
                     )
                 }
                 if (maPackageImportState !is org.ncssar.rid2caltopo.data.MutualAidPackageImportState.Idle) {
@@ -1487,6 +1520,14 @@ class R2CActivity :
 
     override fun onVideoStreamRequest(request: VideoStreamViewRequest) {
         runOnUiThread {
+            if (
+                ManagedVideoSessionRecordingCatalog.find(
+                    applicationContext,
+                    request.streamSessionId,
+                ) == null
+            ) {
+                requireManagedVideoLiveSource(request.requestId, request.droneDesignator)
+            }
             if (!request.consentRequired) {
                 remoteControlledVideoRequests[request.requestId] = request
                 CaltopoClient.CTDebug(
@@ -1509,6 +1550,27 @@ class R2CActivity :
                 "Preparing routed video request from ${request.requesterEmail}",
                 Toast.LENGTH_LONG,
             ).show()
+        }
+    }
+
+    override fun onRecordingDownloadRequest(request: RecordingDownloadRequest) {
+        runOnUiThread {
+            if (!request.consentRequired) {
+                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                    .uploadRecordingDownload(request)
+                Toast.makeText(
+                    this,
+                    "Sending recording to ${request.requesterEmail}",
+                    Toast.LENGTH_LONG,
+                ).show()
+                return@runOnUiThread
+            }
+            pendingRecordingDownloadRequest = request
+            SpokenWarningCenter.requestSpokenPhrase(
+                kind = SpokenWarningKind.VideoStreamRequest,
+                sourceKey = "recording-${request.requestId}",
+                phrase = "Recording Download Request from ${request.requesterEmail}",
+            )
         }
     }
 
@@ -1556,6 +1618,7 @@ class R2CActivity :
             }
             approvedVideoSelections.remove(requestId)
             remoteControlledVideoRequests.remove(requestId)
+            releaseManagedVideoLiveSource(requestId)
             if (activeRemoteVideoRequest?.requestId == requestId) {
                 managedVideoMediaPeer?.close()
                 managedVideoMediaPeer = null
@@ -1627,7 +1690,7 @@ class R2CActivity :
             val sessionId = recording?.let {
                 streamsViewModel.startManagedVideoRecordingSession(
                     it.droneDesignator,
-                    it.file.toURI().toString(),
+                    Uri.fromFile(it.file).toString(),
                 )?.also { decoderSessionId ->
                         managedVideoRecordingDecoderSessionId = decoderSessionId
                     }
@@ -1636,6 +1699,7 @@ class R2CActivity :
             )
             if (sessionId == null) {
                 approvedVideoSelections.remove(offer.requestId)
+                releaseManagedVideoLiveSource(offer.requestId)
                 activeRemoteVideoFailure = "Remote video could not start: drone source unavailable."
                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
                     .sendVideoStreamTerminated(offer.requestId, "Drone source unavailable")
@@ -1647,6 +1711,14 @@ class R2CActivity :
             activeRemoteVideoMicrophoneEnabled = false
             activeRemoteVideoMicrophoneError = null
             activeRemoteVideoRequest = approved.request
+            if (recording == null) {
+                requireManagedVideoLiveSource(
+                    approved.request.requestId,
+                    approved.request.droneDesignator,
+                )
+            } else {
+                releaseManagedVideoLiveSource(approved.request.requestId)
+            }
             remoteControlledVideoRequests.remove(offer.requestId)
             activeRemoteVideoSelection = approved
             activeRemoteVideoOfferSdp = offer.sdp
@@ -1682,17 +1754,32 @@ class R2CActivity :
                             managedVideoMediaPeer === peer &&
                             activeRemoteVideoRequest?.requestId == requestId
                         ) {
+                            val sourceEndedNormally =
+                                managedVideoRecordingDecoderSessionId == null &&
+                                StreamRegistry.streams.value[
+                                    approved.request.droneDesignator
+                                ]?.state != org.ncssar.rid2caltopo.video.StreamState.LIVE
+                            val terminationReason = if (sourceEndedNormally) {
+                                "source_ended"
+                            } else {
+                                reason
+                            }
                             approvedVideoSelections.remove(requestId)
                             managedVideoMediaPeer = null
                             stopManagedVideoRecordingDecoder()
+                            releaseManagedVideoLiveSource(requestId)
                             activeRemoteVideoRequest = null
                             activeRemoteVideoSelection = null
                             activeRemoteVideoOfferSdp = null
                             activeRemoteVideoMetrics = null
-                            activeRemoteVideoFailure = "Remote video stopped: $reason"
+                            activeRemoteVideoFailure = if (sourceEndedNormally) {
+                                null
+                            } else {
+                                "Remote video stopped: $reason"
+                            }
                             setVolumeControlStream(AudioManager.STREAM_ALARM)
                             R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
-                                .sendVideoStreamTerminated(requestId, reason)
+                                .sendVideoStreamTerminated(requestId, terminationReason)
                         }
                     }
                 }
@@ -1729,6 +1816,10 @@ class R2CActivity :
                         if (managedVideoMediaPeer === peer) {
                             managedVideoMediaPeer = null
                             stopManagedVideoRecordingDecoder()
+                            releaseManagedVideoLiveSource(offer.requestId)
+                            activeRemoteVideoRequest = null
+                            activeRemoteVideoSelection = null
+                            activeRemoteVideoOfferSdp = null
                         }
                     }
                 }
@@ -1741,6 +1832,22 @@ class R2CActivity :
         managedVideoRecordingDecoderSessionId = null
     }
 
+    private fun requireManagedVideoLiveSource(requestId: String, designator: String) {
+        val previous = managedVideoLiveSourcesByRequestId.put(requestId, designator)
+        if (previous == designator) return
+        if (previous != null && previous !in managedVideoLiveSourcesByRequestId.values) {
+            streamsViewModel.setManagedVideoSourceRequired(previous, false)
+        }
+        streamsViewModel.setManagedVideoSourceRequired(designator, true)
+    }
+
+    private fun releaseManagedVideoLiveSource(requestId: String) {
+        managedVideoLiveSourcesByRequestId.remove(requestId)?.let { designator ->
+            if (designator in managedVideoLiveSourcesByRequestId.values) return@let
+            streamsViewModel.setManagedVideoSourceRequired(designator, false)
+        }
+    }
+
     private fun terminateManagedVideo(reason: String = "Pilot terminated stream") {
         val requestId = activeRemoteVideoRequest?.requestId ?: return
         managedVideoSourceRecoveryJob?.cancel()
@@ -1748,6 +1855,7 @@ class R2CActivity :
         managedVideoMediaPeer?.close()
         managedVideoMediaPeer = null
         stopManagedVideoRecordingDecoder()
+        releaseManagedVideoLiveSource(requestId)
         activeRemoteVideoRequest = null
         activeRemoteVideoSelection = null
         activeRemoteVideoOfferSdp = null
@@ -1800,7 +1908,7 @@ class R2CActivity :
             val ownedDecoder = recording?.let {
                 streamsViewModel.startManagedVideoRecordingSession(
                     it.droneDesignator,
-                    it.file.toURI().toString(),
+                    Uri.fromFile(it.file).toString(),
                 )
             }
             val decoderSessionId = ownedDecoder

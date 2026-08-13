@@ -31,6 +31,16 @@ struct AppleVideoStreamViewRequest: Codable, Identifiable, Equatable, Sendable {
     var id: String { requestId }
 }
 
+struct AppleRecordingDownloadRequest: Codable, Identifiable, Equatable, Sendable {
+    let requestId: String
+    let requesterEmail: String
+    let streamSessionId: String
+    let droneDesignator: String
+    let uploadPath: String
+    let consentRequired: Bool
+    var id: String { requestId }
+}
+
 struct AppleVideoQualityChoice: Identifiable, Equatable, Sendable {
     let id: String
     let label: String
@@ -172,6 +182,7 @@ final class AppleTrackerCoordinator: ObservableObject {
     @Published private(set) var recommendedAppVersionCode = 0
     @Published private(set) var recommendedUpdateURL: URL?
     @Published private(set) var pendingVideoStreamRequest: AppleVideoStreamViewRequest?
+    @Published private(set) var pendingRecordingDownloadRequest: AppleRecordingDownloadRequest?
     @Published private(set) var videoPreflightRouteKind: String?
     @Published private(set) var videoPreflightEstimatedUplinkBps: Int64?
     @Published private(set) var videoPreflightFailure: String?
@@ -744,6 +755,77 @@ final class AppleTrackerCoordinator: ObservableObject {
         clearVideoStreamRequest()
     }
 
+    func approveRecordingDownloadRequest() {
+        guard let request = pendingRecordingDownloadRequest else { return }
+        sendRecordingDownloadDecision(requestID: request.requestId, approved: true)
+        pendingRecordingDownloadRequest = nil
+        uploadRecording(request)
+    }
+
+    func declineRecordingDownloadRequest() {
+        guard let request = pendingRecordingDownloadRequest else { return }
+        sendRecordingDownloadDecision(requestID: request.requestId, approved: false)
+        pendingRecordingDownloadRequest = nil
+    }
+
+    private func sendRecordingDownloadDecision(requestID: String, approved: Bool) {
+        let payload: [String: Any] = [
+            "type": "recording_download_decision",
+            "requestId": requestID,
+            "decision": approved ? "approve" : "decline",
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload) { send(data) }
+    }
+
+    private func uploadRecording(_ request: AppleRecordingDownloadRequest) {
+        guard let recording = managedVideoRecordingsBySessionID[request.streamSessionId],
+              let configured = URL(string: trackerURLPrefix),
+              var components = URLComponents(url: configured, resolvingAgainstBaseURL: false)
+        else { return }
+        components.path = request.uploadPath
+        components.query = nil
+        guard let url = components.url else { return }
+        let apiKey = trackerAPIKey
+        let fileURL = recording.url
+        Task.detached(priority: .utility) {
+            do {
+                let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
+                let total = Int64(values.fileSize ?? 0)
+                guard total > 0 else { throw CocoaError(.fileReadCorruptFile) }
+                let handle = try FileHandle(forReadingFrom: fileURL)
+                defer { try? handle.close() }
+                let chunkSize: Int64 = 8 * 1024 * 1024
+                var start: Int64 = 0
+                while start < total {
+                    try handle.seek(toOffset: UInt64(start))
+                    let length = Int(min(chunkSize, total - start))
+                    guard let data = try handle.read(upToCount: length), data.count == length else {
+                        throw CocoaError(.fileReadCorruptFile)
+                    }
+                    var upload = URLRequest(url: url)
+                    upload.httpMethod = "PUT"
+                    upload.timeoutInterval = 60 * 60
+                    upload.setValue(apiKey, forHTTPHeaderField: "X-SAR-Token")
+                    upload.setValue(fileURL.lastPathComponent, forHTTPHeaderField: "X-R2C-Filename")
+                    upload.setValue("video/mp4", forHTTPHeaderField: "Content-Type")
+                    upload.setValue(
+                        "bytes \(start)-\(start + Int64(length) - 1)/\(total)",
+                        forHTTPHeaderField: "Content-Range"
+                    )
+                    let (_, response) = try await URLSession.shared.upload(for: upload, from: data)
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    guard (200..<300).contains(code) else {
+                        throw URLError(.badServerResponse, userInfo: ["status": code])
+                    }
+                    start += Int64(length)
+                }
+                AppleLog.info("TrackerPeer", "Recording transfer completed request=\(request.requestId)")
+            } catch {
+                AppleLog.error("TrackerPeer", "Recording transfer failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func sendVideoStreamDecision(
         requestID: String,
         approved: Bool,
@@ -1085,6 +1167,26 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
         if type == "video_media_offer" {
             handleVideoMediaOffer(data)
+            return true
+        }
+        if type == "recording_download_request" {
+            do {
+                let request = try JSONDecoder().decode(AppleRecordingDownloadRequest.self, from: data)
+                guard managedVideoRecordingsBySessionID[request.streamSessionId] != nil else {
+                    AppleLog.warning("TrackerPeer", "Requested recording is unavailable")
+                    return true
+                }
+                if request.consentRequired {
+                    pendingRecordingDownloadRequest = request
+                    AppleSpokenWarningCenter.shared.speak(
+                        "Recording Download Request from, " + Self.spokenEmailAddress(request.requesterEmail)
+                    )
+                } else {
+                    uploadRecording(request)
+                }
+            } catch {
+                AppleLog.error("TrackerPeer", "Invalid recording download request")
+            }
             return true
         }
         if type == "video_stream_request_cancelled" {

@@ -46,6 +46,7 @@ object SpokenWarningCenter {
     private val lastRequestedAtMsByKey = linkedMapOf<WarningKey, Long>()
     private var nextRequestId = 1L
 
+    @Synchronized
     fun requestWarning(
         kind: SpokenWarningKind,
         sourceKey: String,
@@ -62,6 +63,7 @@ object SpokenWarningCenter {
         )
     }
 
+    @Synchronized
     fun requestWarningSequence(
         kinds: List<SpokenWarningKind>,
         sourceKey: String,
@@ -85,6 +87,7 @@ object SpokenWarningCenter {
         )
     }
 
+    @Synchronized
     fun requestAudioAlarmTest(nowMs: Long = System.currentTimeMillis()) {
         requestWarningSequence(
             kinds = listOf(
@@ -100,6 +103,7 @@ object SpokenWarningCenter {
         )
     }
 
+    @Synchronized
     fun requestSpokenPhrase(
         kind: SpokenWarningKind,
         sourceKey: String,
@@ -121,6 +125,15 @@ object SpokenWarningCenter {
         )
     }
 
+    @Synchronized
+    fun consume(requestId: Long): SpokenWarningRequest? {
+        val current = _requests.value ?: return null
+        if (current.requestId != requestId) return null
+        _requests.value = null
+        return current
+    }
+
+    @Synchronized
     fun resetForTests() {
         _requests.value = null
         lastRequestedAtMsByKey.clear()
@@ -163,8 +176,10 @@ fun SpokenWarningAlertHost() {
     }
 
     LaunchedEffect(request?.requestId, ready) {
-        val currentRequest = request ?: return@LaunchedEffect
+        val pendingRequest = request ?: return@LaunchedEffect
         if (!ready) return@LaunchedEffect
+        val currentRequest = SpokenWarningCenter.consume(pendingRequest.requestId)
+            ?: return@LaunchedEffect
         val volume = (currentRequest.volumeFraction * CaltopoClient.GetAlarmVolumeMultiplier())
             .coerceIn(0f, 1f)
         val params = Bundle().apply {

@@ -17,27 +17,31 @@ gortmplib_patch="$patch_dir/0003-gortmplib-v0.3.0-rid2caltopo.patch"
 media_tools_patch="$patch_dir/0004-rid2caltopo-mediamtx-tests-tools.patch"
 session_name_patch="$patch_dir/0005-rid2caltopo-nonempty-rtsp-session-name.patch"
 regression_fixes_patch="$patch_dir/0006-rid2caltopo-regression-fixes.patch"
+record_file_event_patch="$patch_dir/0007-record-file-complete-event.patch"
 media_patch_sha="$(shasum -a 256 "$media_patch" | awk '{print $1}')"
 anet_patch_sha="$(shasum -a 256 "$anet_patch" | awk '{print $1}')"
 gortmplib_patch_sha="$(shasum -a 256 "$gortmplib_patch" | awk '{print $1}')"
 media_tools_patch_sha="$(shasum -a 256 "$media_tools_patch" | awk '{print $1}')"
 session_name_patch_sha="$(shasum -a 256 "$session_name_patch" | awk '{print $1}')"
 regression_fixes_patch_sha="$(shasum -a 256 "$regression_fixes_patch" | awk '{print $1}')"
+record_file_event_patch_sha="$(shasum -a 256 "$record_file_event_patch" | awk '{print $1}')"
 
 if [[ -d "$destination" ]]; then
-    [[ -f "$marker" ]] || {
-        echo "Refusing to reuse unverified MediaMTX source: $destination" >&2
-        exit 1
-    }
-    grep -qx "mediamtx_commit=$MEDIAMTX_COMMIT" "$marker"
-    grep -qx "media_patch_sha256=$media_patch_sha" "$marker"
-    grep -qx "anet_patch_sha256=$anet_patch_sha" "$marker"
-    grep -qx "gortmplib_patch_sha256=$gortmplib_patch_sha" "$marker"
-    grep -qx "media_tools_patch_sha256=$media_tools_patch_sha" "$marker"
-    grep -qx "session_name_patch_sha256=$session_name_patch_sha" "$marker"
-    grep -qx "regression_fixes_patch_sha256=$regression_fixes_patch_sha" "$marker"
-    printf '%s\n' "$destination"
-    exit 0
+    if [[ -f "$marker" ]] &&
+        [[ -f "$destination/internal/core/VERSION" ]] &&
+        [[ -f "$destination/internal/servers/hls/hls.min.js" ]] &&
+        grep -qx "mediamtx_commit=$MEDIAMTX_COMMIT" "$marker" &&
+        grep -qx "media_patch_sha256=$media_patch_sha" "$marker" &&
+        grep -qx "anet_patch_sha256=$anet_patch_sha" "$marker" &&
+        grep -qx "gortmplib_patch_sha256=$gortmplib_patch_sha" "$marker" &&
+        grep -qx "media_tools_patch_sha256=$media_tools_patch_sha" "$marker" &&
+        grep -qx "session_name_patch_sha256=$session_name_patch_sha" "$marker" &&
+        grep -qx "regression_fixes_patch_sha256=$regression_fixes_patch_sha" "$marker" &&
+        grep -qx "record_file_event_patch_sha256=$record_file_event_patch_sha" "$marker"; then
+        printf '%s\n' "$destination"
+        exit 0
+    fi
+    rm -rf "$destination"
 fi
 
 mkdir -p "$(dirname "$destination")"
@@ -91,6 +95,14 @@ git -C "$media_source" apply --check "$session_name_patch"
 git -C "$media_source" apply "$session_name_patch"
 git -C "$media_source" apply --check "$regression_fixes_patch"
 git -C "$media_source" apply "$regression_fixes_patch"
+git -C "$media_source" apply --check "$record_file_event_patch"
+git -C "$media_source" apply "$record_file_event_patch"
+(
+    cd "$media_source"
+    GOCACHE="$repo_root/.build/go-cache" \
+    GOMODCACHE="$repo_root/.build/go-mod-cache" \
+    go generate ./internal/core ./internal/servers/hls
+)
 
 cat >"$media_source/.rid2caltopo-patched-source" <<EOF
 mediamtx_commit=$MEDIAMTX_COMMIT
@@ -102,6 +114,7 @@ gortmplib_patch_sha256=$gortmplib_patch_sha
 media_tools_patch_sha256=$media_tools_patch_sha
 session_name_patch_sha256=$session_name_patch_sha
 regression_fixes_patch_sha256=$regression_fixes_patch_sha
+record_file_event_patch_sha256=$record_file_event_patch_sha
 EOF
 
 mv "$media_source" "$destination"

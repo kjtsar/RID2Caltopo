@@ -26,7 +26,7 @@ object MediaMTXConfig {
 
         val recordPath = File(
             recordingRoot,
-            "%path/%path_%d%b%Y_%H%M%S-%f",
+            "%path/%path_%Y-%m-%d_%H-%M-%S-%f",
         ).absolutePath
         recordSettings.add("record: yes")
         recordSettings.add("recordPath: '${yamlSingleQuoted(recordPath)}'")

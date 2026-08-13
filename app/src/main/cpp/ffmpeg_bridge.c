@@ -883,7 +883,10 @@ static ANativeWindow *acquire_window(ffmpeg_session_t *session) {
 
 static bool is_local_file_source(const ffmpeg_session_t *session) {
     if (session == NULL) return false;
-    return strncmp(session->url, "file://", 7) == 0;
+    // java.io.File.toURI() can produce file:/path while Android Uri.fromFile()
+    // produces file:///path. Treat every file URI as finite playback so it is
+    // paced by media timestamps and reaches EOF once instead of reconnecting.
+    return strncmp(session->url, "file:", 5) == 0;
 }
 
 #if HAVE_FFMPEG && HAVE_SWSCALE

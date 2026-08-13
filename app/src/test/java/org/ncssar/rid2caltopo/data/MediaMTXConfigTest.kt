@@ -31,7 +31,7 @@ class MediaMTXConfigTest {
         assertTrue(config.contains("pathDefaults:\n  record: yes"))
         assertTrue(config.contains("recordFormat: fmp4"))
         assertFalse(config.contains("\nrecord: yes"))
-        assertTrue(config.contains("%path/%path_%d%b%Y_%H%M%S-%f"))
+        assertTrue(config.contains("%path/%path_%Y-%m-%d_%H-%M-%S-%f"))
         assertTrue(config.contains("/tmp/mediamtx-recordings"))
     }
 

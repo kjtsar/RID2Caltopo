@@ -391,6 +391,7 @@ struct ContentView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
+            .modifier(RecordingDownloadApprovalModifier(coordinator: peerCoordinator))
             .sheet(item: Binding(
                 get: { peerCoordinator.videoStreamRequestReadyForApproval },
                 set: { value in
@@ -567,6 +568,13 @@ struct ContentView: View {
                 iCloudBackup.scheduleBackup()
                 mediaMTX.eventHandler = { event in
                     streamRegistry.handle(event)
+                    if case .recordFileCompleted = event {
+                        peerCoordinator.updateManagedVideoStreams(
+                            incidentName: currentIncidentName,
+                            incidentKey: currentIncidentKey,
+                            sessions: streamRegistry.sessions
+                        )
+                    }
                 }
                 await diagnostics.start()
                 AppleLog.info("App", "Application UI started")
@@ -2089,4 +2097,28 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+}
+private struct RecordingDownloadApprovalModifier: ViewModifier {
+    @ObservedObject var coordinator: AppleTrackerCoordinator
+
+    func body(content: Content) -> some View {
+        content.alert(item: Binding(
+            get: { coordinator.pendingRecordingDownloadRequest },
+            set: { _ in }
+        )) { request in
+            Alert(
+                title: Text("Recording Download Request"),
+                message: Text(
+                    "\(request.requesterEmail) requested the recorded video for "
+                        + "\(request.droneDesignator). Approve transfer to the authorized tracker account?"
+                ),
+                primaryButton: .default(Text("Approve transfer")) {
+                    coordinator.approveRecordingDownloadRequest()
+                },
+                secondaryButton: .destructive(Text("Decline")) {
+                    coordinator.declineRecordingDownloadRequest()
+                }
+            )
+        }
+    }
 }

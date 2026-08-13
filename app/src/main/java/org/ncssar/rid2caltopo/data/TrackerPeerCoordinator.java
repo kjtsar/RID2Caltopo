@@ -13,10 +13,15 @@ import android.os.Build;
 import org.ncssar.rid2caltopo.BuildConfig;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.app.R2CActivity;
+import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecording;
+import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.EOFException;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -26,6 +31,14 @@ import java.util.Locale;
 import java.time.ZoneId;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import okhttp3.MediaType;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okio.BufferedSink;
 
 /**
  * Tracker-backed coordination channel that uses tracker.kjt.us as the public
@@ -122,6 +135,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @Nullable private volatile String myName;
     @Nullable private volatile String trackerApiKey;
     @Nullable private volatile String trackerWsUrl;
+    @Nullable private volatile String trackerHttpOrigin;
+    @NonNull private final ExecutorService recordingUploadExecutor =
+            Executors.newSingleThreadExecutor();
     private volatile double myLat;
     private volatile double myLon;
     private volatile long myCaltopoRttMs = 2_000L;
@@ -233,6 +249,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.myName = name;
         this.trackerApiKey = trackerApiKey;
         this.trackerWsUrl = buildTrackerWebSocketUrl(trackerUrlPrefix);
+        this.trackerHttpOrigin = trackerHttpOrigin(trackerUrlPrefix);
         this.started = true;
         this.hardFailureNotified = false;
         this.nextReconnectDelayMs = RECONNECT_BASE_DELAY_MS;
@@ -1227,6 +1244,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 case "video_stream_request":
                     onVideoStreamRequest(jo);
                     break;
+                case "recording_download_request":
+                    onRecordingDownloadRequest(jo);
+                    break;
                 case "video_thumbnail_preview":
                     int previewTtlSeconds = Math.max(
                             10,
@@ -1317,6 +1337,23 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                         jo.optString("sourceCodec").trim(),
                         jo.optString("expiresAt").trim(),
                         jo.optBoolean("consentRequired", true)));
+    }
+
+    private void onRecordingDownloadRequest(@NonNull JSONObject jo) {
+        RecordingDownloadRequest request = new RecordingDownloadRequest(
+                jo.optString("requestId").trim(),
+                jo.optString("requesterEmail").trim(),
+                jo.optString("streamSessionId").trim(),
+                jo.optString("droneDesignator").trim(),
+                jo.optString("uploadPath").trim(),
+                jo.optBoolean("consentRequired", true));
+        if (request.requestId.isEmpty() || request.streamSessionId.isEmpty()
+                || request.uploadPath.isEmpty()) {
+            CTWarn(TAG, "Ignoring incomplete recording download request.");
+            return;
+        }
+        VideoStreamRequestListener listener = videoStreamRequestListener;
+        if (listener != null) listener.onRecordingDownloadRequest(request);
     }
 
     private void sendVideoStreamUnavailable(
@@ -1459,6 +1496,81 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @Override
     public void sendVideoStreamTerminated(@NonNull String requestId, @NonNull String reason) {
         sendManagedVideoMessage("video_stream_terminated", requestId, "", reason);
+    }
+
+    @Override
+    public void respondToRecordingDownloadRequest(
+            @NonNull String requestId, boolean approved) {
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", "recording_download_decision");
+            message.put("requestId", requestId);
+            message.put("decision", approved ? "approve" : "decline");
+            sendJson(message);
+        } catch (Exception exception) {
+            CTError(TAG, "Unable to encode recording download decision.", exception);
+        }
+    }
+
+    @Override
+    public void uploadRecordingDownload(@NonNull RecordingDownloadRequest request) {
+        final String origin = trackerHttpOrigin;
+        final String token = trackerApiKey;
+        ManagedVideoSessionRecording recording = ManagedVideoSessionRecordingCatalog.INSTANCE.find(
+                R2CApplication.getAppCtxt(), request.streamSessionId);
+        if (origin == null || token == null || recording == null) {
+            CTWarn(TAG, "Unable to attach requested recording " + request.streamSessionId);
+            return;
+        }
+        recordingUploadExecutor.execute(() -> {
+            final long total = recording.getFile().length();
+            final long chunkSize = 8L * 1024L * 1024L;
+            try {
+                for (long start = 0; start < total; start += chunkSize) {
+                    final long chunkStart = start;
+                    final long length = Math.min(chunkSize, total - start);
+                    RequestBody body = new RequestBody() {
+                        @Override public MediaType contentType() { return MediaType.get("video/mp4"); }
+                        @Override public long contentLength() { return length; }
+                        @Override public void writeTo(@NonNull BufferedSink sink) throws IOException {
+                            try (FileInputStream input = new FileInputStream(recording.getFile())) {
+                                long skipped = 0;
+                                while (skipped < chunkStart) {
+                                    long step = input.skip(chunkStart - skipped);
+                                    if (step <= 0) throw new EOFException("Unable to seek recording chunk");
+                                    skipped += step;
+                                }
+                                byte[] buffer = new byte[64 * 1024];
+                                long remaining = length;
+                                while (remaining > 0) {
+                                    int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+                                    if (count < 0) throw new EOFException("Recording ended during upload");
+                                    sink.write(buffer, 0, count);
+                                    remaining -= count;
+                                }
+                            }
+                        }
+                    };
+                    Request upload = new Request.Builder()
+                            .url(origin + request.uploadPath)
+                            .header("X-SAR-Token", token)
+                            .header("X-R2C-Filename", recording.getFile().getName())
+                            .header("Content-Range", "bytes " + start + "-"
+                                    + (start + length - 1) + "/" + total)
+                            .put(body)
+                            .build();
+                    try (Response response = CaltopoSession.MyOkHttpClient.newCall(upload).execute()) {
+                        if (!response.isSuccessful()) {
+                            throw new IOException("HTTP " + response.code());
+                        }
+                    }
+                }
+                CTInfo(TAG, "Recording transfer completed request=" + request.requestId
+                        + " bytes=" + total);
+            } catch (Exception error) {
+                CTError(TAG, "Recording transfer failed request=" + request.requestId, error);
+            }
+        });
     }
 
     private void sendManagedVideoMessage(
@@ -1830,6 +1942,16 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             url = "ws://" + url.substring("http://".length());
         }
         return url + "/ws/r2c";
+    }
+
+    @NonNull
+    private static String trackerHttpOrigin(@NonNull String trackerUrlPrefix) {
+        try {
+            URI uri = URI.create(trackerUrlPrefix.trim());
+            return new URI(uri.getScheme(), uri.getAuthority(), null, null, null).toString();
+        } catch (Exception ignored) {
+            return trackerUrlPrefix.replaceAll("/+$", "");
+        }
     }
 
     @NonNull

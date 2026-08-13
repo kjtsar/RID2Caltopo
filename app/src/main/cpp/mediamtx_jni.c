@@ -199,6 +199,21 @@ static void emit_event_json_type_path(JNIEnv* reader_env, const char* type, cons
     emit_event_json_type_path_conn(reader_env, type, path, NULL);
 }
 
+static void emit_record_file_completed(JNIEnv* reader_env,
+                                       const char* path,
+                                       const char* file_path,
+                                       long long duration_ms) {
+    char escaped_path[MAX_VALUE_LEN * 2];
+    char escaped_file_path[MAX_VALUE_LEN * 2];
+    char payload[MAX_VALUE_LEN * 5];
+    json_escape_into(escaped_path, sizeof(escaped_path), path);
+    json_escape_into(escaped_file_path, sizeof(escaped_file_path), file_path);
+    snprintf(payload, sizeof(payload),
+             "{\"type\":\"record_file_completed\",\"path\":\"%s\",\"filePath\":\"%s\",\"durationMs\":%lld}",
+             escaped_path, escaped_file_path, duration_ms);
+    emit_event_json(reader_env, payload);
+}
+
 static void emit_event_json_type_path_reason_conn(JNIEnv* reader_env,
                                                   const char* type,
                                                   const char* path,
@@ -260,6 +275,21 @@ static void emit_structured_event_for_line(JNIEnv *reader_env, const char *line)
     const char *path_marker = strstr(line, "[path ");
     if (path_marker != NULL &&
         sscanf(path_marker, "[path %255[^]]] %511[^\n]", key, rem) == 2) {
+        const char *record_prefix = "[recorder] record file complete path=";
+        if (strncmp(rem, record_prefix, strlen(record_prefix)) == 0) {
+            char *duration_marker = strstr(rem, " durationMs=");
+            if (duration_marker != NULL) {
+                long long duration_ms = strtoll(
+                        duration_marker + strlen(" durationMs="), NULL, 10);
+                *duration_marker = '\0';
+                emit_record_file_completed(
+                        reader_env,
+                        key,
+                        rem + strlen(record_prefix),
+                        duration_ms);
+            }
+            return;
+        }
         if (strstr(rem, "runOnReady") != NULL) {
             set_remove(suppressStopForPath, &suppressStopForPathCount, key);
             return;

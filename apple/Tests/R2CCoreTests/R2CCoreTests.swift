@@ -2,6 +2,19 @@ import Foundation
 import Testing
 @testable import R2CCore
 
+@Test func managedVideoProbeQueueUsesShallowBackpressureBound() {
+    #expect(ManagedVideoProbeQueuePolicy.maySend(chunksSentInBurst: 0, bufferedBytes: 0))
+    #expect(ManagedVideoProbeQueuePolicy.maySend(
+        chunksSentInBurst: 3,
+        bufferedBytes: 255 * 1024
+    ))
+    #expect(!ManagedVideoProbeQueuePolicy.maySend(chunksSentInBurst: 4, bufferedBytes: 0))
+    #expect(!ManagedVideoProbeQueuePolicy.maySend(
+        chunksSentInBurst: 0,
+        bufferedBytes: 256 * 1024
+    ))
+}
+
 @Test func managedVideoSDPAddsRoutableCandidateToItsMediaSection() {
     let answer = """
     v=0
@@ -471,7 +484,7 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     )
     #expect(enabled.contains("pathDefaults:\n  record: yes"))
     #expect(enabled.contains(
-        "recordPath: '/tmp/stream archive/%path/%path_%d%b%Y_%H%M%S-%f'"
+        "recordPath: '/tmp/stream archive/%path/%path_%Y-%m-%d_%H-%M-%S-%f'"
     ))
     #expect(enabled.contains("recordFormat: fmp4"))
 }
@@ -3229,6 +3242,18 @@ private func proximityDrone(
     #expect(stopped == .streamStopped(
         path: "scout1",
         publisherConnectionID: "10.0.0.1:12000"
+    ))
+}
+
+@Test func mediaMtxLogParserReportsCompletedRecordingAfterClose() {
+    var parser = MediaMTXLogEventParser()
+    let event = parser.parse(
+        line: "[path scout1] [recorder] record file complete path=/records/scout1/file.mp4 durationMs=177400"
+    )
+    #expect(event == .recordFileCompleted(
+        path: "scout1",
+        filePath: "/records/scout1/file.mp4",
+        durationMilliseconds: 177_400
     ))
 }
 

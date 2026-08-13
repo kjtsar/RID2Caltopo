@@ -25,6 +25,8 @@ public interface PeerCoordinator {
         }
         default void onVideoMediaOffer(@NonNull VideoMediaOffer offer) {
         }
+        default void onRecordingDownloadRequest(@NonNull RecordingDownloadRequest request) {
+        }
     }
 
     enum CoordinationIndicatorState {
@@ -88,6 +90,10 @@ public interface PeerCoordinator {
     default void sendVideoMediaAnswer(@NonNull String requestId, @NonNull String sdp) {
     }
     default void sendVideoStreamTerminated(@NonNull String requestId, @NonNull String reason) {
+    }
+    default void respondToRecordingDownloadRequest(@NonNull String requestId, boolean approved) {
+    }
+    default void uploadRecordingDownload(@NonNull RecordingDownloadRequest request) {
     }
     @NonNull List<R2CMqttManager.PeerState> getPeerList();
     @NonNull CoordinationIndicatorState getCoordinationIndicatorState();

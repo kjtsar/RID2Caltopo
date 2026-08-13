@@ -7,6 +7,19 @@ import org.junit.Test
 
 class MediaMtxLogParserTest {
     @Test
+    fun parseLine_recordFileComplete_emitsClosedFilePathAndDuration() {
+        val result = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[path alpha] [recorder] record file complete path=/records/alpha/file.mp4 durationMs=177400",
+        )
+
+        val completed = result.event as MediaMTXEvent.RecordFileCompleted
+        assertEquals("alpha", completed.path)
+        assertEquals("/records/alpha/file.mp4", completed.filePath)
+        assertEquals(177_400L, completed.durationMs)
+    }
+
+    @Test
     fun parseLine_runOnReadyCommand_isIgnored() {
         val result = MediaMtxLogParser.parseLine(
             MediaMtxParserState(),

@@ -22,6 +22,9 @@ which Android Media3 can parse.
 `0006-rid2caltopo-regression-fixes.patch` restores empty-description stream
 compatibility and corrects the RID2Caltopo configuration and audio-replacement
 regression tests uncovered during the source-reproducibility audit.
+`0007-record-file-complete-event.patch` emits a structured recorder lifecycle
+line only after the completed segment has been closed successfully. Android and
+Apple use that event to publish the finished recording without a timing guess.
 
 Prepare a fresh patched checkout:
 

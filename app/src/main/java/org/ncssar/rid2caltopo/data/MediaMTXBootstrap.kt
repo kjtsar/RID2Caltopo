@@ -38,6 +38,7 @@ object MediaMTXBootstrap {
                     MediaMTXStatus.onServerStarted(event.version)
 
                 is MediaMTXEvent.HlsStreamStarted -> {}
+                is MediaMTXEvent.RecordFileCompleted -> {}
                 //    StreamRegistry.onStreamStarted(event.path)
             }
         }

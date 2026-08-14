@@ -5910,10 +5910,12 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             }
             while (session_running(session)) {
                 bool surface_paused = false;
+                bool remote_video_enabled = false;
                 pthread_mutex_lock(&g_lock);
                 surface_paused = session->surface_paused;
+                remote_video_enabled = session->remote_video_enabled;
                 pthread_mutex_unlock(&g_lock);
-                if (!surface_paused) break;
+                if (!surface_paused || remote_video_enabled) break;
                 usleep(5000);
             }
             if (!session_running(session)) {

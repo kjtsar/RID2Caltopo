@@ -56,6 +56,26 @@ class FfmpegBridgePressurePolicyTest {
         )
     }
 
+    @Test
+    fun localRecordingDecoderWakesForRemoteVideoWithoutDisplaySurface() {
+        val bridgeSource = ffmpegBridgeSource()
+        val gateStart = bridgeSource.indexOf(
+            "if (session->is_render && session->surface_paused &&"
+        )
+        assertTrue("native bridge should retain the surface-absent gate", gateStart >= 0)
+        val gateEnd = bridgeSource.indexOf(
+            "trace_begin_section(\"RID2C avcodec_send_packet\")",
+            startIndex = gateStart
+        )
+        assertTrue("surface-absent gate should precede packet decoding", gateEnd > gateStart)
+        val gate = bridgeSource.substring(gateStart, gateEnd)
+
+        assertTrue(
+            "a surface-less local decoder must wake when remote frame export starts",
+            gate.contains("if (!surface_paused || remote_video_enabled) break;")
+        )
+    }
+
     private fun ffmpegBridgeSource(): String {
         val projectDir = File(System.getProperty("user.dir"))
         val candidates = listOf(

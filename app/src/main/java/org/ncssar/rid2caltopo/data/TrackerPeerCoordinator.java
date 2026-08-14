@@ -1346,6 +1346,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 jo.optString("streamSessionId").trim(),
                 jo.optString("droneDesignator").trim(),
                 jo.optString("uploadPath").trim(),
+                jo.optString("expiresAt").trim(),
                 jo.optBoolean("consentRequired", true));
         if (request.requestId.isEmpty() || request.streamSessionId.isEmpty()
                 || request.uploadPath.isEmpty()) {

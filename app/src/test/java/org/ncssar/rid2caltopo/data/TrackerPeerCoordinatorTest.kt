@@ -316,12 +316,14 @@ class TrackerPeerCoordinatorTest {
                 .put("streamSessionId", "recording-1")
                 .put("droneDesignator", "NCS1m3")
                 .put("uploadPath", "/recording-downloads/download-1/content")
+                .put("expiresAt", "2026-07-30T18:10:00Z")
                 .put("consentRequired", false)
                 .toString()
         )
 
         assertEquals("download-1", received?.requestId)
         assertEquals("/recording-downloads/download-1/content", received?.uploadPath)
+        assertEquals("2026-07-30T18:10:00Z", received?.expiresAt)
         assertFalse(received?.consentRequired ?: true)
     }
 

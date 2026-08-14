@@ -1,5 +1,7 @@
 Latest changes:
-- Added ordinary browser downloads for Android and iOS recordings. Transfers require tablet approval unless Remote Video Control is enabled, and downloading does not delete either retained copy.
+- Expire unanswered tracker video and recording-transfer prompts after 60 seconds on Android and iOS, while preserving independently bounded approved sessions.
+- Reconcile streams and resume valid approved recording transfers when the tracker connection returns, without asking the operator twice.
+- Added ordinary browser downloads for Android and iOS recordings. Transfers require tablet approval unless Remote Video Control is enabled; the tablet original is retained and the tracker's temporary relay copy is deleted after delivery.
 - Publish recordings from MediaMTX's file-closed event so new video appears without timing guesses or manual refreshes.
 - Keep Android's live source attached during tracker negotiation, treat normal source endings as clean stops, and clear stale tracker request state.
 - Stabilized routed bandwidth checks and recorded playback so retries do not force last-resort quality or loop fragmented media.

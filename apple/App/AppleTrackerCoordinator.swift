@@ -37,6 +37,7 @@ struct AppleRecordingDownloadRequest: Codable, Identifiable, Equatable, Sendable
     let streamSessionId: String
     let droneDesignator: String
     let uploadPath: String
+    let expiresAt: String
     let consentRequired: Bool
     var id: String { requestId }
 }
@@ -183,6 +184,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     @Published private(set) var recommendedUpdateURL: URL?
     @Published private(set) var pendingVideoStreamRequest: AppleVideoStreamViewRequest?
     @Published private(set) var pendingRecordingDownloadRequest: AppleRecordingDownloadRequest?
+    private var pendingVideoRequestExpiryTask: Task<Void, Never>?
+    private var pendingRecordingRequestExpiryTask: Task<Void, Never>?
     @Published private(set) var videoPreflightRouteKind: String?
     @Published private(set) var videoPreflightEstimatedUplinkBps: Int64?
     @Published private(set) var videoPreflightFailure: String?
@@ -758,6 +761,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     func approveRecordingDownloadRequest() {
         guard let request = pendingRecordingDownloadRequest else { return }
         sendRecordingDownloadDecision(requestID: request.requestId, approved: true)
+        pendingRecordingRequestExpiryTask?.cancel()
+        pendingRecordingRequestExpiryTask = nil
         pendingRecordingDownloadRequest = nil
         uploadRecording(request)
     }
@@ -765,6 +770,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     func declineRecordingDownloadRequest() {
         guard let request = pendingRecordingDownloadRequest else { return }
         sendRecordingDownloadDecision(requestID: request.requestId, approved: false)
+        pendingRecordingRequestExpiryTask?.cancel()
+        pendingRecordingRequestExpiryTask = nil
         pendingRecordingDownloadRequest = nil
     }
 
@@ -851,10 +858,70 @@ final class AppleTrackerCoordinator: ObservableObject {
 
     private func clearVideoStreamRequest() {
         pendingVideoStreamRequest = nil
+        pendingVideoRequestExpiryTask?.cancel()
+        pendingVideoRequestExpiryTask = nil
         videoPreflightWatchdogTask?.cancel()
         videoPreflightWatchdogTask = nil
         videoPreflightPeer.cancel()
         resetVideoPreflightState()
+    }
+
+    private func trackerRequestExpiryDelay(_ value: String) -> TimeInterval {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let deadline = formatter.date(from: value)
+            ?? ISO8601DateFormatter().date(from: value)
+        guard let deadline else {
+            AppleLog.warning(
+                "TrackerPeer",
+                "Invalid tracker request expiry '\(value)'; applying 60-second bound"
+            )
+            return 60
+        }
+        return max(0, deadline.timeIntervalSinceNow)
+    }
+
+    private func scheduleVideoRequestExpiry(_ request: AppleVideoStreamViewRequest) {
+        pendingVideoRequestExpiryTask?.cancel()
+        let delay = trackerRequestExpiryDelay(request.expiresAt)
+        pendingVideoRequestExpiryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard self?.pendingVideoStreamRequest?.requestId == request.requestId else {
+                return
+            }
+            self?.clearVideoStreamRequest()
+            AppleLog.info(
+                "VideoApproval",
+                "Video request timed out request=\(request.requestId)"
+            )
+        }
+    }
+
+    private func scheduleRecordingRequestExpiry(
+        _ request: AppleRecordingDownloadRequest
+    ) {
+        pendingRecordingRequestExpiryTask?.cancel()
+        let delay = trackerRequestExpiryDelay(request.expiresAt)
+        pendingRecordingRequestExpiryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard self?.pendingRecordingDownloadRequest?.requestId == request.requestId else {
+                return
+            }
+            self?.pendingRecordingDownloadRequest = nil
+            self?.pendingRecordingRequestExpiryTask = nil
+            AppleLog.info(
+                "TrackerPeer",
+                "Recording request timed out request=\(request.requestId)"
+            )
+        }
     }
 
     private func redirectRemoteVideoStreams(to replacementRequesterEmail: String) {
@@ -1178,6 +1245,7 @@ final class AppleTrackerCoordinator: ObservableObject {
                 }
                 if request.consentRequired {
                     pendingRecordingDownloadRequest = request
+                    scheduleRecordingRequestExpiry(request)
                     AppleSpokenWarningCenter.shared.speak(
                         "Recording Download Request from, " + Self.spokenEmailAddress(request.requesterEmail)
                     )
@@ -1272,6 +1340,7 @@ final class AppleTrackerCoordinator: ObservableObject {
                 return true
             }
             pendingVideoStreamRequest = request
+            scheduleVideoRequestExpiry(request)
             videoPreflightPeer.cancel()
             resetVideoPreflightState()
             startVideoPreflightWatchdog(requestID: request.requestId)

@@ -121,6 +121,7 @@ import org.opendroneid.android.bluetooth.BluetoothScanner
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
+import java.time.Instant
 import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
@@ -429,6 +430,8 @@ class R2CActivity :
     private var pendingVideoPreflightRouteKind by mutableStateOf<String?>(null)
     private var pendingVideoPreflightBps by mutableStateOf<Long?>(null)
     private var pendingVideoPreflightFailure by mutableStateOf<String?>(null)
+    private var pendingVideoRequestExpiryJob: Job? = null
+    private var pendingRecordingRequestExpiryJob: Job? = null
     private val approvedVideoSelections = linkedMapOf<String, ApprovedVideoSelection>()
     private val remoteControlledVideoRequests = linkedMapOf<String, VideoStreamViewRequest>()
     private var managedVideoMediaPeer: ManagedVideoMediaPeer? = null
@@ -960,6 +963,8 @@ class R2CActivity :
                                     choice.fps,
                                     choice.bitrateBps,
                                 )
+                            pendingVideoRequestExpiryJob?.cancel()
+                            pendingVideoRequestExpiryJob = null
                             pendingVideoStreamRequest = null
                             pendingVideoPreflightRouteKind = null
                             pendingVideoPreflightBps = null
@@ -971,6 +976,8 @@ class R2CActivity :
                                     request.requestId, false, 0, 0, 0.0, 0L,
                                 )
                             releaseManagedVideoLiveSource(request.requestId)
+                            pendingVideoRequestExpiryJob?.cancel()
+                            pendingVideoRequestExpiryJob = null
                             pendingVideoStreamRequest = null
                             pendingVideoPreflightRouteKind = null
                             pendingVideoPreflightBps = null
@@ -994,6 +1001,8 @@ class R2CActivity :
                                     .respondToRecordingDownloadRequest(request.requestId, true)
                                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
                                     .uploadRecordingDownload(request)
+                                pendingRecordingRequestExpiryJob?.cancel()
+                                pendingRecordingRequestExpiryJob = null
                                 pendingRecordingDownloadRequest = null
                             }) { Text("Approve transfer") }
                         },
@@ -1001,6 +1010,8 @@ class R2CActivity :
                             TextButton(onClick = {
                                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
                                     .respondToRecordingDownloadRequest(request.requestId, false)
+                                pendingRecordingRequestExpiryJob?.cancel()
+                                pendingRecordingRequestExpiryJob = null
                                 pendingRecordingDownloadRequest = null
                             }) { Text("Decline") }
                         },
@@ -1537,6 +1548,7 @@ class R2CActivity :
                 return@runOnUiThread
             }
             pendingVideoStreamRequest = request
+            schedulePendingVideoRequestExpiry(request)
             pendingVideoPreflightRouteKind = null
             pendingVideoPreflightBps = null
             pendingVideoPreflightFailure = null
@@ -1566,11 +1578,71 @@ class R2CActivity :
                 return@runOnUiThread
             }
             pendingRecordingDownloadRequest = request
+            schedulePendingRecordingRequestExpiry(request)
             SpokenWarningCenter.requestSpokenPhrase(
                 kind = SpokenWarningKind.VideoStreamRequest,
                 sourceKey = "recording-${request.requestId}",
                 phrase = "Recording Download Request from ${request.requesterEmail}",
             )
+        }
+    }
+
+    private fun requestExpiryDelayMillis(expiresAt: String): Long {
+        val deadlineMs = runCatching {
+            Instant.parse(expiresAt).toEpochMilli()
+        }.getOrElse {
+            CaltopoClient.CTWarn(
+                "ManagedVideoApproval",
+                "Invalid tracker request expiry '$expiresAt'; applying 60-second bound",
+            )
+            System.currentTimeMillis() + 60_000L
+        }
+        return (deadlineMs - System.currentTimeMillis()).coerceAtLeast(0L)
+    }
+
+    private fun schedulePendingVideoRequestExpiry(request: VideoStreamViewRequest) {
+        pendingVideoRequestExpiryJob?.cancel()
+        pendingVideoRequestExpiryJob = lifecycleScope.launch {
+            delay(requestExpiryDelayMillis(request.expiresAt))
+            if (pendingVideoStreamRequest?.requestId != request.requestId) return@launch
+            pendingVideoStreamRequest = null
+            pendingVideoPreflightRouteKind = null
+            pendingVideoPreflightBps = null
+            pendingVideoPreflightFailure = null
+            releaseManagedVideoLiveSource(request.requestId)
+            CaltopoClient.CTDebug(
+                "ManagedVideoApproval",
+                "Video request timed out request=${request.requestId}",
+            )
+            Toast.makeText(
+                this@R2CActivity,
+                "Remote video request timed out",
+                Toast.LENGTH_LONG,
+            ).show()
+            pendingVideoRequestExpiryJob = null
+        }
+    }
+
+    private fun schedulePendingRecordingRequestExpiry(
+        request: RecordingDownloadRequest,
+    ) {
+        pendingRecordingRequestExpiryJob?.cancel()
+        pendingRecordingRequestExpiryJob = lifecycleScope.launch {
+            delay(requestExpiryDelayMillis(request.expiresAt))
+            if (pendingRecordingDownloadRequest?.requestId != request.requestId) {
+                return@launch
+            }
+            pendingRecordingDownloadRequest = null
+            CaltopoClient.CTDebug(
+                "ManagedVideoApproval",
+                "Recording request timed out request=${request.requestId}",
+            )
+            Toast.makeText(
+                this@R2CActivity,
+                "Recording transfer request timed out",
+                Toast.LENGTH_LONG,
+            ).show()
+            pendingRecordingRequestExpiryJob = null
         }
     }
 
@@ -1611,6 +1683,8 @@ class R2CActivity :
     override fun onVideoStreamRequestCancelled(requestId: String) {
         runOnUiThread {
             if (pendingVideoStreamRequest?.requestId == requestId) {
+                pendingVideoRequestExpiryJob?.cancel()
+                pendingVideoRequestExpiryJob = null
                 pendingVideoStreamRequest = null
                 pendingVideoPreflightRouteKind = null
                 pendingVideoPreflightBps = null

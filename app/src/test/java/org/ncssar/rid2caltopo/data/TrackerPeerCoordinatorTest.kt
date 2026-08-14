@@ -9,6 +9,7 @@ import org.junit.Before
 import org.junit.Test
 import org.json.JSONObject
 import org.ncssar.rid2caltopo.BuildConfig
+import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 
 class TrackerPeerCoordinatorTest {
@@ -325,6 +326,56 @@ class TrackerPeerCoordinatorTest {
         assertEquals("/recording-downloads/download-1/content", received?.uploadPath)
         assertEquals("2026-07-30T18:10:00Z", received?.expiresAt)
         assertFalse(received?.consentRequired ?: true)
+    }
+
+    @Test
+    fun recordingUploadOrigin_convertsWebSocketSchemesToHttp() {
+        val method = TrackerPeerCoordinator::class.java.getDeclaredMethod(
+            "trackerHttpOrigin",
+            String::class.java,
+        ).apply { isAccessible = true }
+
+        assertEquals("https://r2c-tracker.com", method.invoke(null, "wss://r2c-tracker.com/ws/r2c"))
+        assertEquals("http://localhost:8080", method.invoke(null, "ws://localhost:8080/ws/r2c"))
+    }
+
+    @Test
+    fun approvedRecordingUploadDoesNotWaitForWebSocketAcknowledgement() {
+        val coordinatorSource = projectSource(
+            "app/src/main/java/org/ncssar/rid2caltopo/data/TrackerPeerCoordinator.java"
+        )
+        val methodStart = coordinatorSource.indexOf(
+            "public void uploadRecordingDownload(@NonNull RecordingDownloadRequest request)"
+        )
+        val methodEnd = coordinatorSource.indexOf(
+            "private void uploadRecordingDownloadNow",
+            startIndex = methodStart,
+        )
+        assertTrue(methodStart >= 0 && methodEnd > methodStart)
+        val method = coordinatorSource.substring(methodStart, methodEnd)
+        assertTrue(method.contains("uploadRecordingDownloadNow(request);"))
+        assertFalse(method.contains("return;"))
+
+        val activitySource = projectSource(
+            "app/src/main/java/org/ncssar/rid2caltopo/app/R2CActivity.kt"
+        )
+        val approvalStart = activitySource.indexOf("pendingRecordingDownloadRequest?.let")
+        val approvalEnd = activitySource.indexOf("dismissButton", startIndex = approvalStart)
+        val approval = activitySource.substring(approvalStart, approvalEnd)
+        assertTrue(
+            approval.indexOf(".uploadRecordingDownload(request)") <
+                approval.indexOf(".respondToRecordingDownloadRequest(request.requestId, true)")
+        )
+    }
+
+    private fun projectSource(relativePath: String): String {
+        val workingDirectory = File(requireNotNull(System.getProperty("user.dir")))
+        val candidates = listOf(
+            File(workingDirectory, relativePath),
+            File(workingDirectory.parentFile ?: workingDirectory, relativePath),
+        )
+        return candidates.firstOrNull(File::isFile)?.readText()
+            ?: fail("Unable to locate source file $relativePath").let { "" }
     }
 
     @Test

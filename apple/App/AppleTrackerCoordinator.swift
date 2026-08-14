@@ -184,6 +184,7 @@ final class AppleTrackerCoordinator: ObservableObject {
     @Published private(set) var recommendedUpdateURL: URL?
     @Published private(set) var pendingVideoStreamRequest: AppleVideoStreamViewRequest?
     @Published private(set) var pendingRecordingDownloadRequest: AppleRecordingDownloadRequest?
+    private var approvedRecordingUploadsByRequestID: [String: AppleRecordingDownloadRequest] = [:]
     private var pendingVideoRequestExpiryTask: Task<Void, Never>?
     private var pendingRecordingRequestExpiryTask: Task<Void, Never>?
     @Published private(set) var videoPreflightRouteKind: String?
@@ -760,11 +761,19 @@ final class AppleTrackerCoordinator: ObservableObject {
 
     func approveRecordingDownloadRequest() {
         guard let request = pendingRecordingDownloadRequest else { return }
+        approvedRecordingUploadsByRequestID[request.requestId] = request
         sendRecordingDownloadDecision(requestID: request.requestId, approved: true)
+        AppleLog.info(
+            "TrackerPeer",
+            "Starting operator-approved recording transfer request=\(request.requestId)"
+        )
+        // The authenticated upload endpoint atomically authorizes an
+        // awaiting-approval request before accepting its first chunk.  Do not
+        // make an already-approved transfer depend on a websocket ack.
+        uploadRecording(request)
         pendingRecordingRequestExpiryTask?.cancel()
         pendingRecordingRequestExpiryTask = nil
         pendingRecordingDownloadRequest = nil
-        uploadRecording(request)
     }
 
     func declineRecordingDownloadRequest() {
@@ -785,16 +794,26 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     private func uploadRecording(_ request: AppleRecordingDownloadRequest) {
-        guard let recording = managedVideoRecordingsBySessionID[request.streamSessionId],
-              let configured = URL(string: trackerURLPrefix),
+        guard let recording = managedVideoRecordingsBySessionID[request.streamSessionId] else {
+            approvedRecordingUploadsByRequestID.removeValue(forKey: request.requestId)
+            AppleLog.warning("TrackerPeer", "Unable to attach requested recording \(request.streamSessionId)")
+            return
+        }
+        guard let configured = URL(string: trackerURLPrefix),
               var components = URLComponents(url: configured, resolvingAgainstBaseURL: false)
-        else { return }
+        else {
+            approvedRecordingUploadsByRequestID.removeValue(forKey: request.requestId)
+            AppleLog.error("TrackerPeer", "Recording transfer URL is invalid")
+            return
+        }
+        if components.scheme?.lowercased() == "wss" { components.scheme = "https" }
+        if components.scheme?.lowercased() == "ws" { components.scheme = "http" }
         components.path = request.uploadPath
         components.query = nil
         guard let url = components.url else { return }
         let apiKey = trackerAPIKey
         let fileURL = recording.url
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak self] in
             do {
                 let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
                 let total = Int64(values.fileSize ?? 0)
@@ -829,6 +848,9 @@ final class AppleTrackerCoordinator: ObservableObject {
                 AppleLog.info("TrackerPeer", "Recording transfer completed request=\(request.requestId)")
             } catch {
                 AppleLog.error("TrackerPeer", "Recording transfer failed: \(error.localizedDescription)")
+            }
+            await MainActor.run {
+                self?.approvedRecordingUploadsByRequestID.removeValue(forKey: request.requestId)
             }
         }
     }
@@ -1255,6 +1277,22 @@ final class AppleTrackerCoordinator: ObservableObject {
             } catch {
                 AppleLog.error("TrackerPeer", "Invalid recording download request")
             }
+            return true
+        }
+        if type == "recording_download_decision_ack" {
+            let requestID = (object["requestId"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let request = approvedRecordingUploadsByRequestID.removeValue(forKey: requestID) else {
+                return true
+            }
+            guard object["accepted"] as? Bool == true else {
+                AppleLog.warning(
+                    "TrackerPeer",
+                    "Tracker rejected recording transfer request=\(requestID) error=\(object["error"] as? String ?? "unknown")"
+                )
+                return true
+            }
+            AppleLog.info("TrackerPeer", "Tracker confirmed recording transfer authorization request=\(requestID)")
             return true
         }
         if type == "video_stream_request_cancelled" {

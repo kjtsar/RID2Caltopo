@@ -2,6 +2,30 @@ import Foundation
 import Testing
 @testable import R2CCore
 
+@Test func approvedAppleRecordingUploadDoesNotWaitForWebSocketAcknowledgement() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let source = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleTrackerCoordinator.swift"),
+        encoding: .utf8
+    )
+    let approvalStart = try #require(source.range(of: "func approveRecordingDownloadRequest()"))
+    let approvalEnd = try #require(
+        source.range(of: "func declineRecordingDownloadRequest()", range: approvalStart.upperBound..<source.endIndex)
+    )
+    let approval = source[approvalStart.lowerBound..<approvalEnd.lowerBound]
+    #expect(approval.contains("uploadRecording(request)"))
+
+    let ackStart = try #require(source.range(of: "if type == \"recording_download_decision_ack\""))
+    let ackEnd = try #require(
+        source.range(of: "if type == \"video_stream_request_cancelled\"", range: ackStart.upperBound..<source.endIndex)
+    )
+    let acknowledgement = source[ackStart.lowerBound..<ackEnd.lowerBound]
+    #expect(!acknowledgement.contains("uploadRecording(request)"))
+}
+
 @Test func managedVideoProbeQueueUsesShallowBackpressureBound() {
     #expect(ManagedVideoProbeQueuePolicy.maySend(chunksSentInBurst: 0, bufferedBytes: 0))
     #expect(ManagedVideoProbeQueuePolicy.maySend(

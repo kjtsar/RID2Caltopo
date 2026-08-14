@@ -116,6 +116,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private final DelayedExec idleParkTimer = new DelayedExec(false);
     @NonNull private final DelayedExec videoPresenceTimer = new DelayedExec(false);
     @NonNull private final ConcurrentHashMap<String, Long> lastSightingSentByRemoteId = new ConcurrentHashMap<>();
+    @NonNull private final ConcurrentHashMap<String, RecordingDownloadRequest>
+            approvedRecordingUploads = new ConcurrentHashMap<>();
     @NonNull private final ManagedVideoPreflightPeer videoPreflightPeer;
     @Nullable private volatile String lastOutboundJsonForTesting;
     @Nullable private volatile String lastWaypointRemoteIdForTesting;
@@ -354,6 +356,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         ownerByRemoteId.clear();
         leaseSeqByRemoteId.clear();
         lastSightingSentByRemoteId.clear();
+        approvedRecordingUploads.clear();
         notifyPeerListChanged();
         TrackerCoordinationTransport activeTransport = transport;
         transport = null;
@@ -1247,6 +1250,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 case "recording_download_request":
                     onRecordingDownloadRequest(jo);
                     break;
+                case "recording_download_decision_ack":
+                    onRecordingDownloadDecisionAck(jo);
+                    break;
                 case "video_thumbnail_preview":
                     int previewTtlSeconds = Math.max(
                             10,
@@ -1355,6 +1361,18 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
         VideoStreamRequestListener listener = videoStreamRequestListener;
         if (listener != null) listener.onRecordingDownloadRequest(request);
+    }
+
+    private void onRecordingDownloadDecisionAck(@NonNull JSONObject jo) {
+        String requestId = jo.optString("requestId").trim();
+        RecordingDownloadRequest request = approvedRecordingUploads.remove(requestId);
+        if (request == null) return;
+        if (!jo.optBoolean("accepted", false)) {
+            CTWarn(TAG, "Tracker rejected recording transfer request=" + requestId
+                    + " error=" + jo.optString("error"));
+            return;
+        }
+        CTInfo(TAG, "Tracker confirmed recording transfer authorization request=" + requestId);
     }
 
     private void sendVideoStreamUnavailable(
@@ -1507,7 +1525,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             message.put("type", "recording_download_decision");
             message.put("requestId", requestId);
             message.put("decision", approved ? "approve" : "decline");
-            sendJson(message);
+            if (sendJson(message)) {
+                CTInfo(TAG, "Recording transfer decision sent request=" + requestId
+                        + " approved=" + approved);
+            } else {
+                CTWarn(TAG, "Recording transfer decision could not be sent request=" + requestId
+                        + " approved=" + approved);
+            }
         } catch (Exception exception) {
             CTError(TAG, "Unable to encode recording download decision.", exception);
         }
@@ -1515,11 +1539,28 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void uploadRecordingDownload(@NonNull RecordingDownloadRequest request) {
+        if (request.consentRequired) {
+            approvedRecordingUploads.put(request.requestId, request);
+            CTInfo(TAG, "Starting operator-approved recording transfer request="
+                    + request.requestId + " session=" + request.streamSessionId);
+        } else {
+            CTInfo(TAG, "Starting remotely authorized recording transfer request="
+                    + request.requestId + " session=" + request.streamSessionId);
+        }
+        // The authenticated upload endpoint atomically authorizes an
+        // awaiting-approval request before accepting its first chunk.  Start
+        // the upload immediately so a delayed or lost websocket ack cannot
+        // strand an approval that the tablet operator already granted.
+        uploadRecordingDownloadNow(request);
+    }
+
+    private void uploadRecordingDownloadNow(@NonNull RecordingDownloadRequest request) {
         final String origin = trackerHttpOrigin;
         final String token = trackerApiKey;
         ManagedVideoSessionRecording recording = ManagedVideoSessionRecordingCatalog.INSTANCE.find(
                 R2CApplication.getAppCtxt(), request.streamSessionId);
         if (origin == null || token == null || recording == null) {
+            approvedRecordingUploads.remove(request.requestId);
             CTWarn(TAG, "Unable to attach requested recording " + request.streamSessionId);
             return;
         }
@@ -1570,6 +1611,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                         + " bytes=" + total);
             } catch (Exception error) {
                 CTError(TAG, "Recording transfer failed request=" + request.requestId, error);
+            } finally {
+                approvedRecordingUploads.remove(request.requestId);
             }
         });
     }
@@ -1949,7 +1992,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private static String trackerHttpOrigin(@NonNull String trackerUrlPrefix) {
         try {
             URI uri = URI.create(trackerUrlPrefix.trim());
-            return new URI(uri.getScheme(), uri.getAuthority(), null, null, null).toString();
+            String scheme = uri.getScheme();
+            if ("wss".equalsIgnoreCase(scheme)) scheme = "https";
+            if ("ws".equalsIgnoreCase(scheme)) scheme = "http";
+            return new URI(scheme, uri.getAuthority(), null, null, null).toString();
         } catch (Exception ignored) {
             return trackerUrlPrefix.replaceAll("/+$", "");
         }

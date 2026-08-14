@@ -998,9 +998,9 @@ class R2CActivity :
                         confirmButton = {
                             TextButton(onClick = {
                                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
-                                    .respondToRecordingDownloadRequest(request.requestId, true)
-                                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
                                     .uploadRecordingDownload(request)
+                                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                                    .respondToRecordingDownloadRequest(request.requestId, true)
                                 pendingRecordingRequestExpiryJob?.cancel()
                                 pendingRecordingRequestExpiryJob = null
                                 pendingRecordingDownloadRequest = null

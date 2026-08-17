@@ -757,6 +757,16 @@ internal fun shouldKeepFfmpegRender(
     managedVideoSourceRequired: Boolean,
 ): Boolean = managedVideoSourceRequired || (streamsUiActive && normalRenderSelected)
 
+internal fun managedVideoRequiredSources(
+    requestSources: Set<String>,
+    previewSources: Set<String>,
+): Set<String> = requestSources + previewSources
+
+internal fun shouldEnsureManagedVideoRenderSession(
+    managedVideoSourceRequired: Boolean,
+    activeRenderSessionId: Long?,
+): Boolean = managedVideoSourceRequired && activeRenderSessionId == null
+
 class StreamsViewModel(
     application: Application
 ) : AndroidViewModel(application),
@@ -874,7 +884,8 @@ class StreamsViewModel(
     private val _streamsUiActive = MutableStateFlow(false)
     private val streamsUiConsumerLock = Any()
     private val streamsUiConsumers = mutableSetOf<Any>()
-    private val managedVideoSourceConsumers = mutableSetOf<String>()
+    private val managedVideoRequestSources = mutableSetOf<String>()
+    private val managedVideoPreviewSources = mutableSetOf<String>()
 
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
@@ -1522,13 +1533,33 @@ class StreamsViewModel(
         if (normalized.isEmpty()) return
         val changed = synchronized(streamsUiConsumerLock) {
             if (required) {
-                managedVideoSourceConsumers.add(normalized)
+                managedVideoRequestSources.add(normalized)
             } else {
-                managedVideoSourceConsumers.remove(normalized)
+                managedVideoRequestSources.remove(normalized)
             }
         }
         if (changed) {
             CTDebug(tag, "Managed video source $normalized required=$required")
+            syncStreamSessions(currentResyncSnapshot())
+        }
+    }
+
+    fun setManagedVideoPreviewSources(designators: Set<String>) {
+        val normalized = designators
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        val changed = synchronized(streamsUiConsumerLock) {
+            if (managedVideoPreviewSources == normalized) {
+                false
+            } else {
+                managedVideoPreviewSources.clear()
+                managedVideoPreviewSources.addAll(normalized)
+                true
+            }
+        }
+        if (changed) {
+            CTDebug(tag, "Managed video preview sources=${normalized.sorted()}")
             syncStreamSessions(currentResyncSnapshot())
         }
     }
@@ -2522,7 +2553,10 @@ class StreamsViewModel(
         val liveDesignators = liveRevisions.keys
         val streamsUiActive = _streamsUiActive.value
         val managedVideoSources = synchronized(streamsUiConsumerLock) {
-            managedVideoSourceConsumers.toSet()
+            managedVideoRequiredSources(
+                requestSources = managedVideoRequestSources,
+                previewSources = managedVideoPreviewSources,
+            )
         }
         val added = activeLiveStreams.map { it.designator }.toSet() - lastLiveRevisions.keys
         val republished = activeLiveStreams
@@ -2599,6 +2633,14 @@ class StreamsViewModel(
             ffmpegProbeService?.updateSourcePath(designator, info.sourcePath)
             renderRouteByDesignator[designator] = useFfmpeg
             ffmpegProbeService?.setRenderEnabled(designator, useFfmpeg)
+            if (
+                shouldEnsureManagedVideoRenderSession(
+                    managedVideoSourceRequired = keepForManagedVideo,
+                    activeRenderSessionId = ffmpegProbeService?.activeRenderSessionId(designator),
+                )
+            ) {
+                ffmpegProbeService?.ensureManagedVideoRenderSession(designator)
+            }
             if (!streamsUiActive && !keepForManagedVideo) {
                 ffmpegProbeService?.onStreamStopped(designator)
                 streamSessionService.onStreamStopped(designator)

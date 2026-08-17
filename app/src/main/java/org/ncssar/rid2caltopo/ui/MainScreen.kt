@@ -20,6 +20,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -181,9 +182,7 @@ private val REQUIRED_MAP_CACHE_TAGS = listOf(
 
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
-    object IncidentView : MainScreenItem
     data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
-    data class SpacerView(val height: Dp) : MainScreenItem
 }
 
 private fun shouldOfferDriveRestore(context: Context): Boolean {
@@ -350,10 +349,11 @@ fun MainScreen(
     onEmailLog: suspend (List<String>) -> Unit,
     availableArchiveCleanupDirectoriesProvider: suspend () -> List<ArchiveCleanupDirectoryOption>,
     onDeleteArchiveDirectories: suspend (List<String>) -> ArchiveCleanupDeleteResult,
-    onShowHelp: () -> Unit,
     externalDisplayConnected: Boolean = false,
     externalDisplayContentMode: ExternalDisplayContentMode? = null,
-    onSetExternalDisplayContent: ((ExternalDisplayContentMode) -> Unit)? = null
+    onSetExternalDisplayContent: ((ExternalDisplayContentMode) -> Unit)? = null,
+    openDeveloperToolsOnStart: Boolean = false,
+    onDeveloperToolsOpened: () -> Unit = {},
 ) {
     val tag = "MainScreen"
     val mainHorizontalScrollState = rememberSaveable(saver = ScrollState.Saver) {
@@ -363,6 +363,7 @@ fun MainScreen(
     var credentialMenuExpanded by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showConfirmExitDialog by remember { mutableStateOf(false) }
+    var showAboutPrivacyDialog by remember { mutableStateOf(false) }
     var showDebugTagDialog by remember { mutableStateOf(false) }
     var knownDebugTags by remember { mutableStateOf(listOf<String>()) }
     var selectedKnownTags by remember { mutableStateOf(setOf<String>()) }
@@ -429,6 +430,13 @@ fun MainScreen(
     val nextProfileExpiry = operationalProfiles
         .mapNotNull { it.expiresAtEpochMs.takeIf { expiry -> expiry > 0L } }
         .minOrNull()
+
+    LaunchedEffect(openDeveloperToolsOnStart) {
+        if (openDeveloperToolsOnStart) {
+            showTestingToolsDialog = true
+            onDeveloperToolsOpened()
+        }
+    }
 
     LaunchedEffect(nextProfileExpiry) {
         CaltopoClient.ScheduleCaltopoProfileExpiry()
@@ -1203,11 +1211,7 @@ fun MainScreen(
     }
     
     // 2. Build the unified list of display items.
-    val screenItems = buildList {
-        add(MainScreenItem.IncidentView)
-        add(MainScreenItem.SpacerView(12.dp))
-        add(MainScreenItem.LocalView(localViewModel))
-    }
+    val screenItems: List<MainScreenItem> = listOf(MainScreenItem.LocalView(localViewModel))
 
     val openDebugTagDialog = {
         val currentFilterTags = parseCsvTags(CaltopoClient.GetDebugTagFilterCsv())
@@ -1349,24 +1353,6 @@ fun MainScreen(
                             CaltopoClient.CTEvent(tag,"ReleaseNotesDisplayed", null)
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = {
-                            Text("LogLevel:${level}") }, onClick = {
-                            CaltopoClient.BumpLoggingLevel()
-                            level = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
-                            if (CaltopoClient.DebugLevel == CaltopoClient.DebugLevelInfo) {
-                                showConfirmDialog = true;
-                            }
-                            menuExpanded = true
-                        })
-                        DropdownMenuItem(text = { Text("Proximity Pairs") }, onClick = {
-                            showProximityDebugDialog = true
-                            menuExpanded = false
-                        })
-
-                        DropdownMenuItem(text = { Text("Developer Tools") }, onClick = {
-                            showTestingToolsDialog = true
-                            menuExpanded = false
-                        })
                         DropdownMenuItem(
                             text = { Text("Import Config") },
                             onClick = {
@@ -1391,9 +1377,9 @@ fun MainScreen(
                             localViewModel.showSettings()
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Help") }, onClick = {
-                            onShowHelp()
-                            CaltopoClient.CTEvent(tag,"HelpDisplayed", null)
+                        DropdownMenuItem(text = { Text("About & Privacy") }, onClick = {
+                            showAboutPrivacyDialog = true
+                            CaltopoClient.CTEvent(tag,"AboutPrivacyDisplayed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Quit") }, onClick = {
@@ -1426,20 +1412,15 @@ fun MainScreen(
                 }
                 itemsIndexed(
                     items = screenItems,
-                    key = { index, item ->
+                    key = { _, item ->
                         // This key is now guaranteed to be unique and stable
                         when (item) {
                             is MainScreenItem.LocalView -> "local_view" // A constant key for the single local view
-                            is MainScreenItem.SpacerView -> "spacer_view_$index"
-                            is MainScreenItem.IncidentView -> "incident_view"
                         }
                     }
                 ) { _, item ->
                     // 4. Use a `when` statement to render the correct composable.
                     when (item) {
-                        is MainScreenItem.IncidentView -> {
-                             IncidentView()
-                        }
                         is MainScreenItem.LocalView -> {
                             val localDrones by item.viewModel.drones.collectAsState()
                             val appUptime by item.viewModel.appUpTime.collectAsState()
@@ -1455,13 +1436,86 @@ fun MainScreen(
                                 }
                             )
                         }
-                        is MainScreenItem.SpacerView -> {
-                            HorizontalDivider(thickness = item.height)
-                        }
                     }
                 }
             }
         }
+    }
+
+    if (showAboutPrivacyDialog) {
+        AlertDialog(
+            onDismissRequest = { showAboutPrivacyDialog = false },
+            title = { Text("About & Privacy") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 560.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("RID2Caltopo", style = MaterialTheme.typography.titleMedium)
+                    Text("Version ${BuildConfig.BUILD_VERSION} (${BuildConfig.VERSION_CODE})")
+                    Text(
+                        "Incident-support software for receiving Remote ID observations, mapping aircraft, publishing operator-authorized tracks, and analyzing live drone video.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Privacy", style = MaterialTheme.typography.titleMedium)
+                    Text("RID2Caltopo contains no advertising, does not track people across apps or websites, and does not sell personal data.")
+                    Text("The Android app uses Firebase Analytics for operational app events and configuration state. Some events include map or configuration details and mapped Remote ID identifiers; advertising-identifier collection is disabled.")
+                    Text("Remote ID observations, track archives, and diagnostic logs remain on this device unless you enable CalTopo publishing, load a configuration that enables eligible team-track upload or tracker peer coordination, enable configuration backup, or explicitly share a file.")
+                    Text("CalTopo credentials are stored in the app's private configuration and are not intentionally written to diagnostic logs or shared log bundles.")
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Permissions and network use", style = MaterialTheme.typography.titleMedium)
+                    Text("Bluetooth receives nearby ASTM Remote ID broadcasts.")
+                    Text("Location places the operator relative to aircraft on the map.")
+                    Text("Nearby Wi-Fi and local-network access receive controller video and optional external Remote ID observations.")
+                    Text("When enabled by the operator, CalTopo receives aircraft positions and telemetry for the selected map. Configured tracker peer coordination receives the app-install zone identifier, device zone name, operator position, confirmed drone identity, and aircraft sightings needed to coordinate ownership. Nearby NOTAM monitoring sends the operator location and selected radius to the configured tracker, which queries FAA without exposing FAA credentials to this app.")
+                    Text("When protected-land checks are enabled, public NPS, USFWS, USFS, and Colorado Parks and Wildlife services receive a small geographic search area around the operator location. Returned boundaries are cached locally; these requests do not include aircraft tracks or an operator identity.")
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Logs and deletion", style = MaterialTheme.typography.titleMedium)
+                    Text("You choose which log days to package and where to send the bundle. A bundle may contain Remote IDs, aircraft positions, the app-install coordination identifier, app events, device and OS details, local network addresses, and operational status.")
+                    Text("Nothing is transmitted by log sharing until you choose a destination in the Android share panel. Local logs and track archives can be removed in the app. Android or Google Drive configuration backups remain until removed from the corresponding backup service; CalTopo and the configured tracker control retention of data sent to them.")
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Additional information", style = MaterialTheme.typography.titleMedium)
+                    TextButton(
+                        onClick = {
+                            try {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse("https://rid2caltopo.com/"))
+                                )
+                            } catch (_: ActivityNotFoundException) {
+                                CaltopoClient.ShowToast("Unable to open rid2caltopo.com.")
+                            }
+                        }
+                    ) {
+                        Text("RID2Caltopo website")
+                    }
+                    TextButton(
+                        onClick = {
+                            try {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:kjtsar@kjt.us"))
+                                )
+                            } catch (_: ActivityNotFoundException) {
+                                CaltopoClient.ShowToast("No email app is available.")
+                            }
+                        }
+                    ) {
+                        Text("kjtsar@kjt.us")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAboutPrivacyDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 
     if (showLogArchiveDialog) {
@@ -1841,6 +1895,30 @@ fun MainScreen(
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState())
                 ) {
+                    Button(
+                        onClick = {
+                            showTestingToolsDialog = false
+                            showProximityDebugDialog = true
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Proximity Pairs")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            CaltopoClient.BumpLoggingLevel()
+                            level = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
+                            if (CaltopoClient.DebugLevel == CaltopoClient.DebugLevelInfo) {
+                                showTestingToolsDialog = false
+                                showConfirmDialog = true
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("LogLevel:$level")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = {
                             showTestingToolsDialog = false

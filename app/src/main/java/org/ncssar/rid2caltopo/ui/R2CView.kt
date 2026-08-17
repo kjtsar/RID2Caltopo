@@ -107,6 +107,16 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
         Column(modifier = colModifier) {
             if (null != viewModel) MapStateView(viewModel)
         }
+        Column(
+            modifier = colModifier.width(135.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            OpPeriodField(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+            )
+        }
         Column(modifier = colModifier) {
             val coordinatorStatus = coordinatorStatusDisplayText(
                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.coordinationStatusText

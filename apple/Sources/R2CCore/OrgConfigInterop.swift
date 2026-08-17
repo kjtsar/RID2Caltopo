@@ -5,6 +5,18 @@ public struct OrgConfigJoinToken: Sendable, Equatable {
     public let driveFileID: String
     public let isPublic: Bool
     public let version: Int
+
+    public init(
+        organizationName: String,
+        driveFileID: String,
+        isPublic: Bool,
+        version: Int
+    ) {
+        self.organizationName = organizationName
+        self.driveFileID = driveFileID
+        self.isPublic = isPublic
+        self.version = version
+    }
 }
 
 public struct OrgConfigRIDMapping: Sendable, Equatable {
@@ -159,10 +171,10 @@ public enum AndroidConfigTokenCodec {
             return standardAlphabet[index]
         }
         guard let encrypted = Data(base64Encoded: String(remapped)),
-              let object = try? JSONSerialization.jsonObject(with: Data(xor(Array(encrypted)))) as? [String: Any],
-              let fileID = object["f"] as? String,
-              !fileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              let object = try? JSONSerialization.jsonObject(with: Data(xor(Array(encrypted)))) as? [String: Any]
         else { return nil }
+        let fileID = string(object["f"])
+        guard !fileID.isEmpty else { return nil }
         let displayNameKey = definition.kind == .faa ? "l" : "o"
         return AndroidConfigJoinToken(
             kind: definition.kind,
@@ -303,10 +315,10 @@ public enum OrgConfigTokenCodec {
             return standardAlphabet[index]
         }
         guard let xored = Data(base64Encoded: String(remapped)),
-              let object = try? JSONSerialization.jsonObject(with: Data(xor(Array(xored)))) as? [String: Any],
-              let fileID = object["f"] as? String,
-              !fileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              let object = try? JSONSerialization.jsonObject(with: Data(xor(Array(xored)))) as? [String: Any]
         else { return nil }
+        let fileID = string(object["f"])
+        guard !fileID.isEmpty else { return nil }
         return OrgConfigJoinToken(
             organizationName: object["o"] as? String ?? "",
             driveFileID: fileID,
@@ -322,6 +334,7 @@ public enum OrgConfigTokenCodec {
             "p": token.isPublic ? 1 : 0,
             "v": token.version,
         ]
+        guard !token.driveFileID.isEmpty else { throw OrgConfigInteropError.invalidToken }
         let json = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         let base64 = Data(xor(Array(json))).base64EncodedString()
         let remapped = base64.map { character -> Character in
@@ -329,6 +342,12 @@ public enum OrgConfigTokenCodec {
             return customAlphabet[index]
         }
         return magicPrefix + String(remapped)
+    }
+
+    public static func qrPayload(for token: String) -> String {
+        let normalized = normalize(token)
+        guard normalized.hasPrefix(magicPrefix) else { return token }
+        return "\(qrScheme)://\(normalized.dropFirst(magicPrefix.count))"
     }
 
     public static func decryptPayload(_ encoded: String) throws -> String {
@@ -340,6 +359,17 @@ public enum OrgConfigTokenCodec {
 
     public static func encryptPayload(_ plaintext: String) -> String {
         Data(xor(Array(plaintext.utf8))).base64EncodedString()
+    }
+
+    /// Produce the byte-stable credential JSON shared with the Android app.
+    /// Empty optional values are omitted and keys are sorted before encryption.
+    public static func canonicalCredentialPayload(_ values: [String: String]) throws -> String {
+        let compact = values.filter { !$0.value.isEmpty }
+        let data = try JSONSerialization.data(withJSONObject: compact, options: [.sortedKeys])
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw OrgConfigInteropError.invalidEncryptedPayload
+        }
+        return value
     }
 
     public static func parseBundle(_ data: Data) throws -> OrgConfigBundle {

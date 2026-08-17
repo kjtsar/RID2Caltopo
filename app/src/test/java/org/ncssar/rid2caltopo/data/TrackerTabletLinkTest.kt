@@ -18,7 +18,7 @@ class TrackerTabletLinkTest {
     @Test
     fun markerDescription_containsOnlyTabletLinkLine() {
         assertEquals(
-            "R2C tablet: https://r2c-tracker.com/t/Bz2DZg",
+            "https://r2c-tracker.com/t/Bz2DZg",
             TrackerTabletLink.markerDescription(
                 "https://r2c-tracker.com/ncssar/",
                 "Kjt A5 Pro",

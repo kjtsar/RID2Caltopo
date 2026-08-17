@@ -239,6 +239,12 @@ public struct CaltopoArtifactSnapshot: Codable, Sendable, Equatable {
         self.ignoredTrackCount = ignoredTrackCount
     }
 
+    public func occurrenceCount(ofItemID itemID: String) -> Int {
+        let normalizedID = itemID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedID.isEmpty else { return 0 }
+        return items.filter { $0.id.lowercased() == normalizedID }.count
+    }
+
     public func hiding(folderIDs: Set<String>, itemIDs: Set<String> = []) -> CaltopoArtifactSnapshot {
         var hiddenFolders = folderIDs
         var changed = true
@@ -263,6 +269,35 @@ public struct CaltopoArtifactSnapshot: Codable, Sendable, Equatable {
         )
     }
 
+    public func coordinates(forItemID itemID: String) -> [MapCoordinate] {
+        points.filter { $0.id == itemID || $0.parentItemID == itemID }.map(\.coordinate)
+            + lines.filter { $0.itemID == itemID }.flatMap(\.coordinates)
+            + polygons.filter { $0.itemID == itemID }.flatMap(\.coordinates)
+    }
+
+    /// CalTopo can retain a geometry-less Assignment record after replacing it
+    /// with a new same-named Assignment. Keep the renderable record in Map
+    /// Folders without collapsing genuinely distinct, renderable assignments.
+    public var visibilityItems: [CaltopoArtifactItem] {
+        let renderableAssignmentKeys = Set(items.compactMap { item -> String? in
+            guard item.className == "Assignment",
+                  !coordinates(forItemID: item.id).isEmpty
+            else { return nil }
+            return Self.assignmentDisplayKey(item)
+        })
+        return items.filter { item in
+            guard item.className == "Assignment",
+                  coordinates(forItemID: item.id).isEmpty
+            else { return true }
+            return !renderableAssignmentKeys.contains(Self.assignmentDisplayKey(item))
+        }
+    }
+
+    private static func assignmentDisplayKey(_ item: CaltopoArtifactItem) -> String {
+        let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return "\(item.folderID.lowercased())\u{0}\(title)"
+    }
+
     /// Keeps an item available in Map Folders while suppressing its point from
     /// the rendered overlay. The local R2C device marker is rendered natively,
     /// so its CalTopo copy must not be drawn a second time at the same location.
@@ -282,6 +317,10 @@ public struct CaltopoArtifactSnapshot: Codable, Sendable, Equatable {
 }
 
 public enum CaltopoArtifactVisibilityPolicy {
+    public static func legacyPersistedSelectionKeys(_ keys: [String]) -> [String] {
+        keys.filter { $0.hasPrefix("map.visibility.") }.sorted()
+    }
+
     /// Combines local/server hidden state while keeping explicit operator choices
     /// authoritative for the active map session.
     public static func hiddenFolderIDs(

@@ -566,6 +566,7 @@ internal fun SplitMapPane(
         mutableStateOf(MapCacheSettings.maxTileAgeDays(context).toString())
     }
     var showMapFoldersDialog by remember { mutableStateOf(false) }
+    var pendingArtifactZoomFeatureId by remember { mutableStateOf<String?>(null) }
     val hiddenFolderIds = viewModel.hiddenFolderIds
     val hiddenItemIds = viewModel.hiddenItemIds
     var showBadTilesHowToDialog by remember { mutableStateOf(false) }
@@ -2043,6 +2044,11 @@ internal fun SplitMapPane(
             if (visible) hiddenItemIds.removeAll(itemIds.toSet())
             else hiddenItemIds.addAll(itemIds)
             startArtifactOverlayRebuild("bulk-item-visibility")
+        },
+        onZoomToItem = { itemId ->
+            pendingArtifactZoomFeatureId = itemId
+            operatorAdjustedViewport = true
+            viewModel.clearFocus()
         },
         showBadTilesHowToDialog = showBadTilesHowToDialog,
         onShowBadTilesHowToDialogChange = { showBadTilesHowToDialog = it },
@@ -3593,6 +3599,21 @@ internal fun SplitMapPane(
                         }
                         initialViewportApplied = true
                         viewModel.clearProximityMapFocus(focusTarget.requestId)
+                    }
+                }
+
+                pendingArtifactZoomFeatureId?.let { featureId ->
+                    val points = artifactStoreById[featureId]?.let(::artifactGeoPoints).orEmpty()
+                    if (points.isNotEmpty() && mapView.width > 0 && mapView.height > 0) {
+                        if (points.size == 1) {
+                            mapView.controller.animateTo(points.first(), MAP_DISPLAY_MAX_ZOOM, 500L)
+                        } else {
+                            mapView.zoomToBoundingBox(boundingBoxFromPoints(points), true, 96)
+                        }
+                        if (!isInsetMode) persistFullMapViewport(mapView)
+                        CTInfo(MAP_PANE_TAG, "Zoomed to assignment featureId=$featureId points=${points.size}")
+                        pendingArtifactZoomFeatureId = null
+                        initialViewportApplied = true
                     }
                 }
 

@@ -76,8 +76,8 @@ object OrgConfigToken {
             .put("f", config.driveFileId)
             .put("p", if (config.isPublic) 1 else 0)
             .put("v", config.version)
-            .toString()
-        val xored = xorBytes(json.toByteArray(Charsets.UTF_8))
+        val jsonText = json.toString()
+        val xored = xorBytes(jsonText.toByteArray(Charsets.UTF_8))
         val b64 = Base64.getEncoder().encodeToString(xored)
         val remapped = buildString(b64.length) {
             for (c in b64) {
@@ -124,6 +124,20 @@ object OrgConfigToken {
         val xored = xorBytes(plaintext.toByteArray(Charsets.UTF_8))
         return Base64.getEncoder().encodeToString(xored)
     }
+
+    /**
+     * Produce the byte-stable credential JSON shared with the Apple app.
+     * Empty optional values are omitted and keys are sorted before encryption so
+     * equivalent credentials generate the same tracker comparison value.
+     */
+    @JvmStatic
+    fun canonicalCredentialPayload(values: Map<String, String>): String =
+        values.entries
+            .filter { it.value.isNotEmpty() }
+            .sortedBy { it.key }
+            .joinToString(prefix = "{", postfix = "}", separator = ",") {
+                "${JSONObject.quote(it.key)}:${JSONObject.quote(it.value)}"
+            }
 
     /**
      * Reverse of [encryptPayload].  Decodes base64 then XOR-decrypts.

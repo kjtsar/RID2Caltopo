@@ -11,8 +11,10 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
+import org.ncssar.rid2caltopo.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject
+import okhttp3.Request
 import java.util.concurrent.Executors
 
 /**
@@ -39,6 +41,7 @@ object OrgConfigManager {
     private const val PREFS = "org_config_join"
     private const val KEY_TOKEN = "join_token"
     private const val KEY_ORG_NAME = "org_name"
+    private const val KEY_MANAGED_VERSION_MS = "managed_version_ms"
 
     // Type tags used in the bundle JSON to mark encrypted credential blocks.
     private const val TYPE_CREDENTIALS_ENC = "ct_credentials_enc"
@@ -82,10 +85,11 @@ object OrgConfigManager {
 
     @JvmStatic
     fun storeToken(context: Context, token: String) {
-        val config = OrgConfigToken.decode(token) ?: return
+        val orgName = OrgConfigToken.decode(token)?.orgName
+            ?: return
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_TOKEN, token)
-            .putString(KEY_ORG_NAME, config.orgName)
+            .putString(KEY_ORG_NAME, orgName)
             .apply()
     }
 
@@ -101,6 +105,11 @@ object OrgConfigManager {
 
     @JvmStatic
     fun hasJoinedOrg(context: Context): Boolean = !getStoredToken(context).isNullOrBlank()
+
+    @JvmStatic
+    fun getManagedVersionMs(context: Context): Long =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_MANAGED_VERSION_MS, 0L)
 
     /** Persist just the org name (e.g. to survive a Drive auth round-trip). */
     @JvmStatic
@@ -154,6 +163,143 @@ object OrgConfigManager {
         }
         bundle.put("configs", restored)
         return bundle.toString()
+    }
+
+    /** Build the narrow tracker-managed snapshot. Device enrollment and app policy are excluded. */
+    @JvmStatic
+    fun buildManagedSnapshot(): JSONObject {
+        val raw = CaltopoClient.BuildOrgConfigBundle(CaltopoClient.GetHomeOrgName())
+            ?: throw IllegalStateException("Failed to build organization configuration.")
+        val configs = JSONObject(raw).getJSONArray("configs")
+        var orgCredentials: Map<String, String>? = null
+        var mutualAidCredentials: Map<String, String>? = null
+        var drones = JSONArray()
+        for (index in 0 until configs.length()) {
+            val item = configs.getJSONObject(index)
+            when (item.optString("type")) {
+                "ct_credentials" -> orgCredentials = credentialValues(
+                    item,
+                    listOf("type", "file_version", "team_id", "credential_id",
+                        "credential_secret", "domain_and_port", "track_folder")
+                )
+                TYPE_MUTUAL_AID_CREDENTIALS -> mutualAidCredentials = credentialValues(
+                    item,
+                    listOf("type", "file_version", "team_id", "credential_id",
+                        "credential_secret", "domain_and_port", "source_label", "target_folder_hint")
+                )
+                "ct_ridmap" -> drones = item.optJSONArray("map") ?: JSONArray()
+            }
+        }
+        val credentials = orgCredentials
+            ?: throw IllegalStateException("Organization CalTopo credentials are not configured.")
+        val droneSpecs = JSONArray()
+        for (index in 0 until drones.length()) {
+            droneSpecs.put(filteredObject(
+                drones.getJSONObject(index),
+                listOf("remoteId", "mappedId", "org", "model", "owner")
+            ))
+        }
+        return JSONObject()
+            .put("configSchemaVersion", 1)
+            .put("sourcePlatform", "android")
+            .put("sourceAppVersion", BuildConfig.VERSION_NAME)
+            .put("sourceAppBuild", BuildConfig.VERSION_CODE)
+            .put("organizationCaltopoEnc", OrgConfigToken.encryptPayload(
+                OrgConfigToken.canonicalCredentialPayload(credentials)
+            ))
+            .put("mutualAidCaltopoEnc", mutualAidCredentials?.let {
+                OrgConfigToken.encryptPayload(OrgConfigToken.canonicalCredentialPayload(it))
+            } ?: "")
+            .put("droneSpecs", droneSpecs)
+    }
+
+    private fun filteredObject(source: JSONObject, names: List<String>): JSONObject {
+        val result = JSONObject()
+        names.forEach { name -> if (source.has(name)) result.put(name, source.get(name)) }
+        return result
+    }
+
+    private fun credentialValues(source: JSONObject, names: List<String>): Map<String, String> =
+        names.associateWith { source.optString(it, "") }
+
+    @JvmStatic
+    fun applyManagedSnapshot(context: Context, snapshot: JSONObject, versionMs: Long): Boolean {
+        if (snapshot.optInt("configSchemaVersion") != 1 || versionMs <= 0L) return false
+        val currentRaw = CaltopoClient.BuildOrgConfigBundle(CaltopoClient.GetHomeOrgName())
+            ?: return false
+        val current = JSONObject(currentRaw)
+        val currentConfigs = current.getJSONArray("configs")
+        val rebuilt = JSONArray()
+        val managedCredentials = JSONObject(
+            OrgConfigToken.decryptPayload(snapshot.getString("organizationCaltopoEnc"))
+        )
+        for (index in 0 until currentConfigs.length()) {
+            val item = currentConfigs.getJSONObject(index)
+            when (item.optString("type")) {
+                "ct_ridmap", TYPE_MUTUAL_AID_CREDENTIALS -> Unit
+                "ct_credentials" -> {
+                    val keys = managedCredentials.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        item.put(key, managedCredentials.get(key))
+                    }
+                    rebuilt.put(item)
+                }
+                else -> rebuilt.put(item)
+            }
+        }
+        val ridmap = JSONObject().put("type", "ct_ridmap").put("file_version", "1.0")
+            .put("load_type", "replace").put("map", snapshot.getJSONArray("droneSpecs"))
+        rebuilt.put(ridmap)
+        val mutualEnc = snapshot.optString("mutualAidCaltopoEnc")
+        if (mutualEnc.isNotBlank()) {
+            rebuilt.put(JSONObject(OrgConfigToken.decryptPayload(mutualEnc)))
+        } else {
+            CaltopoClient.SetMutualAidTemplateFields("", "", "", "", "", "")
+        }
+        current.put("configs", rebuilt)
+        val applied = CaltopoClient.ApplyOrgConfigBundle(current.toString())
+        if (applied) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putLong(KEY_MANAGED_VERSION_MS, versionMs)
+                .apply()
+        }
+        return applied
+    }
+
+    @JvmStatic
+    fun syncManagedConfiguration(
+        context: Context,
+        trackerOrigin: String,
+        organization: String,
+        deviceToken: String,
+        advertisedVersionMs: Long
+    ) {
+        if (advertisedVersionMs == 0L || advertisedVersionMs == getManagedVersionMs(context)) return
+        executor.execute {
+            try {
+                val request = Request.Builder()
+                    .url("${trackerOrigin.trimEnd('/')}/${organization.lowercase()}/api/v1/organization-config/current")
+                    .header("X-SAR-Token", deviceToken)
+                    .header("Cache-Control", "no-cache")
+                    .get()
+                    .build()
+                CaltopoSession.MyOkHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw IllegalStateException(
+                        "Tracker returned HTTP ${response.code} for organization configuration."
+                    )
+                    val root = JSONObject(response.body?.string().orEmpty())
+                    val versionMs = root.getLong("versionMs")
+                    if (versionMs != getManagedVersionMs(context) &&
+                        !applyManagedSnapshot(context, root.getJSONObject("config"), versionMs)) {
+                        throw IllegalStateException("Organization configuration could not be applied.")
+                    }
+                    CaltopoClient.CTInfo(TAG, "Applied managed organization configuration $versionMs")
+                }
+            } catch (e: Exception) {
+                CaltopoClient.CTWarn(TAG, "Managed organization configuration sync failed.", e)
+            }
+        }
     }
 
     // ── Admin: upload org config and return join token ─────────────────────────
@@ -217,9 +363,9 @@ object OrgConfigManager {
     // ── Member: download and apply org config ──────────────────────────────────
 
     /**
-     * Decode [token], download the org config bundle from Drive (no auth required
-     * because the file is publicly readable), decrypt the credentials block, and
-     * apply the bundle to the current app state.
+     * Decode [token], obtain the org config bundle from its public locator,
+     * decrypt the credentials block,
+     * and apply the bundle to the current app state.
      *
      * Runs on a background thread.  [callback] is called on the main thread with
      * (success, statusMessage).
@@ -241,23 +387,26 @@ object OrgConfigManager {
             val result = try {
                 val encJson = GoogleDriveConfigSync.downloadOrgConfigPublic(config.driveFileId)
                 val plainJson = decryptCredentialsInBundle(encJson)
+                val orgName = config.orgName.ifBlank {
+                    JSONObject(plainJson).optString("org_name")
+                }.ifBlank { throw IllegalStateException("R2C2 bundle has no organization name.") }
                 val enrollmentUrl = trackerEnrollmentUrl(plainJson)
                     ?: throw IllegalStateException("R2C2 bundle has no valid tracker enrollment locator.")
                 if (!TrackerEnrollmentClient.enrollmentOrganization(enrollmentUrl)
-                        .equals(config.orgName, ignoreCase = true)
+                        .equals(orgName, ignoreCase = true)
                 ) {
-                    throw IllegalStateException("R2C2 tracker enrollment does not belong to ${config.orgName}.")
+                    throw IllegalStateException("R2C2 tracker enrollment does not belong to $orgName.")
                 }
                 val success = CaltopoClient.ApplyOrgConfigBundle(plainJson)
                 if (success) {
                     val enrollment = TrackerEnrollmentClient.redeemBlocking(appContext, enrollmentUrl)
-                    if (!enrollment.organization.equals(config.orgName, ignoreCase = true)) {
+                    if (!enrollment.organization.equals(orgName, ignoreCase = true)) {
                         throw IllegalStateException("Tracker enrolled a different organization than the R2C2 bundle.")
                     }
                     TrackerEnrollmentClient.apply(enrollment)
                     storeToken(appContext, trimmed)
-                    CaltopoClient.CTDebug(TAG, "joinFromToken(): joined R2C2 org='${config.orgName}' with per-device enrollment")
-                    true to "Joined '${config.orgName}'. Team config applied and device enrolled with r2c-tracker."
+                    CaltopoClient.CTDebug(TAG, "joinFromToken(): joined R2C2 org='$orgName' with per-device enrollment")
+                    true to "Joined '$orgName'. Team config applied and device enrolled with r2c-tracker."
                 } else {
                     false to "Org config downloaded but could not be applied."
                 }

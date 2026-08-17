@@ -106,6 +106,17 @@ final class AppleCaltopoSettings: ObservableObject {
         status = "Android QR credentials loaded; select the incident Map ID to publish"
     }
 
+    func applyManagedCredentials(_ object: [String: Any]) throws {
+        domainAndPort = (object["domain_and_port"] as? String)?.isEmpty == false
+            ? object["domain_and_port"] as! String : "caltopo.com"
+        credentialID = object["credential_id"] as? String ?? ""
+        credentialSecret = object["credential_secret"] as? String ?? ""
+        teamID = object["team_id"] as? String ?? ""
+        defaults.set(teamID, forKey: "caltopo.teamID")
+        _ = save()
+        status = "Managed organization credentials loaded; select the incident map"
+    }
+
     func applyImported(mutualAid profile: MutualAidSharedProfile) throws {
         if !profile.domainAndPort.isEmpty { domainAndPort = profile.domainAndPort }
         if !profile.targetMapID.isEmpty { mapID = profile.targetMapID }

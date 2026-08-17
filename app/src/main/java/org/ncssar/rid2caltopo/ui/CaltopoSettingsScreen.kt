@@ -6,7 +6,6 @@
  */
 package org.ncssar.rid2caltopo.ui
 
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -22,11 +21,13 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
+import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 
 @Composable
 fun CaltopoSettingsScreen(
     onDismiss: () -> Unit,
+    onShowDeveloperTools: () -> Unit,
     settingsViewModel: CaltopoSettingsViewModel = viewModel()
 ) {
     var showRidMappingAdmin by remember { mutableStateOf(false) }
@@ -68,6 +69,7 @@ fun CaltopoSettingsScreen(
     val landRestrictionsAutoRefresh by settingsViewModel.landRestrictionsAutoRefresh.collectAsState()
     val landRestrictionsRadiusNm by settingsViewModel.landRestrictionsRadiusNm.collectAsState()
     val externalDisplayMode by settingsViewModel.externalDisplayMode.collectAsState()
+    val externalDisplayContentMode by settingsViewModel.externalDisplayContentMode.collectAsState()
     val externalDisplayAutoOpen by settingsViewModel.externalDisplayAutoOpen.collectAsState()
     val externalDisplayReturnToPhoneOnly by settingsViewModel.externalDisplayReturnToPhoneOnly.collectAsState()
     val externalDisplayAllowInteraction by settingsViewModel.externalDisplayAllowInteraction.collectAsState()
@@ -75,6 +77,10 @@ fun CaltopoSettingsScreen(
     val dismissAndSave = {
         settingsViewModel.saveSettings()
         onDismiss()
+    }
+    val showDeveloperTools = {
+        settingsViewModel.saveSettings()
+        onShowDeveloperTools()
     }
 
     Dialog(onDismissRequest = dismissAndSave) {
@@ -86,7 +92,7 @@ fun CaltopoSettingsScreen(
                 Text("Settings", style = MaterialTheme.typography.headlineSmall)
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    "Organization / RID Map",
+                    "Administration",
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -104,6 +110,13 @@ fun CaltopoSettingsScreen(
                     Text("View or Edit RID Map Entries ($ridMappingCount)")
                 }
                 Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    "Organization and operational defaults",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 OutlinedTextField(
                     value = organizationName,
                     onValueChange = settingsViewModel::onOrganizationNameChanged,
@@ -267,17 +280,24 @@ fun CaltopoSettingsScreen(
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    "Traffic safety",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 OutlinedTextField(
                     value = minDistance,
                     onValueChange = { settingsViewModel.onMinDistanceChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Min Dist (ft)") }
+                    label = { Text("Min Dist (ft)") },
+                    modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
                     value = newTrackDelay,
                     onValueChange = { settingsViewModel.onNewTrackDelayChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("New Track Delay (s)") }
+                    label = { Text("New Track Delay (s)") },
+                    modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
                     value = bridgeCheckDistanceFeet,
@@ -285,7 +305,8 @@ fun CaltopoSettingsScreen(
                         settingsViewModel.onBridgeCheckDistanceFeetChanged(it.filter { ch -> ch.isDigit() })
                     },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Bridge Check Distance (ft)") }
+                    label = { Text("Bridge Check Distance (ft)") },
+                    modifier = Modifier.fillMaxWidth()
                 )
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
@@ -311,16 +332,45 @@ fun CaltopoSettingsScreen(
                     value = maxIdleTimeInMinutes,
                     onValueChange = { settingsViewModel.onMaxIdleTimeInMinutesChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Max App Idle Time (minutes)") }
+                    label = { Text("Max App Idle Time (minutes)") },
+                    modifier = Modifier.fillMaxWidth()
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Capture Streams:")
-                    Switch(
-                        checked = captureIncomingVideo,
-                        onCheckedChange = { settingsViewModel.onCaptureIncomingVideoChanged(it) }
-                    )
-                    Text(if (captureIncomingVideo) "Yes" else "No")
-                }
+                LabeledSwitch(
+                    label = "Standalone R2C coordination",
+                    checked = standaloneR2cCoordinationEnabled,
+                    onCheckedChange = settingsViewModel::onStandaloneR2cCoordinationEnabledChanged
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                LabeledSwitch(
+                    label = "Predictive Head",
+                    checked = predictiveHeadEnabled,
+                    onCheckedChange = settingsViewModel::onPredictiveHeadEnabledChanged
+                )
+
+                OutlinedTextField(
+                    value = proximityAlertSpacingFeet,
+                    onValueChange = {
+                        settingsViewModel.onProximityAlertSpacingFeetChanged(it.filter { ch -> ch.isDigit() })
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Proximity Alert Spacing (ft)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    "Video",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                LabeledSwitch(
+                    label = "Capture Streams",
+                    checked = captureIncomingVideo,
+                    onCheckedChange = settingsViewModel::onCaptureIncomingVideoChanged
+                )
                 LabeledSwitch(
                     label = "Remote Video Control",
                     checked = remoteVideoControlEnabled,
@@ -333,132 +383,107 @@ fun CaltopoSettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                LabeledSwitch(
-                    label = "Standalone R2C coordination",
-                    checked = standaloneR2cCoordinationEnabled,
-                    onCheckedChange = settingsViewModel::onStandaloneR2cCoordinationEnabledChanged
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Predictive Head:")
-                    Switch(
-                        checked = predictiveHeadEnabled,
-                        onCheckedChange = { settingsViewModel.onPredictiveHeadEnabledChanged(it) }
-                    )
-                    Text(if (predictiveHeadEnabled) "On" else "Off")
-                }
-
-                OutlinedTextField(
-                    value = proximityAlertSpacingFeet,
-                    onValueChange = {
-                        settingsViewModel.onProximityAlertSpacingFeetChanged(it.filter { ch -> ch.isDigit() })
-                    },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Proximity Alert Spacing (ft)") }
-                )
-
                 Spacer(modifier = Modifier.height(16.dp))
-
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(16.dp))
 
-                Text("NOTAM Admin", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "NOTAM / TFR",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = notamStatus,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(8.dp))
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Enable Nearby FAA Monitoring (NOTAM/TFR + Airport/LAANC):")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = notamEnabled,
-                        onCheckedChange = { settingsViewModel.onNotamEnabledChanged(it) }
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(if (notamEnabled) "Yes" else "No")
-                }
+                LabeledSwitch(
+                    label = "FAA monitoring",
+                    checked = notamEnabled,
+                    onCheckedChange = settingsViewModel::onNotamEnabledChanged
+                )
 
                 OutlinedTextField(
                     value = notamRadiusNm,
                     onValueChange = { settingsViewModel.onNotamRadiusNmChanged(it.filter { ch -> ch.isDigit() }) },
+                    enabled = notamEnabled,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("NOTAM Radius (1, 2, 4, 8, 16 statute miles)") }
+                    label = { Text("NOTAM radius (statute miles)") },
+                    modifier = Modifier.fillMaxWidth()
                 )
 
                 OutlinedTextField(
                     value = notamRefreshIntervalSeconds,
                     onValueChange = { settingsViewModel.onNotamRefreshIntervalSecondsChanged(it.filter { ch -> ch.isDigit() }) },
+                    enabled = notamEnabled && notamAutoRefresh,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("NOTAM Refresh Interval (s, min 1800)") }
+                    label = { Text("Refresh interval (seconds, minimum 1800)") },
+                    modifier = Modifier.fillMaxWidth()
                 )
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Auto Refresh:")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = notamAutoRefresh,
-                        onCheckedChange = { settingsViewModel.onNotamAutoRefreshChanged(it) }
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(if (notamAutoRefresh) "Yes" else "No")
-                }
+                LabeledSwitch(
+                    label = "Refresh automatically",
+                    checked = notamAutoRefresh,
+                    enabled = notamEnabled,
+                    onCheckedChange = settingsViewModel::onNotamAutoRefreshChanged
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(16.dp))
 
-                Text("Land / Agency Restrictions", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Land / Agency Restrictions",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     "Checks NPS units, National Wildlife Refuges, USFS wilderness, and Colorado parks and wildlife properties. Results distinguish land-use rules from FAA airspace restrictions and include agency follow-up links.",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
                 )
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Enable protected-land checks:")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = landRestrictionsEnabled,
-                        onCheckedChange = settingsViewModel::onLandRestrictionsEnabledChanged
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Show protected lands on map:")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = landRestrictionsShowOnMap,
-                        enabled = landRestrictionsEnabled,
-                        onCheckedChange = settingsViewModel::onLandRestrictionsShowOnMapChanged
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Refresh automatically:")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = landRestrictionsAutoRefresh,
-                        enabled = landRestrictionsEnabled,
-                        onCheckedChange = settingsViewModel::onLandRestrictionsAutoRefreshChanged
-                    )
-                }
+                LabeledSwitch(
+                    label = "Protected-land checks",
+                    checked = landRestrictionsEnabled,
+                    onCheckedChange = settingsViewModel::onLandRestrictionsEnabledChanged
+                )
+                LabeledSwitch(
+                    label = "Show protected lands on map",
+                    checked = landRestrictionsShowOnMap,
+                    enabled = landRestrictionsEnabled,
+                    onCheckedChange = settingsViewModel::onLandRestrictionsShowOnMapChanged
+                )
+                LabeledSwitch(
+                    label = "Refresh protected lands automatically",
+                    checked = landRestrictionsAutoRefresh,
+                    enabled = landRestrictionsEnabled,
+                    onCheckedChange = settingsViewModel::onLandRestrictionsAutoRefreshChanged
+                )
                 OutlinedTextField(
                     value = landRestrictionsRadiusNm,
                     onValueChange = { settingsViewModel.onLandRestrictionsRadiusNmChanged(it.filter(Char::isDigit)) },
                     enabled = landRestrictionsEnabled,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Boundary query radius (1–50 statute miles)") }
+                    label = { Text("Boundary query radius (statute miles)") },
+                    modifier = Modifier.fillMaxWidth()
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(16.dp))
 
-                Text("External Display", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "External Display",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text("External display mode", style = MaterialTheme.typography.titleSmall)
@@ -486,6 +511,13 @@ fun CaltopoSettingsScreen(
                     }
 
                     ExternalDisplayMode.AppManaged -> {
+                        Text("Content", style = MaterialTheme.typography.titleSmall)
+                        SingleChoiceGroup(
+                            options = ExternalDisplayContentMode.entries,
+                            selected = externalDisplayContentMode,
+                            label = { it.displayLabel },
+                            onSelected = settingsViewModel::onExternalDisplayContentModeChanged
+                        )
                         LabeledSwitch(
                             label = "Auto-open on connect",
                             checked = externalDisplayAutoOpen,
@@ -504,7 +536,7 @@ fun CaltopoSettingsScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            "App-managed external display currently uses a single streams-focused layout.",
+                            "App-managed mode presents the selected streams/map layout independently on the attached display.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -530,6 +562,15 @@ fun CaltopoSettingsScreen(
                         Text("Close")
                     }
                 }
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = showDeveloperTools,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Developer Tools")
+                }
             }
         }
     }
@@ -542,14 +583,29 @@ fun CaltopoSettingsScreen(
 private fun LabeledSwitch(
     label: String,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label)
-        Spacer(modifier = Modifier.width(8.dp))
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(if (checked) "Yes" else "No")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            color = if (enabled) {
+                MaterialTheme.colorScheme.onSurface
+            } else {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+            }
+        )
+        Spacer(modifier = Modifier.width(16.dp))
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange
+        )
     }
 }
 

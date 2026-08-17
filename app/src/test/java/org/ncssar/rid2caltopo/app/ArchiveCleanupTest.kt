@@ -16,9 +16,17 @@ class ArchiveCleanupTest {
     }
 
     @Test
-    fun formatArchiveAge_usesUnboundedHours() {
-        assertEquals("1:02:03", formatArchiveAge(((1 * 60 * 60) + (2 * 60) + 3) * 1000L))
-        assertEquals("122:14:09", formatArchiveAge(((122 * 60 * 60) + (14 * 60) + 9) * 1000L))
+    fun formatArchiveAge_usesLargestRequestedWholeUnit() {
+        assertEquals("<1 minute", formatArchiveAge(59_999L))
+        assertEquals("1 minute", formatArchiveAge(60_000L))
+        assertEquals("59 minutes", formatArchiveAge(59L * 60_000L))
+        assertEquals("1 hour", formatArchiveAge(60L * 60_000L))
+        assertEquals("23 hours", formatArchiveAge(23L * 60L * 60_000L))
+        assertEquals("1 day", formatArchiveAge(24L * 60L * 60_000L))
+        assertEquals("29 days", formatArchiveAge(29L * 24L * 60L * 60_000L))
+        assertEquals("1 month", formatArchiveAge(30L * 24L * 60L * 60_000L))
+        assertEquals("12 months", formatArchiveAge(364L * 24L * 60L * 60_000L))
+        assertEquals("1 year", formatArchiveAge(365L * 24L * 60L * 60_000L))
     }
 
     @Test
@@ -67,7 +75,7 @@ class ArchiveCleanupTest {
             todayName = "tracks-24May2026",
         )!!
 
-        assertEquals("24:00:00", option.ageLabel)
+        assertEquals("1 day", option.ageLabel)
         assertTrue(option.isToday)
         assertEquals("0 B", option.sizeLabel)
     }
@@ -77,7 +85,7 @@ class ArchiveCleanupTest {
         val today = ArchiveCleanupDirectoryOption(
             directoryName = "tracks-24May2026",
             ageMs = 0L,
-            ageLabel = "0:00:00",
+            ageLabel = "<1 minute",
             totalBytes = 0L,
             sizeLabel = "0 B",
             logFileCount = 0,
@@ -89,7 +97,7 @@ class ArchiveCleanupTest {
         val old = today.copy(
             directoryName = "tracks-23May2026",
             ageMs = 24L * 60L * 60L * 1000L,
-            ageLabel = "24:00:00",
+            ageLabel = "1 day",
             isToday = false,
         )
 

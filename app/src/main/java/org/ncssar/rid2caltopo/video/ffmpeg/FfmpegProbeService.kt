@@ -652,6 +652,20 @@ class FfmpegProbeService(
     }
 
     /**
+     * Managed preview and remote playback consume decoded frames without an
+     * on-screen StreamTile. Start their decoder even when no render surface is
+     * bound so navigating away from Streams cannot strand the media offer.
+     */
+    fun ensureManagedVideoRenderSession(designator: String) {
+        if (!isRenderEnabled(designator)) return
+        sessionExecutionLanes.executeControl {
+            if (isRenderEnabled(designator)) {
+                ensureRenderSession(designator)
+            }
+        }
+    }
+
+    /**
      * Start a file-backed decoder owned by a managed-video consumer rather
      * than by the on-screen stream renderer.
      *

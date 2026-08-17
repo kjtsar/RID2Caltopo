@@ -17,6 +17,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -29,6 +31,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
 import java.util.Locale
 
 /** One folder fetched from the Caltopo map, with its contained items. */
@@ -43,7 +47,8 @@ data class MapFolderUiState(
 /** One non-folder feature (marker, shape, track, etc.) belonging to a map folder. */
 data class MapItemUiState(
     val featureId: String,
-    val title: String
+    val title: String,
+    val zoomableAssignment: Boolean = false
 )
 
 /**
@@ -65,6 +70,7 @@ fun MapFoldersDialog(
     onFolderVisibilityChanged: (folderId: String, visible: Boolean) -> Unit,
     onItemVisibilityChanged: (itemId: String, visible: Boolean) -> Unit,
     onAllItemsToggled: (itemIds: List<String>, visible: Boolean) -> Unit,
+    onZoomToItem: (itemId: String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var searchText by remember { mutableStateOf("") }
@@ -140,8 +146,22 @@ fun MapFoldersDialog(
                                             )
                                             Text(
                                                 text = item.title,
-                                                style = MaterialTheme.typography.bodySmall
+                                                style = MaterialTheme.typography.bodySmall,
+                                                modifier = Modifier.weight(1f)
                                             )
+                                            if (itemVisible && item.zoomableAssignment) {
+                                                IconButton(
+                                                    onClick = {
+                                                        onZoomToItem(item.featureId)
+                                                        onDismiss()
+                                                    }
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Search,
+                                                        contentDescription = "Zoom to assignment ${item.title}"
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                     if (folder.items.isEmpty()) {

@@ -23,8 +23,7 @@ object ManagedVideoStreamPresence {
         val live = streams.values
             .filter {
                 it.state == StreamState.LIVE &&
-                    !it.isLocalPlayback &&
-                    hasRecentFrame(it.designator)
+                    !it.isLocalPlayback
             }
             .sortedBy { it.designator.lowercase() }
             .take(4)
@@ -35,7 +34,10 @@ object ManagedVideoStreamPresence {
             .toSet()
         sessionIdBySourcePath.keys.retainAll(livePaths)
         val liveAdvertisements = live.map { stream ->
+            // Inventory follows publisher state, not decoder/UI readiness. Only
+            // attach source metadata once a recent frame proves it is current.
             val source = sourceInfoProvider(stream.designator)
+                .takeIf { hasRecentFrame(stream.designator) }
             val sessionId = sessionIdBySourcePath.getOrPut(stream.sourcePath) {
                 UUID.randomUUID().toString()
             }

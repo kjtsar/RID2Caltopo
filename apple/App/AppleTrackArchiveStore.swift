@@ -46,7 +46,9 @@ struct AppleTrackResubmitSummary: Sendable {
 struct AppleArchiveDirectoryOption: Sendable, Identifiable, Equatable {
     var id: String { name }
     let name: String
+    let ageLabel: String
     let byteCount: Int64
+    let sizeLabel: String
     let fileCount: Int
     let isToday: Bool
 }
@@ -175,11 +177,13 @@ actor AppleTrackArchiveStore {
         let today = dayDirectoryName(for: now)
         let directories = (try? FileManager.default.contentsOfDirectory(
             at: rootURL,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]
         )) ?? []
         return directories.compactMap { directory in
-            guard (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            guard let directoryValues = try? directory.resourceValues(
+                forKeys: [.isDirectoryKey, .contentModificationDateKey]
+            ), directoryValues.isDirectory == true
             else { return nil }
             let enumerator = FileManager.default.enumerator(
                 at: directory,
@@ -195,9 +199,13 @@ actor AppleTrackArchiveStore {
                 files += 1
                 bytes += Int64(values.fileSize ?? 0)
             }
+            guard let datedFolder = archiveDate(from: directory.lastPathComponent) else { return nil }
+            let ageBase = directoryValues.contentModificationDate ?? datedFolder
             return AppleArchiveDirectoryOption(
                 name: directory.lastPathComponent,
+                ageLabel: ArchiveFolderDisplay.age(now.timeIntervalSince(ageBase)),
                 byteCount: bytes,
+                sizeLabel: ArchiveFolderDisplay.size(bytes),
                 fileCount: files,
                 isToday: directory.lastPathComponent == today
             )
@@ -355,6 +363,15 @@ actor AppleTrackArchiveStore {
         formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
+    }
+
+    private func archiveDate(from directoryName: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.isLenient = false
+        return formatter.date(from: directoryName)
     }
 
     private func writeKMZ(

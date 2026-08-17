@@ -9,7 +9,14 @@ private let unresolvedAppleMapRegion = MKCoordinateRegion(
     span: MKCoordinateSpan(latitudeDelta: 160, longitudeDelta: 360)
 )
 
+private struct ArtifactZoomRequest: Equatable {
+    let id = UUID()
+    let title: String
+    let coordinates: [MapCoordinate]
+}
+
 enum AppleOperationalStatusChipTone {
+    case accent
     case danger
     case caution
     case normal
@@ -17,6 +24,7 @@ enum AppleOperationalStatusChipTone {
 
     var backgroundColor: Color {
         switch self {
+        case .accent: Color.accentColor
         case .danger: Color(red: 0.827, green: 0.184, blue: 0.184)
         case .caution: Color(red: 0.961, green: 0.486, blue: 0)
         case .normal: Color(red: 0.180, green: 0.490, blue: 0.196)
@@ -116,6 +124,7 @@ private final class AppleMapArtifactModel: ObservableObject {
     @Published private(set) var status = "Map artifacts not configured"
     @Published var hiddenFolderIDs: Set<String> = []
     @Published var hiddenItemIDs: Set<String> = []
+    @Published private(set) var zoomRequest: ArtifactZoomRequest?
 
     private var refreshTask: Task<Void, Never>?
     private var configurationFingerprint = ""
@@ -126,6 +135,10 @@ private final class AppleMapArtifactModel: ObservableObject {
 
     private static let minimumPollInterval: TimeInterval = 30
     private static let automaticPollInterval: Duration = .seconds(90)
+
+    init() {
+        Self.removeLegacyPersistedVisibility()
+    }
 
     var visibleSnapshot: CaltopoArtifactSnapshot {
         snapshot.hiding(folderIDs: hiddenFolderIDs, itemIDs: hiddenItemIDs)
@@ -160,10 +173,10 @@ private final class AppleMapArtifactModel: ObservableObject {
         }
         if let cached = Self.loadCachedSnapshot(mapID: configuration.mapID) {
             snapshot = cached
-            restoreVisibility(mapID: configuration.mapID, fallbackFolders: cached.folders)
+            initializeVisibility(fallbackFolders: cached.folders)
             status = "Cached: \(cached.points.count) markers, \(cached.lines.count) lines, \(cached.polygons.count) areas"
         } else {
-            restoreVisibility(mapID: configuration.mapID, fallbackFolders: [])
+            initializeVisibility(fallbackFolders: [])
         }
         let live = CaltopoLiveConfiguration(
             domainAndPort: configuration.domainAndPort,
@@ -197,7 +210,6 @@ private final class AppleMapArtifactModel: ObservableObject {
         } else {
             unhideFolderAndAncestors(folder.id, recordOperatorOverride: true)
         }
-        persistVisibility()
     }
 
     func toggleItem(_ item: CaltopoArtifactItem) {
@@ -207,7 +219,6 @@ private final class AppleMapArtifactModel: ObservableObject {
             hiddenItemIDs.remove(item.id)
             unhideFolderAndAncestors(item.folderID, recordOperatorOverride: true)
         }
-        persistVisibility()
     }
 
     func setItems(_ items: [CaltopoArtifactItem], visible: Bool) {
@@ -219,7 +230,12 @@ private final class AppleMapArtifactModel: ObservableObject {
             }
         }
         else { hiddenItemIDs.formUnion(ids) }
-        persistVisibility()
+    }
+
+    func requestZoom(to item: CaltopoArtifactItem) {
+        let coordinates = snapshot.coordinates(forItemID: item.id)
+        guard !coordinates.isEmpty else { return }
+        zoomRequest = ArtifactZoomRequest(title: item.title, coordinates: coordinates)
     }
 
     func isFolderEffectivelyVisible(_ folder: CaltopoArtifactFolder) -> Bool {
@@ -271,7 +287,6 @@ private final class AppleMapArtifactModel: ObservableObject {
             let value = try await client.fetchMapArtifacts()
             snapshot = value
             let serverHiddenFolders = Set(value.folders.filter { !$0.initiallyVisible }.map(\.id))
-            let visibilityBeforeRefresh = hiddenFolderIDs
             if !visibilityInitialized {
                 visibilityInitialized = true
             }
@@ -283,9 +298,6 @@ private final class AppleMapArtifactModel: ObservableObject {
                 defaultHidden: serverHiddenFolders,
                 operatorVisibilityOverrides: folderVisibilityOverrides
             )
-            if hiddenFolderIDs != visibilityBeforeRefresh {
-                persistVisibility()
-            }
             status = "\(value.points.count) markers, \(value.lines.count) lines, \(value.polygons.count) areas"
             Self.saveCachedSnapshot(value, mapID: configuredMapID)
             AppleLog.info("Map", "CalTopo artifact refresh features=\(value.totalFeatureCount) ignoredTracks=\(value.ignoredTrackCount) \(status)")
@@ -303,21 +315,10 @@ private final class AppleMapArtifactModel: ObservableObject {
         return root.appendingPathComponent("\(safeMapID.isEmpty ? "map" : safeMapID).json")
     }
 
-    private func restoreVisibility(mapID: String, fallbackFolders: [CaltopoArtifactFolder]) {
-        let keys = Self.visibilityKeys(mapID: mapID)
-        let defaults = UserDefaults.standard
-        let hasSavedFolders = defaults.object(forKey: keys.folders) != nil
-        let hasSavedItems = defaults.object(forKey: keys.items) != nil
-        if hasSavedFolders || hasSavedItems {
-            hiddenFolderIDs = Set(defaults.stringArray(forKey: keys.folders) ?? [])
-            hiddenFolderIDs.formUnion(fallbackFolders.filter { !$0.initiallyVisible }.map(\.id))
-            hiddenItemIDs = Set(defaults.stringArray(forKey: keys.items) ?? [])
-            visibilityInitialized = true
-        } else if !fallbackFolders.isEmpty {
-            hiddenFolderIDs = Set(fallbackFolders.filter { !$0.initiallyVisible }.map(\.id))
-            visibilityInitialized = true
-            persistVisibility()
-        }
+    private func initializeVisibility(fallbackFolders: [CaltopoArtifactFolder]) {
+        hiddenFolderIDs = Set(fallbackFolders.filter { !$0.initiallyVisible }.map(\.id))
+        hiddenItemIDs = []
+        visibilityInitialized = !fallbackFolders.isEmpty
         hiddenFolderIDs = CaltopoArtifactVisibilityPolicy.hiddenFolderIDs(
             localHidden: hiddenFolderIDs,
             defaultHidden: [],
@@ -325,17 +326,15 @@ private final class AppleMapArtifactModel: ObservableObject {
         )
     }
 
-    private func persistVisibility() {
-        guard !configuredMapID.isEmpty else { return }
-        let keys = Self.visibilityKeys(mapID: configuredMapID)
-        UserDefaults.standard.set(hiddenFolderIDs.sorted(), forKey: keys.folders)
-        UserDefaults.standard.set(hiddenItemIDs.sorted(), forKey: keys.items)
-    }
-
-    private static func visibilityKeys(mapID: String) -> (folders: String, items: String) {
-        let safeMapID = mapID.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
-        let suffix = safeMapID.isEmpty ? "map" : safeMapID
-        return ("map.visibility.\(suffix).folders", "map.visibility.\(suffix).items")
+    private static func removeLegacyPersistedVisibility() {
+        let defaults = UserDefaults.standard
+        let keys = CaltopoArtifactVisibilityPolicy.legacyPersistedSelectionKeys(
+            Array(defaults.dictionaryRepresentation().keys)
+        )
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        if !keys.isEmpty {
+            AppleLog.info("Map", "Removed \(keys.count) legacy persisted Map Folders selection keys")
+        }
     }
 
     private static func loadCachedSnapshot(mapID: String) -> CaltopoArtifactSnapshot? {
@@ -371,6 +370,8 @@ struct RIDTrackMapView: View {
     let ingestAddress: String
     let networkSSID: String
     let onMapStatusTap: () -> Void
+    let onSwitchMap: () -> Void
+    let onDisconnectMap: () -> Void
     let onRestartStreams: () -> Void
 
     @StateObject private var artifacts = AppleMapArtifactModel()
@@ -405,6 +406,7 @@ struct RIDTrackMapView: View {
     @State private var showNotams = false
     @State private var showAirspace = false
     @State private var showLandRestrictions = false
+    @State private var showMapOptions = false
     @State private var showMutualAidExport = false
     @State private var splitFraction: CGFloat = 0.5
     @State private var splitDragStartFraction: CGFloat?
@@ -469,7 +471,16 @@ struct RIDTrackMapView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(streamsFullScreen ? .hidden : .visible, for: .navigationBar)
         .toolbar { mapToolbar }
-        .sheet(isPresented: $showMapItems) { MapItemsVisibilityView(model: artifacts) }
+        .sheet(isPresented: $showMapItems) {
+            MapItemsVisibilityView(
+                model: artifacts,
+                onZoomToItem: { item in
+                    focusedAircraftID = nil
+                    operatorAdjustedViewport = true
+                    artifacts.requestZoom(to: item)
+                }
+            )
+        }
         .sheet(isPresented: $showOfflinePreparation) {
             AppleOfflineMapPreparationView(
                 manager: offlineMaps,
@@ -546,6 +557,17 @@ struct RIDTrackMapView: View {
         }
         .sheet(isPresented: $showLandRestrictions) {
             AppleLandRestrictionPanel(center: landRestrictions, location: locationProvider.lastLocation)
+        }
+        .confirmationDialog(
+            "Map Options",
+            isPresented: $showMapOptions,
+            titleVisibility: .visible
+        ) {
+            Button("Switch Map", action: onSwitchMap)
+            Button("Disconnect", role: .destructive, action: onDisconnectMap)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You are currently synced with: \(liveViewMapTitle)")
         }
         .sheet(isPresented: $showMutualAidExport) {
             AppleMutualAidExportView(
@@ -886,6 +908,7 @@ struct RIDTrackMapView: View {
                 predictiveHeadEnabled: orgSettings.predictiveHeadEnabled,
                 focusedAircraftID: focusedAircraftID,
                 followFocusedDrone: followFocusedDrone,
+                artifactZoomRequest: artifacts.zoomRequest,
                 operatorAdjustedViewport: $operatorAdjustedViewport,
                 onSelectClue: { selectedClueID = $0 },
                 onSelectAircraft: { remoteID in
@@ -1034,6 +1057,7 @@ struct RIDTrackMapView: View {
                 onRestartStreams: onRestartStreams,
                 telemetryText: streamTelemetryText,
                 coordinateText: streamCoordinateText,
+                remoteRequesterEmail: peerCoordinator.activeRemoteVideoRequesterEmail,
                 coordinateDisplayFormat: coordinateDisplayFormat,
                 onCoordinateDisplayFormatChange: { coordinateDisplayFormat = $0 },
                 telemetryPairingState: streamTelemetryPairingState
@@ -1333,14 +1357,17 @@ struct RIDTrackMapView: View {
                     ? "🟢 In => \(ingestAddress)/<droneDesig>"
                     : "🟡 \(ingestAddress)")
                     .lineLimit(1)
-                Button(action: onMapStatusTap) {
-                    Text(caltopoConfiguration.mapTitle.isEmpty
-                        ? (caltopoConfiguration.mapID.isEmpty ? "STANDALONE" : caltopoConfiguration.mapID)
-                        : caltopoConfiguration.mapTitle)
-                        .fontWeight(.semibold)
-                        .lineLimit(1)
+                Button(action: openLiveViewMapActions) {
+                    AppleOperationalStatusChipLabel(
+                        title: liveViewMapTitle,
+                        tone: .accent
+                    )
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+                .accessibilityLabel("Incident map")
+                .accessibilityValue(liveViewMapTitle)
                 Text("on \(networkSSID)")
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1357,6 +1384,23 @@ struct RIDTrackMapView: View {
 
     private var usesAirspaceRestrictionStatus: Bool {
         !notams.state.visible || airspace.state.severity != .normal
+    }
+
+    private var liveViewMapTitle: String {
+        caltopoConfiguration.mapTitle.isEmpty
+            ? (caltopoConfiguration.mapID.isEmpty ? "STANDALONE" : caltopoConfiguration.mapID)
+            : caltopoConfiguration.mapTitle
+    }
+
+    private func openLiveViewMapActions() {
+        let hasCredentials = !caltopoConfiguration.teamID.isEmpty
+            && !caltopoConfiguration.credentialID.isEmpty
+            && !caltopoConfiguration.credentialSecret.isEmpty
+        guard hasCredentials, !caltopoConfiguration.mapID.isEmpty else {
+            onMapStatusTap()
+            return
+        }
+        showMapOptions = true
     }
 
     private var conciseAirspaceOrNotamChipLabel: String {
@@ -2010,6 +2054,7 @@ private struct MapVisibilityRow: Identifiable {
 
 private struct MapItemsVisibilityView: View {
     @ObservedObject var model: AppleMapArtifactModel
+    let onZoomToItem: (CaltopoArtifactItem) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var expandedFolderIDs: Set<String> = []
     @State private var searchText = ""
@@ -2075,13 +2120,13 @@ private struct MapItemsVisibilityView: View {
         let children = model.snapshot.folders.filter { $0.parentID == folder.id }
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         for child in children { append(folder: child, depth: depth + 1, into: &rows, visited: &visited) }
-        for item in model.snapshot.items.filter({ $0.folderID == folder.id }) {
+        for item in model.snapshot.visibilityItems.filter({ $0.folderID == folder.id }) {
             rows.append(.init(id: "item:\(item.id)", depth: depth + 1, content: .item(item)))
         }
     }
 
     private func folderRow(_ folder: CaltopoArtifactFolder, depth: Int) -> some View {
-        let items = model.snapshot.items.filter { $0.folderID == folder.id }
+        let items = model.snapshot.visibilityItems.filter { $0.folderID == folder.id }
         let hasChildren = !items.isEmpty || model.snapshot.folders.contains { $0.parentID == folder.id }
         return HStack(spacing: 10) {
             Button {
@@ -2113,11 +2158,28 @@ private struct MapItemsVisibilityView: View {
     }
 
     private func itemRow(_ item: CaltopoArtifactItem, depth: Int) -> some View {
-        Button { model.toggleItem(item) } label: {
-            Label(item.title, systemImage: model.isItemEffectivelyVisible(item) ? "checkmark.square.fill" : "square")
-                .frame(maxWidth: .infinity, alignment: .leading)
+        let visible = model.isItemEffectivelyVisible(item)
+        let canZoom = visible
+            && item.className == "Assignment"
+            && !model.snapshot.coordinates(forItemID: item.id).isEmpty
+        return HStack(spacing: 8) {
+            Button { model.toggleItem(item) } label: {
+                Label(item.title, systemImage: visible ? "checkmark.square.fill" : "square")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            if canZoom {
+                Button {
+                    onZoomToItem(item)
+                    dismiss()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Zoom to assignment \(item.title)")
+            }
         }
-        .buttonStyle(.plain)
         .padding(.leading, CGFloat(depth) * 18 + 24)
     }
 }
@@ -2323,6 +2385,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     let predictiveHeadEnabled: Bool
     let focusedAircraftID: String?
     let followFocusedDrone: Bool
+    let artifactZoomRequest: ArtifactZoomRequest?
     @Binding var operatorAdjustedViewport: Bool
     let onSelectClue: (UUID) -> Void
     let onSelectAircraft: (String) -> Void
@@ -2451,6 +2514,9 @@ private struct OperationalMKMapView: UIViewRepresentable {
             focusedAircraftID: focusedAircraftID,
             followFocusedDrone: followFocusedDrone
         )
+        if let artifactZoomRequest {
+            context.coordinator.zoomToArtifact(artifactZoomRequest, on: map)
+        }
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
@@ -2463,6 +2529,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
         private var operatorCoordinate: CLLocationCoordinate2D?
         private var operatorCircle: MKCircle?
         private var operatorAnnotation: OperatorDeviceAnnotation?
+        private var lastArtifactZoomRequestID: UUID?
         private enum InitialViewportSource {
             case none
             case fallbackOperationalData
@@ -3072,6 +3139,48 @@ private struct OperationalMKMapView: UIViewRepresentable {
             viewportMemory.region.center = coordinate
             viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
             viewportMemory.hasOperationalViewport = true
+        }
+
+        func zoomToArtifact(_ request: ArtifactZoomRequest, on map: MKMapView) {
+            guard lastArtifactZoomRequestID != request.id else { return }
+            let coordinates = request.coordinates.map(\.clCoordinate).filter(CLLocationCoordinate2DIsValid)
+            guard let first = coordinates.first else { return }
+            lastArtifactZoomRequestID = request.id
+            updating = true
+            if coordinates.count == 1 {
+                map.setRegion(
+                    MKCoordinateRegion(
+                        center: first,
+                        span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                    ),
+                    animated: true
+                )
+            } else {
+                let points = coordinates.map(MKMapPoint.init)
+                var rect = points.dropFirst().reduce(
+                    MKMapRect(origin: points[0], size: MKMapSize(width: 0, height: 0))
+                ) { partial, point in
+                    partial.union(MKMapRect(origin: point, size: MKMapSize(width: 0, height: 0)))
+                }
+                let minimumSpan = 1_000.0
+                if rect.width < minimumSpan {
+                    rect = rect.insetBy(dx: -(minimumSpan - rect.width) / 2, dy: 0)
+                }
+                if rect.height < minimumSpan {
+                    rect = rect.insetBy(dx: 0, dy: -(minimumSpan - rect.height) / 2)
+                }
+                map.setVisibleMapRect(
+                    rect,
+                    edgePadding: UIEdgeInsets(top: 48, left: 48, bottom: 48, right: 48),
+                    animated: true
+                )
+            }
+            updating = false
+            viewport = map.region
+            viewportMemory.region = map.region
+            viewportMemory.visibleMapRect = validVisibleMapRect(from: map)
+            viewportMemory.hasOperationalViewport = true
+            AppleLog.info("MapViewport", "Zoomed to assignment '\(request.title)' points=\(coordinates.count)")
         }
 
         func persistViewport(from map: MKMapView) {

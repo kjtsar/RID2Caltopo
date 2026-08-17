@@ -88,6 +88,7 @@ private struct AppleManagedVideoRecording: Equatable {
     let sessionId: String
     let droneDesignator: String
     let url: URL
+    let startedAt: Date
     let recordedAt: Date
     let durationMs: Int64
 }
@@ -130,12 +131,17 @@ private enum AppleManagedVideoRecordingCatalog {
                   now.timeIntervalSince(modified) >= 3
             else { return nil }
             let designator = url.deletingLastPathComponent().lastPathComponent
+            let startedAt = min(
+                ManagedVideoRecordingIdentity.recordingStartedAt(forPath: url.path) ?? modified,
+                modified
+            )
             return AppleManagedVideoRecording(
                 sessionId: ManagedVideoRecordingIdentity.sessionID(forPath: url.path),
                 droneDesignator: designator.isEmpty ? "Recording" : designator,
                 url: url,
+                startedAt: startedAt,
                 recordedAt: modified,
-                durationMs: 0
+                durationMs: max(0, Int64(modified.timeIntervalSince(startedAt) * 1_000))
             )
         }
         .sorted { $0.recordedAt > $1.recordedAt }
@@ -167,6 +173,111 @@ private struct AppleVideoMediaOffer: Decodable {
 private struct AppleApprovedVideoStream {
     let request: AppleVideoStreamViewRequest
     let quality: AppleVideoQualityChoice
+}
+
+@MainActor
+private final class AppleBackgroundTransferLease {
+    private var identifier = UIBackgroundTaskIdentifier.invalid
+
+    init(name: String) {
+        identifier = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            Task { @MainActor [weak self] in self?.end() }
+        }
+    }
+
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
+    }
+}
+
+@MainActor
+enum AppleManagedOrganizationConfig {
+    static let versionDefaultsKey = "org.managedConfigVersionMs"
+
+    static func snapshot(
+        caltopo: AppleCaltopoSettings,
+        organization: AppleOrgConfigSettings,
+        identities: AppleDroneConfirmationStore
+    ) throws -> [String: Any] {
+        let credentials = try OrgConfigTokenCodec.canonicalCredentialPayload([
+            "type": "ct_credentials", "file_version": "1.0",
+            "team_id": caltopo.teamID,
+            "credential_id": caltopo.credentialID,
+            "credential_secret": caltopo.credentialSecret,
+            "domain_and_port": caltopo.domainAndPort,
+            "track_folder": organization.trackFolder,
+        ])
+        let mutualAidEncoded: String
+        if let template = organization.mutualAidTemplate {
+            let mutualAid = try OrgConfigTokenCodec.canonicalCredentialPayload([
+                "type": "ct_mutual_aid_credentials", "file_version": "1.0",
+                "team_id": template.teamID, "credential_id": template.credentialID,
+                "credential_secret": template.credentialSecret,
+                "domain_and_port": template.domainAndPort,
+                "source_label": template.sourceLabel,
+                "target_folder_hint": template.targetFolderHint,
+            ])
+            mutualAidEncoded = OrgConfigTokenCodec.encryptPayload(mutualAid)
+        } else {
+            mutualAidEncoded = ""
+        }
+        return [
+            "configSchemaVersion": 1, "sourcePlatform": "ios",
+            "sourceAppVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            "sourceAppBuild": Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0,
+            "organizationCaltopoEnc": OrgConfigTokenCodec.encryptPayload(credentials),
+            "mutualAidCaltopoEnc": mutualAidEncoded,
+            "droneSpecs": identities.importedMappings.map {
+                ["remoteId": $0.remoteID, "mappedId": $0.mappedID,
+                 "org": $0.organization, "model": $0.droneDescription,
+                 "owner": $0.ownerName]
+            },
+        ]
+    }
+
+    static func apply(
+        snapshot: [String: Any], versionMs: Int64,
+        caltopo: AppleCaltopoSettings, organization: AppleOrgConfigSettings,
+        identities: AppleDroneConfirmationStore, defaults: UserDefaults = .standard
+    ) throws {
+        guard (snapshot["configSchemaVersion"] as? NSNumber)?.intValue == 1,
+              versionMs > 0,
+              let orgEncoded = snapshot["organizationCaltopoEnc"] as? String,
+              let orgData = try OrgConfigTokenCodec.decryptPayload(orgEncoded).data(using: .utf8),
+              let credentials = try JSONSerialization.jsonObject(with: orgData) as? [String: Any],
+              let droneSpecs = snapshot["droneSpecs"] as? [[String: Any]]
+        else { throw OrgConfigInteropError.invalidBundle }
+        let mutualAid: MutualAidTemplateCredentials?
+        if let encoded = snapshot["mutualAidCaltopoEnc"] as? String, !encoded.isEmpty,
+           let data = try OrgConfigTokenCodec.decryptPayload(encoded).data(using: .utf8),
+           let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            mutualAid = .init(
+                teamID: value["team_id"] as? String ?? "",
+                credentialID: value["credential_id"] as? String ?? "",
+                credentialSecret: value["credential_secret"] as? String ?? "",
+                domainAndPort: value["domain_and_port"] as? String ?? "caltopo.com",
+                sourceLabel: value["source_label"] as? String ?? "",
+                targetFolderHint: value["target_folder_hint"] as? String ?? "MAI")
+        } else { mutualAid = nil }
+        try caltopo.applyManagedCredentials(credentials)
+        try organization.applyManagedOrganization(
+            organizationName: organization.organizationName,
+            trackFolder: credentials["track_folder"] as? String ?? organization.trackFolder,
+            mutualAidTemplate: mutualAid)
+        identities.applyImportedMappings(droneSpecs.compactMap { value in
+            guard let remoteID = value["remoteId"] as? String, !remoteID.isEmpty else { return nil }
+            return OrgConfigRIDMapping(
+                remoteID: remoteID, mappedID: value["mappedId"] as? String ?? "",
+                organization: value["org"] as? String ?? "",
+                model: value["model"] as? String ?? "",
+                owner: value["owner"] as? String ?? "")
+        })
+        defaults.set(versionMs, forKey: versionDefaultsKey)
+        AppleLog.info("OrgConfig", "Applied managed organization configuration \(versionMs)")
+    }
+
 }
 
 @MainActor
@@ -257,6 +368,9 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var standaloneR2CCoordinationEnabled = false
     private var trackerURLPrefix = ""
     private var trackerAPIKey = ""
+    private let defaults: UserDefaults
+    private var organizationConfigSnapshotProvider: (() throws -> [String: Any])?
+    private var organizationConfigApplyHandler: (([String: Any], Int64) throws -> Void)?
     private var mapID = ""
     private let zoneID: String
     private let zoneName: String
@@ -326,6 +440,7 @@ final class AppleTrackerCoordinator: ObservableObject {
     )
 
     init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         let pair = AsyncStream<TrackerCoordinationEvent>.makeStream(bufferingPolicy: .bufferingNewest(256))
         events = pair.stream
         eventContinuation = pair.continuation
@@ -352,6 +467,14 @@ final class AppleTrackerCoordinator: ObservableObject {
 
     var localZoneID: String { zoneID }
 
+    func configureOrganizationConfig(
+        snapshotProvider: @escaping () throws -> [String: Any],
+        applyHandler: @escaping ([String: Any], Int64) throws -> Void
+    ) {
+        organizationConfigSnapshotProvider = snapshotProvider
+        organizationConfigApplyHandler = applyHandler
+    }
+
     var activeRemoteVideoRequesterSummary: String {
         let emails = Set(mediaPeersByRequestID.keys.compactMap {
             approvedVideoStreamRequests[$0]?.request.requesterEmail
@@ -370,6 +493,23 @@ final class AppleTrackerCoordinator: ObservableObject {
             .map(\.request)
             .sorted { $0.requestId < $1.requestId }
             .first?.requesterEmail
+    }
+
+    func activeRemoteVideoRequesterEmail(forStreamDesignator designator: String) -> String? {
+        let normalizedDesignator = designator
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalizedDesignator.isEmpty else { return nil }
+        return mediaPeersByRequestID.keys
+            .sorted()
+            .compactMap { approvedVideoStreamRequests[$0]?.request }
+            .first { request in
+                request.droneDesignator
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() == normalizedDesignator
+            }?
+            .requesterEmail
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var activeRemoteVideoRouteSummary: String {
@@ -656,7 +796,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         case let .string(value): data = Data(value.utf8)
         @unknown default: return
         }
-        if handleManagedVideoMessage(data) {
+        if handleOrganizationConfigMessage(data) || handleManagedVideoMessage(data) {
             return
         }
         do {
@@ -695,6 +835,68 @@ final class AppleTrackerCoordinator: ObservableObject {
             }
         } catch {
             AppleLog.error("TrackerPeer", "Invalid tracker message: \(error.localizedDescription)")
+        }
+    }
+
+    private func handleOrganizationConfigMessage(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = object["type"] as? String else { return false }
+        if type == "organization_config_snapshot_request" {
+            let requestID = (object["requestId"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !requestID.isEmpty, let provider = organizationConfigSnapshotProvider else {
+                return true
+            }
+            do {
+                let response: [String: Any] = [
+                    "type": "organization_config_snapshot_response",
+                    "requestId": requestID,
+                    "config": try provider(),
+                ]
+                send(try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys]))
+            } catch {
+                AppleLog.error("OrgConfig", "Could not return organization configuration: \(error.localizedDescription)")
+            }
+            return true
+        }
+        if type == "organization_config_snapshot_ack" {
+            if object["accepted"] as? Bool != true {
+                AppleLog.warning("OrgConfig", "Tracker rejected organization configuration snapshot")
+            }
+            return true
+        }
+        if type == "hello_ack",
+           let version = (object["organizationConfigVersionMs"] as? NSNumber)?.int64Value,
+           version != 0,
+           version != Int64(defaults.integer(forKey: AppleManagedOrganizationConfig.versionDefaultsKey)) {
+            synchronizeOrganizationConfig(advertisedVersionMs: version)
+        }
+        return false
+    }
+
+    private func synchronizeOrganizationConfig(advertisedVersionMs: Int64) {
+        guard let baseURL = URL(string: trackerURLPrefix),
+              !trackerAPIKey.isEmpty,
+              let applyHandler = organizationConfigApplyHandler else { return }
+        let url = baseURL.appendingPathComponent("api/v1/organization-config/current")
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 60
+        request.setValue(trackerAPIKey, forHTTPHeaderField: "X-SAR-Token")
+        Task { @MainActor [weak self] in
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse,
+                      (200 ..< 300).contains(http.statusCode),
+                      let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let version = (root["versionMs"] as? NSNumber)?.int64Value,
+                      let snapshot = root["config"] as? [String: Any]
+                else { throw URLError(.badServerResponse) }
+                guard version != Int64(self?.defaults.integer(forKey: AppleManagedOrganizationConfig.versionDefaultsKey) ?? 0) else { return }
+                try applyHandler(snapshot, version)
+            } catch {
+                AppleLog.error("OrgConfig", "Managed configuration sync failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -813,6 +1015,9 @@ final class AppleTrackerCoordinator: ObservableObject {
         guard let url = components.url else { return }
         let apiKey = trackerAPIKey
         let fileURL = recording.url
+        let backgroundLease = AppleBackgroundTransferLease(
+            name: "Recording transfer \(request.requestId)"
+        )
         Task.detached(priority: .utility) { [weak self] in
             do {
                 let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
@@ -851,6 +1056,7 @@ final class AppleTrackerCoordinator: ObservableObject {
             }
             await MainActor.run {
                 self?.approvedRecordingUploadsByRequestID.removeValue(forKey: request.requestId)
+                backgroundLease.end()
             }
         }
     }
@@ -990,11 +1196,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         let live = sessions
             .filter {
                 $0.state == .live &&
-                $0.id != "demo" &&
-                ManagedVideoPresencePolicy.hasRecentDecodedFrame(
-                    frameCount: $0.model.frameCount,
-                    decodedFrameAge: $0.model.decodedFrameAgeSeconds
-                )
+                $0.id != "demo"
             }
             .sorted {
                 $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending
@@ -1020,6 +1222,10 @@ final class AppleTrackerCoordinator: ObservableObject {
         var updatedStreams = live.map { session in
             let sessionID = managedSessionIDBySourcePath[session.sourcePath]
                 ?? UUID().uuidString.lowercased()
+            let sourceIsReady = ManagedVideoPresencePolicy.hasRecentDecodedFrame(
+                frameCount: session.model.frameCount,
+                decodedFrameAge: session.model.decodedFrameAgeSeconds
+            )
             managedSessionIDBySourcePath[session.sourcePath] = sessionID
             currentSources[sessionID] = session.model
             sourceEndGraceTasks.removeValue(forKey: sessionID)?.cancel()
@@ -1040,11 +1246,11 @@ final class AppleTrackerCoordinator: ObservableObject {
             return AppleManagedVideoStreamAdvertisement(
                 sessionId: sessionID,
                 droneDesignator: session.id,
-                sourceWidth: session.model.sourceWidth,
-                sourceHeight: session.model.sourceHeight,
-                sourceFps: session.model.sourceFrameRate,
+                sourceWidth: sourceIsReady ? session.model.sourceWidth : 0,
+                sourceHeight: sourceIsReady ? session.model.sourceHeight : 0,
+                sourceFps: sourceIsReady ? session.model.sourceFrameRate : 0,
                 sourceBitrateBps: 0,
-                sourceCodec: session.model.sourceWidth > 0 ? "H264" : "",
+                sourceCodec: sourceIsReady && session.model.sourceWidth > 0 ? "H264" : "",
                 mediaKind: "live",
                 recordedAt: nil,
                 durationMs: 0,
@@ -1475,6 +1681,10 @@ final class AppleTrackerCoordinator: ObservableObject {
                 )
                 return
             }
+            // Remote Control skips the on-device approval sheet, so retain the
+            // synthesized approval once media starts. This keeps requester
+            // attribution available to the Stream Tile for the session's life.
+            approvedVideoStreamRequests[offer.requestId] = approval
             let approvedRoute = mediaRouteKindByRequestID[offer.requestId]
                 ?? offer.routeKind
                 ?? "unknown"
@@ -1512,7 +1722,8 @@ final class AppleTrackerCoordinator: ObservableObject {
             remoteControlledVideoRequests.removeValue(forKey: offer.requestId)
             source.setManagedVideoFrameConsumer(peer)
             AppleSpokenWarningCenter.shared.speak(
-                "Now sharing video stream with \(approval.request.requesterEmail)"
+                "Now sharing video stream with "
+                    + Self.spokenEmailAddress(approval.request.requesterEmail)
             )
             peer.start(
                 requestID: offer.requestId,
@@ -2016,42 +2227,29 @@ final class AppleTrackerCoordinator: ObservableObject {
         )
     }
 
-    func capturedVideoURL(matching designators: [String]) -> URL? {
-        let normalized = Set(
-            designators
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-                .filter { !$0.isEmpty }
-        )
-        guard !normalized.isEmpty else { return nil }
-        if let recording = managedVideoRecordingsBySessionID.values
-                  .sorted(by: { $0.recordedAt > $1.recordedAt })
-                  .first(where: {
-                      normalized.contains(
-                          $0.droneDesignator
-                              .trimmingCharacters(in: .whitespacesAndNewlines)
-                              .lowercased()
-                      )
-                  }) {
-            return TrackerTabletLink.recordingShortURL(
-                trackerURLPrefix: trackerURLPrefix,
-                tabletName: AppleDeviceIdentity.displayName,
-                sessionID: recording.sessionId
-            )
-        }
-        guard UserDefaults.standard.bool(forKey: "video.captureStreams"),
-              let live = managedVideoStreams.first(where: {
-                  $0.mediaKind == "live"
-                      && normalized.contains(
-                          $0.droneDesignator
-                              .trimmingCharacters(in: .whitespacesAndNewlines)
-                              .lowercased()
-                      )
-              })
-        else { return nil }
-        return TrackerTabletLink.streamShortURL(
+    func capturedVideoURL(
+        matching designators: [String],
+        trackStartedAt: Date,
+        trackEndedAt: Date
+    ) -> URL? {
+        let recordings = Array(managedVideoRecordingsBySessionID.values)
+        guard let match = ManagedVideoRecordingIdentity.recording(
+            matching: designators,
+            trackStartedAt: trackStartedAt,
+            trackEndedAt: trackEndedAt,
+            candidates: recordings.map {
+                ManagedVideoRecordingIdentity.Candidate(
+                    sessionID: $0.sessionId,
+                    designator: $0.droneDesignator,
+                    startedAt: $0.startedAt,
+                    endedAt: $0.recordedAt
+                )
+            }
+        ) else { return nil }
+        return TrackerTabletLink.recordingShortURL(
             trackerURLPrefix: trackerURLPrefix,
             tabletName: AppleDeviceIdentity.displayName,
-            videoStream: live.droneDesignator
+            sessionID: match.sessionID
         )
     }
 

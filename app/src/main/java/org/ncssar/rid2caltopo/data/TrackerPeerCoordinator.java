@@ -1216,6 +1216,19 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 case "hello_ack":
                     helloAckAtMs = nowMs();
                     handleAppUpdateRecommendation(jo);
+                    long managedConfigVersionMs = jo.optLong(
+                            "organizationConfigVersionMs", 0L);
+                    if (managedConfigVersionMs != 0L
+                            && trackerHttpOrigin != null
+                            && trackerApiKey != null
+                            && R2CApplication.getAppCtxt() != null) {
+                        OrgConfigManager.syncManagedConfiguration(
+                                R2CApplication.getAppCtxt(),
+                                trackerHttpOrigin,
+                                CaltopoClient.GetHomeOrgName(),
+                                trackerApiKey,
+                                managedConfigVersionMs);
+                    }
                     CTDebug(TAG, String.format(Locale.US,
                             "hello_ack received from tracker after %d ms",
                             helloAckAtMs - helloSeqSentAtMs));
@@ -1252,6 +1265,15 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     break;
                 case "recording_download_decision_ack":
                     onRecordingDownloadDecisionAck(jo);
+                    break;
+                case "organization_config_snapshot_request":
+                    onOrganizationConfigSnapshotRequest(jo);
+                    break;
+                case "organization_config_snapshot_ack":
+                    if (!jo.optBoolean("accepted", false)) {
+                        CTWarn(TAG, "Organization configuration snapshot rejected: "
+                                + jo.optString("error", "Tracker rejected snapshot"));
+                    }
                     break;
                 case "video_thumbnail_preview":
                     int previewTtlSeconds = Math.max(
@@ -1290,6 +1312,22 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             }
         } catch (Exception e) {
             CTError(TAG, "handleIncomingMessage() raised for: " + text, e);
+        }
+    }
+
+    private void onOrganizationConfigSnapshotRequest(@NonNull JSONObject request) {
+        String requestId = request.optString("requestId").trim();
+        if (requestId.isEmpty()) return;
+        try {
+            JSONObject response = new JSONObject()
+                    .put("type", "organization_config_snapshot_response")
+                    .put("requestId", requestId)
+                    .put("config", OrgConfigManager.buildManagedSnapshot());
+            if (!sendJson(response)) {
+                CTWarn(TAG, "Could not return requested organization configuration.");
+            }
+        } catch (Exception e) {
+            CTWarn(TAG, "Could not build requested organization configuration.", e);
         }
     }
 

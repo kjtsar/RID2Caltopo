@@ -21,14 +21,14 @@ class CaltopoLiveTrackTest {
     private var originalArchiveFolderId: String? = null
 
     @Test
-    fun archiveDescription_preservesIdentityAndAddsCapturedVideoLink() {
+    fun archiveDescription_containsOnlyCapturedVideoLink() {
         val drone = CtDroneSpec("RID-ARCHIVE")
         drone.owner = "1SAR7"
         drone.org = "NCSSAR"
         drone.model = "M30T"
 
         assertEquals(
-            "Video Stream: https://r2c-tracker.com/s/QHkyEQ",
+            "https://r2c-tracker.com/s/QHkyEQ",
             CaltopoLiveTrack.buildArchiveDescription(
                 drone,
                 "https://r2c-tracker.com/s/QHkyEQ",

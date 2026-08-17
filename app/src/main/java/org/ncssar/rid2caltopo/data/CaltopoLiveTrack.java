@@ -15,7 +15,6 @@ import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecording;
 import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog;
-import org.ncssar.rid2caltopo.video.ManagedVideoStreamPresence;
 
 import org.opendroneid.android.data.Util;
 
@@ -100,6 +99,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     private boolean shuttingDown = false;
     private int consecutiveUpdateFails = 0;
     private long lastInterruptedJournalWriteMs = 0L;
+    private long trackObservedStartedAtMs;
+    private long trackObservedEndedAtMs;
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
     private CaltopoMap.MapStatusListener.mapStatus mapStatus;
 
@@ -129,6 +130,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         droneSpec.setMyLiveTrack(this);
         this.localOwner = false;
 
+        trackObservedStartedAtMs = trackObservedEndedAtMs = System.currentTimeMillis();
+
         linePoints.add(new QueuedPoint(lat, lng, ele, droneTimestampInMsec, droneSpec.getLastPositionTelemetry()));
         notifyLocalTrackPoint(lat, lng, ele, droneTimestampInMsec);
         linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
@@ -145,6 +148,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     public void startNewTrack(double lat, double lng, double ele, long droneTimestampInMsec) {
         if (shuttingDown) return;
         long startedAtMs = System.currentTimeMillis();
+
+        trackObservedStartedAtMs = trackObservedEndedAtMs = startedAtMs;
 
         linePoints.add(new QueuedPoint(lat, lng, ele, droneTimestampInMsec, droneSpec.getLastPositionTelemetry()));
         long notifyStartedAtMs = System.currentTimeMillis();
@@ -205,15 +210,17 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     ) {
         if (droneSpec == null) return "";
         String videoUrl = capturedVideoUrl == null ? "" : capturedVideoUrl.trim();
-        return videoUrl.isEmpty() ? "" : "Video Stream: " + videoUrl;
+        return videoUrl;
     }
 
     @Nullable
-    private static String capturedVideoUrl(@NonNull CtDroneSpec droneSpec) {
+    private String capturedVideoUrl(@NonNull CtDroneSpec droneSpec) {
         if (R2CApplication.getAppCtxt() == null) return null;
         ManagedVideoSessionRecording recording =
-                ManagedVideoSessionRecordingCatalog.findLatestForDesignator(
+                ManagedVideoSessionRecordingCatalog.findForTrack(
                         R2CApplication.getAppCtxt(),
+                        trackObservedStartedAtMs,
+                        trackObservedEndedAtMs,
                         droneSpec.getMappedId(),
                         droneSpec.getRemoteId(),
                         droneSpec.trackLabel().split("_", 2)[0]
@@ -223,25 +230,6 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 CaltopoClient.GetTrackerCoordinationUrlPfx(),
                 R2CActivity.MyDeviceName,
                 recording.getSessionId()
-        );
-    }
-
-    @Nullable
-    private static String activeCapturedVideoUrl(@NonNull CtDroneSpec droneSpec) {
-        if (!CaltopoClient.GetCaptureVideoStreamsFlag()) return null;
-        String mappedId = droneSpec.getMappedId();
-        String remoteId = droneSpec.getRemoteId();
-        String label = droneSpec.trackLabel().split("_", 2)[0];
-        String designator = ManagedVideoStreamPresence.matchingLiveDesignator(
-                mappedId,
-                remoteId,
-                label
-        );
-        if (designator == null) return null;
-        return TrackerTabletLink.streamShortUrl(
-                CaltopoClient.GetTrackerCoordinationUrlPfx(),
-                R2CActivity.MyDeviceName,
-                designator
         );
     }
 
@@ -432,12 +420,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         }
         String archiveFolderId = CaltopoMap.GetArchiveFolderId();
         String capturedVideoUrl = capturedVideoUrl(droneSpec);
-        String archiveDescription = buildArchiveDescription(
-                droneSpec,
-                capturedVideoUrl != null
-                        ? capturedVideoUrl
-                        : activeCapturedVideoUrl(droneSpec)
-        );
+        String archiveDescription = buildArchiveDescription(droneSpec, capturedVideoUrl);
         CTDebug(TAG, String.format(Locale.US, "archiveTrackOnCaltopo(%s): Archiving track with %d points.",
                 trackLabel, size));
         persistInterruptedPublication(archiveDescription, true);
@@ -703,6 +686,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             return;
         }
         linePoints.add(new QueuedPoint(lat, lng, altitudeMeters, timestampMsec, telemetry));
+        trackObservedEndedAtMs = System.currentTimeMillis();
         persistInterruptedPublication("", false);
         long notifyStartedAtMs = System.currentTimeMillis();
         notifyLocalTrackPoint(lat, lng, altitudeMeters, timestampMsec);

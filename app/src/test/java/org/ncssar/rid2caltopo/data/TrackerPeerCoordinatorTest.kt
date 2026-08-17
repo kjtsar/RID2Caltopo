@@ -155,6 +155,29 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun organizationConfigRequest_returnsNarrowSnapshotWithoutTrackerCredential() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        CaltopoClient.SetCaltopoCredentials(CaltopoCredentials("team", "credential", "secret"))
+        CaltopoClient.SetTrackerApiKey("r2c_dev_source-device-secret")
+        CaltopoClient.SetTrackerUrlPfx("https://r2c-tracker.com/ncssar")
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        transport.receive(JSONObject()
+            .put("type", "organization_config_snapshot_request")
+            .put("requestId", "proposal-1")
+            .toString())
+
+        val response = transport.sentMessages.map(::JSONObject)
+            .last { it.optString("type") == "organization_config_snapshot_response" }
+        val snapshot = response.getJSONObject("config")
+        assertEquals("proposal-1", response.getString("requestId"))
+        assertEquals(1, snapshot.getInt("configSchemaVersion"))
+        assertFalse(snapshot.has("organization"))
+        assertFalse(snapshot.has("organizationSettings"))
+        assertFalse(snapshot.toString().contains("r2c_dev_source-device-secret"))
+    }
+
+    @Test
     fun managedVideoPresence_includesTabletTimeZone() {
         org.ncssar.rid2caltopo.app.R2CActivity.MyDeviceName = "Ken's S25 Ultra"
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
@@ -366,6 +389,19 @@ class TrackerPeerCoordinatorTest {
             approval.indexOf(".uploadRecordingDownload(request)") <
                 approval.indexOf(".respondToRecordingDownloadRequest(request.requestId, true)")
         )
+    }
+
+    @Test
+    fun defaultCoordinatorForwardsRecordingTransferOperations() {
+        val source = projectSource(
+            "app/src/main/java/org/ncssar/rid2caltopo/data/DefaultPeerCoordinator.java"
+        )
+        assertTrue(source.contains(
+            "activeCoordinator.respondToRecordingDownloadRequest(requestId, approved);"
+        ))
+        assertTrue(source.contains(
+            "activeCoordinator.uploadRecordingDownload(request);"
+        ))
     }
 
     private fun projectSource(relativePath: String): String {

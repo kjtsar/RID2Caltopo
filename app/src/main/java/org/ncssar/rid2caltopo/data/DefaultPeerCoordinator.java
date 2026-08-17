@@ -345,6 +345,17 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         activeCoordinator.sendVideoStreamTerminated(requestId, reason);
     }
 
+    @Override
+    public void respondToRecordingDownloadRequest(
+            @NonNull String requestId, boolean approved) {
+        activeCoordinator.respondToRecordingDownloadRequest(requestId, approved);
+    }
+
+    @Override
+    public void uploadRecordingDownload(@NonNull RecordingDownloadRequest request) {
+        activeCoordinator.uploadRecordingDownload(request);
+    }
+
     @NonNull
     @Override
     public List<R2CMqttManager.PeerState> getPeerList() {

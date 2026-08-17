@@ -18,6 +18,7 @@ privacy="$app/PrivacyInfo.xcprivacy"
 test -x "$binary"
 plutil -lint "$info" "$privacy"
 file "$binary" | grep -q "Mach-O 64-bit executable arm64"
+"$(dirname "$0")/verify-webrtc-framework.sh" "$app"
 
 actual_bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info")
 actual_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info")

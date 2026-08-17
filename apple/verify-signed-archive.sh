@@ -20,6 +20,7 @@ privacy="$app/PrivacyInfo.xcprivacy"
 [[ -x "$binary" ]] || { echo "Missing app binary: $binary" >&2; exit 1; }
 plutil -lint "$info" "$privacy"
 file "$binary" | grep -q 'Mach-O 64-bit executable arm64'
+"${0:A:h}/verify-webrtc-framework.sh" "$app"
 
 actual_bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info")"
 actual_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info")"

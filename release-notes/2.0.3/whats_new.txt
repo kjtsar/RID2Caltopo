@@ -26,6 +26,7 @@ Latest changes:
 Platform-specific changes:
 - iOS matches Android's double-tap screen switch, blue incident-map emphasis, 44-point map target, and assignment zoom.
 - iOS retries primary-window dismissal after cleanup and keeps two-way WebRTC audio active when microphone state changes.
+- Android fixes Play video-export crashes.
 - Android runs full cleanup when removed from Recents and exits Split view on a Stream Tile tap before changing focus.
 
 Known platform differences:

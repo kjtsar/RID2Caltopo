@@ -33,5 +33,11 @@
 -keep class org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge { *; }
 -keep class org.ncssar.rid2caltopo.video.ffmpeg.FfmpegTelemetry { *; }
 
+# The WebRTC SDK's native library resolves these Java entry points by name.
+# Its published AAR does not include consumer R8 rules, so a minified release
+# otherwise removes org.jni_zero.JniInit and crashes in JNI_OnLoad.
+-keep class org.jni_zero.** { *; }
+-keep class org.webrtc.** { *; }
+
 # Eclipse Paho MQTT client — uses reflection internally; preserve all classes.
 -keep class org.eclipse.paho.** { *; }

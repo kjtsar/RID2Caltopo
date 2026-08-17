@@ -31,6 +31,7 @@ profile="$app/embedded.mobileprovision"
 [[ -x "$binary" && -f "$profile" ]] || { echo "IPA is missing its app binary or provisioning profile" >&2; exit 1; }
 plutil -lint "$info" "$privacy"
 file "$binary" | grep -q 'Mach-O 64-bit executable arm64'
+"${0:A:h}/verify-webrtc-framework.sh" "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 
 signature="$(codesign -dv --verbose=4 "$app" 2>&1)"

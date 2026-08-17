@@ -220,7 +220,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 135
+        versionCode = 136
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
@@ -578,12 +578,47 @@ tasks.register("releaseVerification") {
     // out of the default release gate until device-level tests are intentional.
     dependsOn(
             "thirdPartyRuntimeVerification",
+            "verifyReleaseWebRtcPackaging",
             "testDebugUnitTest",
             "trackerCoordinationTests",
             "colorRealtimeQualification",
             "personRelevanceQualification"
     )
     // dependsOn("connectedDebugAndroidTest")
+}
+
+tasks.register("verifyReleaseWebRtcPackaging") {
+    group = "verification"
+    description = "Fails when R8 removes WebRTC's name-resolved JNI runtime classes."
+    dependsOn("minifyReleaseWithR8")
+    doLast {
+        def mappingDir = layout.buildDirectory.dir("outputs/mapping/release").get().asFile
+        def seedsFile = new File(mappingDir, "seeds.txt")
+        def usageFile = new File(mappingDir, "usage.txt")
+        if (!seedsFile.isFile() || !usageFile.isFile()) {
+            throw new GradleException("Missing release R8 seeds/usage output in ${mappingDir}")
+        }
+
+        def seeds = seedsFile.readLines()
+        def removed = usageFile.readLines() as Set
+        def requiredClasses = [
+                "org.jni_zero.JniInit",
+                "org.jni_zero.JniUtil",
+                "org.webrtc.PeerConnectionFactory",
+                "org.webrtc.PeerConnection",
+                "org.webrtc.DataChannel",
+        ]
+        requiredClasses.each { className ->
+            def retained = seeds.any { line ->
+                line == className || line.startsWith("${className}:")
+            }
+            if (!retained || removed.contains(className)) {
+                throw new GradleException(
+                        "Release R8 removed required WebRTC runtime class ${className}"
+                )
+            }
+        }
+    }
 }
 
 tasks.register("thirdPartyRuntimeVerification") {

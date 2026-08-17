@@ -142,7 +142,6 @@ struct ContentView: View {
     @State private var showStatus = false
     @State private var showReleaseNotes = false
     @State private var showAboutPrivacy = false
-    @State private var showProximityPairs = false
     @State private var showImportConfig = false
     @State private var importConfigNotice: ConfigImportNotice?
     @State private var showConfigurationTransfer = false
@@ -153,7 +152,6 @@ struct ContentView: View {
     @State private var selectedAircraftID: String?
     @State private var pendingDroneConfirmation: DroneConfirmationRequest?
     @State private var controllerRTMPURL = "Connect this device to Wi-Fi"
-    @State private var controllerWiFiSSID = "Wi-Fi name unavailable"
     @State private var appStartedAt = Date()
     @State private var dismissedUpdateVersionCode = 0
     @State private var pendingCredentialProfileID: String?
@@ -208,9 +206,6 @@ struct ContentView: View {
                         }
                         Button("Status", systemImage: "info.circle") { showStatus = true }
                         Button("Release Notes", systemImage: "doc.text") { showReleaseNotes = true }
-                        Button("Proximity Pairs", systemImage: "point.3.connected.trianglepath.dotted") {
-                            showProximityPairs = true
-                        }
                         Divider()
                         Button("Import Config", systemImage: "qrcode.viewfinder") { showImportConfig = true }
                         Button("Backup & Transfer", systemImage: "shippingbox") { showConfigurationTransfer = true }
@@ -259,6 +254,7 @@ struct ContentView: View {
                     importer: orgConfigImporter,
                     identityStore: droneConfirmations,
                     trackModel: ridTracks,
+                    proximityAlerts: proximityAlerts,
                     iCloudBackup: iCloudBackup
                 ) { configuration in
                     ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
@@ -283,30 +279,6 @@ struct ContentView: View {
             }
             .navigationDestination(isPresented: $showAboutPrivacy) {
                 AboutPrivacyView()
-            }
-            .navigationDestination(isPresented: $showProximityPairs) {
-                List {
-                    if proximityAlerts.pairs.isEmpty {
-                        ContentUnavailableView(
-                            "No active drone pairs",
-                            systemImage: "airplane",
-                            description: Text("Confirmed team drones will appear here when at least two are active.")
-                        )
-                    } else {
-                        ForEach(proximityAlerts.pairs) { pair in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("\(pair.firstMappedID) ↔ \(pair.secondMappedID)")
-                                    .font(.headline)
-                                Text(
-                                    "Horizontal \(feet(pair.horizontalFeet))  •  Vertical \(optionalFeet(pair.verticalFeet))  •  3D \(optionalFeet(pair.threeDimensionalFeet))"
-                                )
-                                .font(.subheadline)
-                                .foregroundStyle(pair.alerting ? .red : .secondary)
-                            }
-                        }
-                    }
-                }
-                .navigationTitle("Proximity Pairs")
             }
             .navigationDestination(item: $selectedAircraftID) { aircraftID in
                 aircraftDestination(aircraftID)
@@ -760,7 +732,8 @@ struct ContentView: View {
                 )
             }
             .task {
-                while !Task.isCancelled {
+                while !Task.isCancelled,
+                      !AppleApplicationCleanupCenter.shared.isShutdownRequested {
                     peerCoordinator.updateManagedVideoStreams(
                         incidentName: currentIncidentName,
                         incidentKey: currentIncidentKey,
@@ -789,7 +762,8 @@ struct ContentView: View {
             }
             .task(id: scenePhase == .active) {
                 guard scenePhase == .active else { return }
-                while !Task.isCancelled {
+                while !Task.isCancelled,
+                      !AppleApplicationCleanupCenter.shared.isShutdownRequested {
                     mediaMTX.ensureHealthy(captureStreams: captureStreams)
                     try? await Task.sleep(for: .seconds(15))
                 }
@@ -869,6 +843,7 @@ struct ContentView: View {
                 AppleLog.info("MediaMTX", status)
             }
             .onChange(of: captureStreams) { _, enabled in
+                guard !AppleApplicationCleanupCenter.shared.isShutdownRequested else { return }
                 mediaMTX.restart(captureStreams: enabled)
             }
     }
@@ -892,10 +867,10 @@ struct ContentView: View {
                 publishLocalDeviceMarker()
             }
             .onChange(of: networkDiagnostics.currentSnapshotID) { _, _ in
-                controllerWiFiSSID = networkDiagnostics.currentWiFiSSID ?? "Wi-Fi name unavailable"
                 refreshControllerRTMPURL()
             }
             .onChange(of: scenePhase) { _, phase in
+                guard !AppleApplicationCleanupCenter.shared.isShutdownRequested else { return }
                 updateIdleTimerPolicy(for: phase)
                 switch phase {
                 case .active:
@@ -910,6 +885,7 @@ struct ContentView: View {
                 }
             }
             .onChange(of: showTrackMap) { _, showing in
+                guard !AppleApplicationCleanupCenter.shared.isShutdownRequested else { return }
                 updateIdleTimerPolicy(for: scenePhase)
                 if showing {
                     mediaMTX.ensureHealthy(captureStreams: captureStreams)
@@ -996,6 +972,12 @@ struct ContentView: View {
 
     var body: some View {
         monitoredRoot
+            .background {
+                PrimaryWindowSceneReader { scene in
+                    AppleApplicationCleanupCenter.shared.registerPrimaryWindowScene(scene)
+                }
+                .frame(width: 0, height: 0)
+            }
             .onAppear {
                 AppleApplicationCleanupCenter.shared.register(
                     markerCleanup: {
@@ -1067,7 +1049,6 @@ struct ContentView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 8) {
                     androidRestrictionStrip
-                    androidIncidentEditor
                     androidOperationsHeader
                     androidAircraftTable
                 }
@@ -1078,38 +1059,10 @@ struct ContentView: View {
         .background(Color(uiColor: .systemBackground))
     }
 
-    private var androidIncidentEditor: some View {
-        HStack(spacing: 10) {
-            TextField("Incident", text: Binding(
-                get: { orgConfigSettings.incident },
-                set: { orgConfigSettings.setIncident($0) }
-            ))
-            .textFieldStyle(.roundedBorder)
-            .frame(width: 360)
-            TextField("Op Period", text: Binding(
-                get: { orgConfigSettings.operationalPeriod },
-                set: { orgConfigSettings.setOperationalPeriod($0) }
-            ))
-            .textFieldStyle(.roundedBorder)
-            .frame(width: 220)
-            Spacer(minLength: 0)
-        }
-        .padding(6)
-        .background(Color.accentColor.opacity(0.12))
-    }
-
     private var androidOperationsHeader: some View {
         HStack(spacing: 2) {
-            Button(action: openCaltopoMapActions) {
-                androidHeaderCell(
-                    "Map",
-                    caltopoSettings.mapID.isEmpty
-                        ? "Connect CalTopo"
-                        : (caltopoSettings.mapTitle.isEmpty ? caltopoSettings.mapID : caltopoSettings.mapTitle),
-                    width: 190
-                )
-            }
-            .buttonStyle(.plain)
+            androidIncidentMapButton
+            androidOpPeriodCell
             androidHeaderCell("Coordinator", androidCoordinatorStatus, width: 150)
             androidHeaderCell("Team Drones", "\(droneConfirmations.importedMappingCount)", width: 110)
             androidBridgeHeaderCell
@@ -1120,6 +1073,50 @@ struct ContentView: View {
         }
         .padding(2)
         .background(Color.accentColor.opacity(0.18))
+    }
+
+    private var androidIncidentMapButton: some View {
+        Button(action: openCaltopoMapActions) {
+            VStack(spacing: 2) {
+                Text(OperationalMainScreenPresentation.incidentMapLabel)
+                    .font(.caption)
+                Text(OperationalMainScreenPresentation.incidentMapValue(
+                    mapID: caltopoSettings.mapID,
+                    mapTitle: caltopoSettings.mapTitle
+                ))
+                    .font(.subheadline.bold())
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+            }
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .frame(width: 190, height: 58)
+            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(OperationalMainScreenPresentation.incidentMapLabel)
+        .accessibilityValue(OperationalMainScreenPresentation.incidentMapValue(
+            mapID: caltopoSettings.mapID,
+            mapTitle: caltopoSettings.mapTitle
+        ))
+    }
+
+    private var androidOpPeriodCell: some View {
+        VStack(spacing: 2) {
+            Text("Op Period")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("", text: Binding(
+                get: { orgConfigSettings.operationalPeriod },
+                set: { orgConfigSettings.setOperationalPeriod($0) }
+            ))
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel("Op Period")
+        }
+        .padding(.horizontal, 6)
+        .frame(width: 120, height: 58)
+        .background(Color(uiColor: .secondarySystemBackground))
     }
 
     private var androidRestrictionStrip: some View {
@@ -1208,13 +1205,17 @@ struct ContentView: View {
 
     private var androidAircraftTable: some View {
         VStack(alignment: .leading, spacing: 1) {
-            androidAircraftHeader
             if ridTracks.tracks.isEmpty {
                 Text("No aircraft detected — Bluetooth and external Remote ID are monitoring.")
                     .foregroundStyle(.secondary)
                     .frame(width: 1_118, height: 58)
                     .background(Color(uiColor: .secondarySystemBackground))
             } else {
+                if OperationalMainScreenPresentation.showsAircraftHeader(
+                    activeTrackCount: ridTracks.tracks.count
+                ) {
+                    androidAircraftHeader
+                }
                 ForEach(ridTracks.tracks) { track in androidAircraftRow(track) }
             }
         }
@@ -1585,6 +1586,7 @@ struct ContentView: View {
                     importer: orgConfigImporter,
                     identityStore: droneConfirmations,
                     trackModel: ridTracks,
+                    proximityAlerts: proximityAlerts,
                     iCloudBackup: iCloudBackup
                 ) { configuration in
                     ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
@@ -1664,6 +1666,10 @@ struct ContentView: View {
         }
     }
 
+    private var controllerWiFiSSID: String {
+        networkDiagnostics.currentWiFiSSID ?? "Wi-Fi name unavailable"
+    }
+
     private var currentIncidentName: String {
         if !caltopoSettings.mapID.isEmpty, !caltopoSettings.mapTitle.isEmpty {
             return caltopoSettings.mapTitle
@@ -1697,6 +1703,10 @@ struct ContentView: View {
             ingestAddress: controllerRTMPURL,
             networkSSID: controllerWiFiSSID,
             onMapStatusTap: openCaltopoMapActions,
+            onSwitchMap: { showTeamMaps = true },
+            onDisconnectMap: {
+                applyCaltopoConfiguration(caltopoSettings.disconnectMap())
+            },
             onRestartStreams: {
                 mediaMTX.restart(captureStreams: captureStreams)
             }
@@ -1731,7 +1741,6 @@ struct ContentView: View {
               !showStatus,
               !showReleaseNotes,
               !showAboutPrivacy,
-              !showProximityPairs,
               !showConfigurationTransfer,
               selectedAircraftID == nil
         else { return }
@@ -1887,7 +1896,26 @@ struct ContentView: View {
     }
 
     private func configurePeerCoordinator() {
+        guard !AppleApplicationCleanupCenter.shared.isShutdownRequested else { return }
         let arguments = ProcessInfo.processInfo.arguments
+        peerCoordinator.configureOrganizationConfig(
+            snapshotProvider: {
+                try AppleManagedOrganizationConfig.snapshot(
+                    caltopo: caltopoSettings,
+                    organization: orgConfigSettings,
+                    identities: droneConfirmations
+                )
+            },
+            applyHandler: { snapshot, versionMs in
+                try AppleManagedOrganizationConfig.apply(
+                    snapshot: snapshot,
+                    versionMs: versionMs,
+                    caltopo: caltopoSettings,
+                    organization: orgConfigSettings,
+                    identities: droneConfirmations
+                )
+            }
+        )
         peerCoordinator.updatePosition(locationProvider.lastLocation)
         peerCoordinator.configure(
             usePeers: arguments.contains("--tracker-use-peers") || orgConfigSettings.usePeers,
@@ -1901,7 +1929,8 @@ struct ContentView: View {
     }
 
     private func publishLocalDeviceMarker(force: Bool = false) {
-        guard let coordinate = locationProvider.lastLocation?.coordinate,
+        guard !AppleApplicationCleanupCenter.shared.isShutdownRequested,
+              let coordinate = locationProvider.lastLocation?.coordinate,
               CLLocationCoordinate2DIsValid(coordinate),
               !caltopoSettings.mapID.isEmpty
         else { return }
@@ -2006,14 +2035,6 @@ struct ContentView: View {
         Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0
     }
 
-    private func feet(_ value: Double) -> String {
-        String(format: "%.1f ft", value)
-    }
-
-    private func optionalFeet(_ value: Double?) -> String {
-        value.map(feet) ?? "unknown"
-    }
-
     private func configureTrackPolicy() {
         ridTracks.configureTrackPolicy(
             minimumDistanceFeet: orgConfigSettings.minimumTrackDistanceFeet,
@@ -2022,7 +2043,8 @@ struct ContentView: View {
     }
 
     private func monitorOperationalState() async {
-        while !Task.isCancelled {
+        while !Task.isCancelled,
+              !AppleApplicationCleanupCenter.shared.isShutdownRequested {
             updateOperationalAlerts()
             bridgeAlerts.update(
                 monitoringActive: bluetoothScanner.state == .scanning && !ridTracks.tracks.isEmpty,

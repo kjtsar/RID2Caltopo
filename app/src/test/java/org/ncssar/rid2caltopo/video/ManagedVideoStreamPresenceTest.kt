@@ -28,6 +28,22 @@ class ManagedVideoStreamPresenceTest {
     }
 
     @Test
+    fun `live stream is advertised before its offscreen decoder produces a frame`() {
+        val advertisements = ManagedVideoStreamPresence.snapshot(
+            streams = mapOf(
+                "camera/path" to StreamInfo(
+                    designator = "Rescue 1",
+                    sourcePath = "camera/path",
+                    state = StreamState.LIVE,
+                )
+            ),
+            hasRecentFrame = { false },
+        )
+
+        assertEquals(listOf("Rescue 1"), advertisements.map { it.droneDesignator })
+    }
+
+    @Test
     fun `implausible controller time base is advertised as nominal thirty fps`() {
         assertEquals(30.0, nominalManagedVideoSourceFps(240.0), 0.0)
         assertEquals(30.0, nominalManagedVideoSourceFps(24.0), 0.0)

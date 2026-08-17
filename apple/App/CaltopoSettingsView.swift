@@ -11,6 +11,7 @@ struct CaltopoSettingsView: View {
     @ObservedObject var importer: AppleOrgConfigImporter
     @ObservedObject var identityStore: AppleDroneConfirmationStore
     @ObservedObject var trackModel: RIDTrackViewModel
+    @ObservedObject var proximityAlerts: AppleProximityAlertCenter
     let iCloudBackup: AppleICloudBackupCenter
     let onSave: (AppleCaltopoConfiguration) -> Void
     @ObservedObject private var notams = AppleNotamCenter.shared
@@ -177,6 +178,13 @@ struct CaltopoSettingsView: View {
             }
             Section("Traffic safety") {
                 Toggle(
+                    "Use tracker peers",
+                    isOn: Binding(
+                        get: { orgSettings.usePeers },
+                        set: { orgSettings.setUsePeers($0) }
+                    )
+                )
+                Toggle(
                     "Standalone R2C coordination",
                     isOn: Binding(
                         get: { orgSettings.standaloneR2CCoordinationEnabled },
@@ -319,6 +327,16 @@ struct CaltopoSettingsView: View {
                 Text("OS mirroring uses the system display controls. App-managed mode presents the selected streams/map layout independently on an attached display.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            Section("Local storage") {
+                NavigationLink {
+                    AppleArchiveCleanupView(trackModel: trackModel)
+                } label: {
+                    Label("Delete Archive Folders", systemImage: "trash")
+                }
+                Text("Review dated folders, ages, and sizes before selecting anything to delete.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Section("Advanced") {
                 NavigationLink {
                     AppleDeveloperToolsView(
@@ -328,6 +346,7 @@ struct CaltopoSettingsView: View {
                         importer: importer,
                         identities: identityStore,
                         trackModel: trackModel,
+                        proximityAlerts: proximityAlerts,
                         iCloudBackup: iCloudBackup
                     )
                 } label: {
@@ -507,16 +526,11 @@ private final class AppleDeveloperToolsManager: ObservableObject {
         caltopo: AppleCaltopoSettings,
         organization: AppleOrgConfigSettings,
         identities: AppleDroneConfirmationStore
-    ) {
+    ) async {
         isWorking = true
+        exportURL = nil
         defer { isWorking = false }
         do {
-            guard organization.trackerAPIKey.hasPrefix("r2c_dev_"),
-                  AppleTrackerEnrollmentClient.enrollmentOrganization(
-                      organization.trackerEnrollmentURL
-                  )?.caseInsensitiveCompare(organization.organizationName) == .orderedSame else {
-                throw AppleTrackerEnrollmentClient.EnrollmentError.invalidURL
-            }
             let ridMap: [String: Any] = [
                 "type": "ct_ridmap",
                 "file_version": "1.0",
@@ -556,13 +570,30 @@ private final class AppleDeveloperToolsManager: ObservableObject {
                 options: [.sortedKeys]
             )
             let credentialText = String(decoding: credentialData, as: UTF8.self)
-            let configs: [[String: Any]] = [
+            var configs: [[String: Any]] = [
                 ridMap,
                 [
                     "type": "ct_credentials_enc",
                     "enc": OrgConfigTokenCodec.encryptPayload(credentialText),
                 ],
             ]
+            if let template = organization.mutualAidTemplate {
+                let mutualAid: [String: Any] = [
+                    "type": "ct_mutual_aid_credentials",
+                    "file_version": "1.0",
+                    "team_id": template.teamID,
+                    "credential_id": template.credentialID,
+                    "credential_secret": template.credentialSecret,
+                    "domain_and_port": template.domainAndPort,
+                    "source_label": template.sourceLabel,
+                    "target_folder_hint": template.targetFolderHint,
+                ]
+                let mutualAidData = try JSONSerialization.data(withJSONObject: mutualAid, options: [.sortedKeys])
+                configs.append([
+                    "type": "ct_credentials_enc",
+                    "enc": OrgConfigTokenCodec.encryptPayload(String(decoding: mutualAidData, as: UTF8.self)),
+                ])
+            }
             let bundle: [String: Any] = [
                 "format": "rid2caltopo_org_config",
                 "version": 2,
@@ -572,7 +603,7 @@ private final class AppleDeveloperToolsManager: ObservableObject {
             ]
             let data = try JSONSerialization.data(
                 withJSONObject: bundle,
-                options: [.prettyPrinted, .sortedKeys]
+                options: [.sortedKeys]
             )
             let root = (FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
                 ?? FileManager.default.temporaryDirectory)
@@ -585,7 +616,7 @@ private final class AppleDeveloperToolsManager: ObservableObject {
             let destination = root.appendingPathComponent(name)
             try data.write(to: destination, options: .atomic)
             exportURL = destination
-            status = "Android-compatible organization config ready to share."
+            status = "Organization config prepared. Use Share Prepared Org Config to send the JSON file."
         } catch {
             status = "Organization export failed: \(error.localizedDescription)"
         }
@@ -619,6 +650,7 @@ private struct AppleDeveloperToolsView: View {
     @ObservedObject var importer: AppleOrgConfigImporter
     @ObservedObject var identities: AppleDroneConfirmationStore
     @ObservedObject var trackModel: RIDTrackViewModel
+    @ObservedObject var proximityAlerts: AppleProximityAlertCenter
     let iCloudBackup: AppleICloudBackupCenter
     @StateObject private var manager = AppleDeveloperToolsManager()
     @State private var importingConfig = false
@@ -626,10 +658,6 @@ private struct AppleDeveloperToolsView: View {
     @State private var locationError: String?
     @State private var recentDays = 2
     @State private var resubmitting = false
-    @State private var archiveDirectories: [AppleArchiveDirectoryOption] = []
-    @State private var selectedArchiveDirectories: Set<String> = []
-    @State private var loadingArchiveDirectories = false
-    @State private var showingArchiveDeleteConfirmation = false
     @State private var showingResetConfirmation = false
 
     var body: some View {
@@ -639,11 +667,13 @@ private struct AppleDeveloperToolsView: View {
                     importingConfig = true
                 }
                 Button("Export Org Config", systemImage: "square.and.arrow.up") {
-                    manager.prepareOrgConfig(
-                        caltopo: caltopo,
-                        organization: organization,
-                        identities: identities
-                    )
+                    Task {
+                        await manager.prepareOrgConfig(
+                            caltopo: caltopo,
+                            organization: organization,
+                            identities: identities
+                        )
+                    }
                 }
                 if let exportURL = manager.exportURL {
                     ShareLink(item: exportURL) {
@@ -666,44 +696,6 @@ private struct AppleDeveloperToolsView: View {
                 }
                 .disabled(resubmitting)
                 Text("Clears the reported marker for the selected recent day folders and submits eligible team-drone tracks again.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Local track archives") {
-                Button(loadingArchiveDirectories ? "Loading…" : "Load Archive Folders") {
-                    loadArchiveDirectories()
-                }
-                .disabled(loadingArchiveDirectories)
-                ForEach(archiveDirectories) { directory in
-                    Toggle(
-                        isOn: Binding(
-                            get: { selectedArchiveDirectories.contains(directory.name) },
-                            set: { selected in
-                                if selected {
-                                    selectedArchiveDirectories.insert(directory.name)
-                                } else {
-                                    selectedArchiveDirectories.remove(directory.name)
-                                }
-                            }
-                        )
-                    ) {
-                        VStack(alignment: .leading) {
-                            Text(directory.name + (directory.isToday ? " • Today" : ""))
-                            Text(
-                                "\(directory.fileCount) files • \(ByteCountFormatter.string(fromByteCount: directory.byteCount, countStyle: .file))"
-                            )
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        }
-                    }
-                    .disabled(directory.isToday)
-                }
-                Button("Delete Selected Archive Folders", role: .destructive) {
-                    showingArchiveDeleteConfirmation = true
-                }
-                .disabled(selectedArchiveDirectories.isEmpty)
-                Text("Deletes only selected dated folders under Files > RID2Caltopo > Tracks. Today’s active folder cannot be selected.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -738,6 +730,11 @@ private struct AppleDeveloperToolsView: View {
             }
 
             Section("Peer coordination") {
+                NavigationLink {
+                    AppleProximityPairsView(proximityAlerts: proximityAlerts)
+                } label: {
+                    Label("Proximity Pairs", systemImage: "point.3.connected.trianglepath.dotted")
+                }
                 Toggle(
                     "Disable Peer Coordination",
                     isOn: Binding(
@@ -778,23 +775,6 @@ private struct AppleDeveloperToolsView: View {
                     identityStore: identities
                 )
             }
-        }
-        .confirmationDialog(
-            "Delete selected archive folders?",
-            isPresented: $showingArchiveDeleteConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) {
-                let selected = selectedArchiveDirectories
-                Task {
-                    manager.status = await trackModel.deleteLocalArchiveDirectories(selected)
-                    selectedArchiveDirectories.removeAll()
-                    loadArchiveDirectories()
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This permanently removes \(selectedArchiveDirectories.count) local track archive folder(s).")
         }
         .alert("Reset Persisted App State?", isPresented: $showingResetConfirmation) {
             Button("Cancel", role: .cancel) {}
@@ -839,15 +819,144 @@ private struct AppleDeveloperToolsView: View {
         manager.status = "Temporary MyLocation override applied."
     }
 
-    private func loadArchiveDirectories() {
-        loadingArchiveDirectories = true
-        Task {
-            archiveDirectories = await trackModel.localArchiveDirectories()
-            selectedArchiveDirectories.formIntersection(
-                archiveDirectories.filter { !$0.isToday }.map(\.name)
-            )
-            loadingArchiveDirectories = false
+}
+
+private struct AppleProximityPairsView: View {
+    @ObservedObject var proximityAlerts: AppleProximityAlertCenter
+
+    var body: some View {
+        List {
+            if proximityAlerts.pairs.isEmpty {
+                ContentUnavailableView(
+                    "No active drone pairs",
+                    systemImage: "airplane",
+                    description: Text("Confirmed team drones will appear here when at least two are active.")
+                )
+            } else {
+                ForEach(proximityAlerts.pairs) { pair in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(pair.firstMappedID) ↔ \(pair.secondMappedID)")
+                            .font(.headline)
+                        Text(
+                            "Horizontal \(feet(pair.horizontalFeet))  •  Vertical \(optionalFeet(pair.verticalFeet))  •  3D \(optionalFeet(pair.threeDimensionalFeet))"
+                        )
+                        .font(.subheadline)
+                        .foregroundStyle(pair.alerting ? .red : .secondary)
+                    }
+                }
+            }
         }
+        .navigationTitle("Proximity Pairs")
+    }
+
+    private func feet(_ value: Double) -> String {
+        String(format: "%.1f ft", value)
+    }
+
+    private func optionalFeet(_ value: Double?) -> String {
+        value.map(feet) ?? "unknown"
+    }
+}
+
+struct AppleArchiveCleanupView: View {
+    @ObservedObject var trackModel: RIDTrackViewModel
+    @State private var directories: [AppleArchiveDirectoryOption] = []
+    @State private var selected: Set<String> = []
+    @State private var loading = true
+    @State private var deleting = false
+    @State private var status: String?
+    @State private var showingConfirmation = false
+
+    private var selectedDirectories: [AppleArchiveDirectoryOption] {
+        directories.filter { !$0.isToday && selected.contains($0.name) }
+    }
+
+    private var selectedSize: String {
+        ArchiveFolderDisplay.size(selectedDirectories.reduce(0) { $0 + $1.byteCount })
+    }
+
+    var body: some View {
+        List {
+            if let status {
+                Section { Text(status).foregroundStyle(.secondary) }
+            }
+            Section("Archive folders") {
+                if loading {
+                    HStack {
+                        ProgressView()
+                        Text("Scanning archive folders…")
+                    }
+                } else if directories.isEmpty {
+                    ContentUnavailableView("No dated archive folders", systemImage: "archivebox")
+                } else {
+                    ForEach(directories) { directory in
+                        Toggle(
+                            isOn: Binding(
+                                get: { selected.contains(directory.name) },
+                                set: { isSelected in
+                                    if isSelected { selected.insert(directory.name) }
+                                    else { selected.remove(directory.name) }
+                                }
+                            )
+                        ) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(directory.name + (directory.isToday ? " • today" : ""))
+                                Text("Age \(directory.ageLabel) • \(directory.sizeLabel)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                Text("\(directory.fileCount) file\(directory.fileCount == 1 ? "" : "s")")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .disabled(directory.isToday || deleting)
+                    }
+                }
+            }
+            Section {
+                Button("Delete Selected Archive Folders", role: .destructive) {
+                    showingConfirmation = true
+                }
+                .disabled(selectedDirectories.isEmpty || loading || deleting)
+                Text("Deletes only selected dated folders under Files > RID2Caltopo > Tracks. Today’s active folder cannot be selected.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Delete Archive Folders")
+        .task { await loadDirectories() }
+        .refreshable { await loadDirectories() }
+        .confirmationDialog(
+            "Confirm Archive Deletion",
+            isPresented: $showingConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                Task { await deleteSelectedDirectories() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Permanently delete \(selectedDirectories.count) archive folder\(selectedDirectories.count == 1 ? "" : "s") totaling \(selectedSize)?")
+        }
+    }
+
+    @MainActor
+    private func loadDirectories() async {
+        loading = true
+        directories = await trackModel.localArchiveDirectories()
+        selected.formIntersection(directories.filter { !$0.isToday }.map(\.name))
+        loading = false
+    }
+
+    @MainActor
+    private func deleteSelectedDirectories() async {
+        let names = Set(selectedDirectories.map(\.name))
+        guard !names.isEmpty else { return }
+        deleting = true
+        status = await trackModel.deleteLocalArchiveDirectories(names)
+        selected.removeAll()
+        directories = await trackModel.localArchiveDirectories()
+        deleting = false
     }
 }
 

@@ -154,6 +154,12 @@ internal fun shouldClearTemporaryLocationOverrideOnCreate(
     hasSavedInstanceState: Boolean,
 ): Boolean = !hasSavedInstanceState
 
+internal fun shouldShutdownOnActivityDestroy(
+    isPrimaryActivity: Boolean,
+    isFinishing: Boolean,
+    isChangingConfigurations: Boolean,
+): Boolean = isPrimaryActivity && isFinishing && !isChangingConfigurations
+
 @Composable
 private fun BluetoothDisabledDialog(
     onOpenBluetoothSettings: () -> Unit,
@@ -767,6 +773,7 @@ class R2CActivity :
                 val activeScreen by localViewModel
                     .activeScreen
                     .collectAsState()
+                var openDeveloperToolsWhenMainOpens by remember { mutableStateOf(false) }
                 val pendingDroneConfirmation by localViewModel
                     .pendingDroneConfirmation
                     .collectAsState()
@@ -790,6 +797,26 @@ class R2CActivity :
                     while (isActive) {
                         val streams = StreamRegistry.streams.value
                         maintainManagedVideoSource(streams)
+                        val peerCoordinator = R2cRuntimeRegistry
+                            .getDefaultRuntime()
+                            .peerCoordinator
+                        val forcePreviewRefresh = activeRemoteVideoRequest == null &&
+                            peerCoordinator.shouldRefreshManagedVideoThumbnails()
+                        val previewDesignators = if (forcePreviewRefresh) {
+                            streams.values
+                                .asSequence()
+                                .filter {
+                                    it.state == org.ncssar.rid2caltopo.video.StreamState.LIVE &&
+                                        !it.isLocalPlayback
+                                }
+                                .sortedBy { it.designator.lowercase() }
+                                .map { it.designator }
+                                .take(4)
+                                .toSet()
+                        } else {
+                            emptySet()
+                        }
+                        streamsViewModel.setManagedVideoPreviewSources(previewDesignators)
                         val recordings = ManagedVideoSessionRecordingCatalog.snapshot(
                             applicationContext
                         )
@@ -801,10 +828,6 @@ class R2CActivity :
                             ManagedVideoThumbnailStore::get,
                         )
                         if (activeRemoteVideoRequest == null) {
-                            val forcePreviewRefresh = R2cRuntimeRegistry
-                                .getDefaultRuntime()
-                                .peerCoordinator
-                                .shouldRefreshManagedVideoThumbnails()
                             refreshManagedVideoThumbnails(
                                 advertisements,
                                 force = forcePreviewRefresh,
@@ -817,11 +840,10 @@ class R2CActivity :
                                 ManagedVideoThumbnailStore::get,
                             )
                         }
-                        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
-                            .updateManagedVideoStreams(
-                                CaltopoClient.GetIncident(),
-                                advertisements,
-                            )
+                        peerCoordinator.updateManagedVideoStreams(
+                            CaltopoClient.GetIncident(),
+                            advertisements,
+                        )
                         delay(5_000L)
                     }
                 }
@@ -842,17 +864,27 @@ class R2CActivity :
                             onDeleteArchiveDirectories = { selectedDirectoryNames ->
                                 deleteArchiveCleanupDirectories(selectedDirectoryNames)
                             },
-                            onShowHelp = {showHelpMenu()},
                             externalDisplayConnected = externalDisplayConnected,
                             externalDisplayContentMode = externalDisplayConfig.contentMode,
-                            onSetExternalDisplayContent = ::setExternalDisplayContentMode
+                            onSetExternalDisplayContent = ::setExternalDisplayContentMode,
+                            openDeveloperToolsOnStart = openDeveloperToolsWhenMainOpens,
+                            onDeveloperToolsOpened = {
+                                openDeveloperToolsWhenMainOpens = false
+                            },
                         )
                     }
                     ActiveScreen.SETTINGS -> {
-                        CaltopoSettingsScreen(onDismiss = {
-                            reloadExternalDisplayConfig(forceRecreate = true)
-                            localViewModel.showMain()
-                        })
+                        CaltopoSettingsScreen(
+                            onDismiss = {
+                                reloadExternalDisplayConfig(forceRecreate = true)
+                                localViewModel.showMain()
+                            },
+                            onShowDeveloperTools = {
+                                reloadExternalDisplayConfig(forceRecreate = true)
+                                openDeveloperToolsWhenMainOpens = true
+                                localViewModel.showMain()
+                            },
+                        )
                     }
                     ActiveScreen.SCANNER -> {
                         ScannerScreen(onDismiss = { localViewModel.showMain() })
@@ -884,6 +916,8 @@ class R2CActivity :
                                 }
                             } ?: activeRemoteVideoFailure,
                             remoteVideoActive = activeRemoteVideoRequest != null,
+                            remoteVideoDesignator = activeRemoteVideoRequest?.droneDesignator,
+                            remoteRequesterEmail = activeRemoteVideoRequest?.requesterEmail,
                             remoteVideoMicrophoneEnabled = activeRemoteVideoMicrophoneEnabled,
                             remoteVideoMicrophoneError = activeRemoteVideoMicrophoneError,
                             onToggleRemoteVideoMicrophone = { toggleManagedVideoMicrophone() },
@@ -1203,12 +1237,6 @@ class R2CActivity :
         }
     }
 
-    private fun showHelpMenu() {
-        val helpMenu: DeviceHelp = DeviceHelp.newInstance()
-        val transaction = supportFragmentManager.beginTransaction()
-        helpMenu.show(transaction, "Help")
-    }
-
     private fun reloadExternalDisplayConfig(forceRecreate: Boolean = false) {
         externalDisplayConfig = ExternalDisplayPrefs.load(this)
         refreshExternalDisplay(forceRecreate = forceRecreate)
@@ -1482,7 +1510,14 @@ class R2CActivity :
         displayManager?.unregisterDisplayListener(displayListener)
         dismissExternalDisplay(returnPhoneToMain = false)
         val exitRequested = CaltopoClient.IsExitRequested()
-        val shouldShutdown = (this === AppActivity) && isFinishing && exitRequested
+        // Removing the task from Recents finishes the primary activity without
+        // setting AppExitRequested. Every real primary-activity finish must run
+        // shutdown so remote markers and active tracks are cleaned up.
+        val shouldShutdown = shouldShutdownOnActivityDestroy(
+            isPrimaryActivity = this === AppActivity,
+            isFinishing = isFinishing,
+            isChangingConfigurations = isChangingConfigurations,
+        )
 
         if (shouldShutdown) {
             try {

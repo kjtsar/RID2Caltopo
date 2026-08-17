@@ -1,34 +1,32 @@
 Latest changes:
-- Expire unanswered tracker video and recording-transfer prompts after 60 seconds on Android and iOS, while preserving independently bounded approved sessions.
-- Reconcile streams and resume valid approved recording transfers when the tracker connection returns, without asking the operator twice.
-- Added ordinary browser downloads for Android and iOS recordings. Transfers require tablet approval unless Remote Video Control is enabled; the tablet original is retained and the tracker's temporary relay copy is deleted after delivery.
-- Publish recordings from MediaMTX's file-closed event so new video appears without timing guesses or manual refreshes.
-- Keep Android's live source attached during tracker negotiation, treat normal source endings as clean stops, and clear stale tracker request state.
-- Stabilized routed bandwidth checks and recorded playback so retries do not force last-resort quality or loop fragmented media.
-- Link archived CalTopo tracks to the exact recording by stable session ID, preventing same-drone recordings from collapsing after restart.
-- Name new Android and iOS recordings with drone, local date, and start time while retaining legacy-file support.
-- Fixed iOS migration so recordings captured earlier today remain available after an update.
-- Added persistent Remote Video Control on both platforms, allowing an authenticated requester to use measured, bandwidth-safe quality without a pilot/VO prompt while preserving visible and spoken sharing notices.
-- Fixed iPad two-way audio so microphone changes no longer interrupt the negotiated VoIP session.
-- Recover interrupted CalTopo LiveTracks into archived tracks after termination, update, or relaunch.
-- Base maximum-idle shutdown on launch or the latest RID message, including messages without valid positions.
-- Added adjustable clue camera heading and prefer movement-derived course as the initial direction.
-- Publish compatible aircraft-motion and camera-link metadata with CalTopo LiveTrack reports.
-- Refresh tablet-page thumbnails only while an authenticated viewer is present.
-- Preserve gathered iPad WebRTC candidates in one-shot answers and improve routed-connection diagnostics.
-- Added short authenticated tablet links for live and recent video with thumbnails.
-- Show live streams before drone identity is known; add CalTopo links after matching telemetry.
-- Added pilot/VO arbitration for one remote viewer, including declines and priority replacement.
-- Added matched live and archived CalTopo video links and thumbnails.
-- Added 30 m, 10 m, and maximum 1 m USGS terrain downloads with storage and cache checks.
-- Prefer the finest downloaded terrain at each aircraft position for better AGL accuracy.
-- Standardized map and video telemetry as ATO, AGL, RNG, and HDG on both platforms.
-- Limit Ignore to the drone's current flight so a later flight requests confirmation again.
-- Clarified the independent CalTopo Teams API relationship and replaced public organization examples with mySAR.
+- Added secure r2c-tracker backhaul for live video and two-way audio with measured quality, one-viewer arbitration, visible requester identity, spoken notices, and an operator-controlled microphone.
+- Added Remote Video Control so authenticated requesters can start bandwidth-safe video without a per-request prompt while the tablet shows who is viewing.
+- Expire unanswered video and recording-transfer prompts after 60 seconds while keeping approved sessions independently bounded.
+- Resume approved recording transfers after reconnect without prompting twice; retain the tablet original and delete temporary relay copies after delivery.
+- Added ordinary browser downloads for Android and iOS recordings, with tablet approval unless Remote Video Control is enabled.
+- Publish recordings on file close, use stable session identities, and preserve today's recordings through iOS updates.
+- Keep live sources available for tracker inventory, thumbnails, and remote requests before a Stream Tile or first decoded frame exists.
+- Improved bandwidth checks, playback wake-up, fragmented-media handling, and retries for backhauled video.
+- Added authenticated short tablet links and thumbnails for live and recent video.
+- Publish backhauled stream links with CalTopo tracks and link archives only to the recording overlapping that flight.
+- Name recordings with drone, local date, and start time while retaining legacy-file support.
+- Added tracker-managed configuration so administrators can publish encrypted CalTopo credentials, RID mappings, track-folder defaults, and mutual-aid settings that enrolled Android and iOS devices synchronize automatically.
+- Simplified R2C2 enrollment and transfer with cross-platform QR links using opaque public locators; JSON sharing remains a backup.
+- Improved shutdown so task removal, Quit, and idle closure finalize tracks, stop tracker/video work, and remove the CalTopo device marker without recreation; idle timing uses launch or the latest RID message.
+- Recover interrupted CalTopo LiveTracks after termination, update, or relaunch, with clearer dated archive folders.
+- Added archive-cleanup screens that show folder age and size, protect today's active folder, and require confirmation before deletion.
+- Improved UI parity with a prominent incident-map control, matching map actions, clearer Op Period/settings layouts, requester identity on Stream Tiles, and About & Privacy information.
+- Added assignment zoom, removed stale visibility selections, and suppressed obsolete geometryless assignments.
+- Standardized map/video telemetry as ATO, AGL, RNG, and HDG; added movement-derived course and adjustable clue-camera heading.
+- Publish aircraft-motion, camera orientation, field-of-view, and video-link metadata with CalTopo LiveTracks.
+- Added 30 m, 10 m, and up to 1 m USGS terrain downloads with storage checks, preferring the finest available terrain for AGL.
+- Limit Ignore to the current flight so later flights request confirmation again.
+- Clarified CalTopo Teams API independence, aligned the launch acknowledgment, and replaced public organization examples with mySAR.
 
 Platform-specific changes:
-- iOS now matches Android's top-bar double-tap shortcut for switching between the Main and Live View screens.
-- Android and iOS show the same CalTopo relationship language in the required launch acknowledgment.
+- iOS matches Android's double-tap screen switch, blue incident-map emphasis, 44-point map target, and assignment zoom.
+- iOS retries primary-window dismissal after cleanup and keeps two-way WebRTC audio active when microphone state changes.
+- Android runs full cleanup when removed from Recents and exits Split view on a Stream Tile tap before changing focus.
 
 Known platform differences:
 - Apple uses iCloud Drive and Files for backup and transfer; Google Drive remains selectable through Files when installed.

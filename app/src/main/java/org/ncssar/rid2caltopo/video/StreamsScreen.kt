@@ -282,6 +282,8 @@ fun StreamsScreen(
     allowModalDialogs: Boolean = true,
     remoteVideoStatus: String? = null,
     remoteVideoActive: Boolean = false,
+    remoteVideoDesignator: String? = null,
+    remoteRequesterEmail: String? = null,
     remoteVideoMicrophoneEnabled: Boolean = false,
     remoteVideoMicrophoneError: String? = null,
     onToggleRemoteVideoMicrophone: () -> Unit = {},
@@ -577,7 +579,9 @@ fun StreamsScreen(
                             onSplitFractionChange = { splitFraction = it },
                             onMapStatusTap = onMapStatusTap,
                             onStreamsPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Streams) },
-                            onMapPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Map) }
+                            onMapPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Map) },
+                            remoteVideoDesignator = remoteVideoDesignator,
+                            remoteRequesterEmail = remoteRequesterEmail,
                         )
                     }
 
@@ -587,6 +591,8 @@ fun StreamsScreen(
                             allowCapturedVideoPicker = allowModalDialogs,
                             onMapStatusTap = onMapStatusTap,
                             fullScreenContent = fullScreenChrome.showExitChip,
+                            remoteVideoDesignator = remoteVideoDesignator,
+                            remoteRequesterEmail = remoteRequesterEmail,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -640,6 +646,8 @@ fun StreamsScreen(
                             allowCapturedVideoPicker = false,
                             onMapStatusTap = onMapStatusTap,
                             showTileControls = false,
+                            remoteVideoDesignator = remoteVideoDesignator,
+                            remoteRequesterEmail = remoteRequesterEmail,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -911,7 +919,9 @@ private fun SplitStreamsAndMap(
     onSplitFractionChange: (Float) -> Unit,
     onMapStatusTap: () -> Unit,
     onStreamsPaneTap: () -> Unit,
-    onMapPaneTap: () -> Unit
+    onMapPaneTap: () -> Unit,
+    remoteVideoDesignator: String?,
+    remoteRequesterEmail: String?,
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val isPortrait = maxHeight > maxWidth
@@ -941,6 +951,9 @@ private fun SplitStreamsAndMap(
                         viewModel = viewModel,
                         allowCapturedVideoPicker = allowCapturedVideoPicker,
                         onMapStatusTap = onMapStatusTap,
+                        onStreamTileSingleTap = onStreamsPaneTap,
+                        remoteVideoDesignator = remoteVideoDesignator,
+                        remoteRequesterEmail = remoteRequesterEmail,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -994,6 +1007,9 @@ private fun SplitStreamsAndMap(
                         viewModel = viewModel,
                         allowCapturedVideoPicker = allowCapturedVideoPicker,
                         onMapStatusTap = onMapStatusTap,
+                        onStreamTileSingleTap = onStreamsPaneTap,
+                        remoteVideoDesignator = remoteVideoDesignator,
+                        remoteRequesterEmail = remoteRequesterEmail,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -1160,8 +1176,11 @@ private fun StreamsGrid(
     viewModel: StreamsViewModel,
     allowCapturedVideoPicker: Boolean,
     onMapStatusTap: () -> Unit,
+    onStreamTileSingleTap: (() -> Unit)? = null,
     showTileControls: Boolean = true,
     fullScreenContent: Boolean = false,
+    remoteVideoDesignator: String? = null,
+    remoteRequesterEmail: String? = null,
     modifier: Modifier = Modifier
 ) {
     val tag = "StreamsGrid"
@@ -1264,13 +1283,19 @@ private fun StreamsGrid(
                         restartMediaMtxServer(context)
                     },
                     onToggleFocus = {
-                        viewModel.toggleFocus(path)
+                        handleStreamTileSingleTap(
+                            onStreamsPaneTap = onStreamTileSingleTap,
+                            onToggleFocus = { viewModel.toggleFocus(path) },
+                        )
                     },
                     showTileControls = showTileControls,
                     effectiveFocused = focusPresentation.effectiveFocused,
                     showFocusBorder = focusPresentation.showFocusBorder,
                     fillContainer = chromePresentation.fillContainer,
                     showStandaloneTelemetryOverlay = chromePresentation.showStandaloneTelemetryOverlay,
+                    remoteRequesterEmail = remoteRequesterEmail.takeIf {
+                        path.equals(remoteVideoDesignator, ignoreCase = true)
+                    },
                 )
                 return@Box
             }
@@ -1316,13 +1341,19 @@ private fun StreamsGrid(
                                     restartMediaMtxServer(context)
                                 },
                                 onToggleFocus = {
-                                    viewModel.toggleFocus(path)
+                                    handleStreamTileSingleTap(
+                                        onStreamsPaneTap = onStreamTileSingleTap,
+                                        onToggleFocus = { viewModel.toggleFocus(path) },
+                                    )
                                 },
                                 showTileControls = showTileControls,
                                 effectiveFocused = focusPresentation.effectiveFocused,
                                 showFocusBorder = focusPresentation.showFocusBorder,
                                 fillContainer = chromePresentation.fillContainer,
                                 showStandaloneTelemetryOverlay = chromePresentation.showStandaloneTelemetryOverlay,
+                                remoteRequesterEmail = remoteRequesterEmail.takeIf {
+                                    path.equals(remoteVideoDesignator, ignoreCase = true)
+                                },
                             )
                         }
                     }
@@ -1352,6 +1383,17 @@ private fun StreamsGrid(
                 }
             }
         )
+    }
+}
+
+internal fun handleStreamTileSingleTap(
+    onStreamsPaneTap: (() -> Unit)?,
+    onToggleFocus: () -> Unit,
+) {
+    if (onStreamsPaneTap != null) {
+        onStreamsPaneTap()
+    } else {
+        onToggleFocus()
     }
 }
 

@@ -41,6 +41,15 @@ private val syntheticArtifactFoldersById = listOf(
 internal fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<MapFolderUiState> {
     val folderItems = mutableMapOf<String, MutableList<MapItemUiState>>()
     val folderMeta = mutableMapOf<String, Pair<String, Boolean>>()  // id -> (title, visible)
+    val renderableAssignmentKeys = features.values.mapNotNull { feature ->
+        val props = feature.optJSONObject("properties") ?: return@mapNotNull null
+        val id = feature.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val className = props.optString("class")
+        if (className != "Assignment" || artifactGeoPoints(feature).isEmpty()) return@mapNotNull null
+        val folderId = effectiveArtifactFolderId(props, className).takeIf { it.isNotBlank() }
+            ?: return@mapNotNull null
+        assignmentDisplayKey(folderId, artifactDisplayTitle(props, id, className))
+    }.toSet()
     for (feature in features.values) {
         val props = feature.optJSONObject("properties") ?: continue
         val id = feature.optString("id").takeIf { it.isNotBlank() } ?: continue
@@ -51,7 +60,17 @@ internal fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<Map
         } else {
             val folderId = effectiveArtifactFolderId(props, className).takeIf { it.isNotBlank() } ?: continue
             val title = artifactDisplayTitle(props, id, className)
-            folderItems.getOrPut(folderId) { mutableListOf() }.add(MapItemUiState(id, title))
+            val zoomableAssignment = className == "Assignment" && artifactGeoPoints(feature).isNotEmpty()
+            if (className == "Assignment" && !zoomableAssignment &&
+                assignmentDisplayKey(folderId, title) in renderableAssignmentKeys
+            ) continue
+            folderItems.getOrPut(folderId) { mutableListOf() }.add(
+                MapItemUiState(
+                    featureId = id,
+                    title = title,
+                    zoomableAssignment = zoomableAssignment
+                )
+            )
         }
     }
     for (folder in syntheticArtifactFoldersById.values) {
@@ -73,6 +92,9 @@ internal fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<Map
             )
         }
 }
+
+private fun assignmentDisplayKey(folderId: String, title: String): String =
+    "${folderId.lowercase()}\u0000${title.trim().lowercase()}"
 
 internal fun mapFolderUiDebugSummary(
     folders: List<MapFolderUiState>,
@@ -563,6 +585,9 @@ internal fun allArtifactGeoPoints(state: ArtifactOverlayState): List<GeoPoint> {
     state.polygons.forEach { polygon -> points += polygon.points }
     return points
 }
+
+internal fun artifactGeoPoints(feature: JSONObject): List<GeoPoint> =
+    allArtifactGeoPoints(buildArtifactOverlayState(listOf(feature)))
 
 internal fun boundingBoxFromPoints(points: List<GeoPoint>): BoundingBox {
     var minLat = Double.POSITIVE_INFINITY

@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.ui
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import org.ncssar.rid2caltopo.data.CaltopoNode
 
 class R2CViewCoordinatorStatusTest {
     @Test
@@ -23,5 +24,24 @@ class R2CViewCoordinatorStatusTest {
     fun coordinatorStatusDisplayText_handlesGenericAndUnknownStatuses() {
         assertEquals("Not configured", coordinatorStatusDisplayText("R2C link not configured"))
         assertEquals("Custom link state", coordinatorStatusDisplayText("Custom link state"))
+    }
+
+    @Test
+    fun incidentMapDisplayValue_usesMapNameOrStandaloneDefault() {
+        assertEquals("Standalone", incidentMapDisplayValue(CaltopoConnectionState.StandAlone))
+        assertEquals(
+            "Washoe Search",
+            incidentMapDisplayValue(
+                CaltopoConnectionState.MapSelected(
+                    CaltopoNode.MapNode("map-42", "Washoe Search", 0L),
+                ),
+            ),
+        )
+        assertEquals(
+            "map-42",
+            incidentMapDisplayValue(
+                CaltopoConnectionState.MapSelected(CaltopoNode.MapNode("map-42", " ", 0L)),
+            ),
+        )
     }
 }

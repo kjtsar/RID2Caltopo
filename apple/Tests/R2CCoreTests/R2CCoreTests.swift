@@ -2,6 +2,26 @@ import Foundation
 import Testing
 @testable import R2CCore
 
+@Test func archiveFolderAgeUsesLargestRequestedWholeUnit() {
+    #expect(ArchiveFolderDisplay.age(59) == "<1 minute")
+    #expect(ArchiveFolderDisplay.age(60) == "1 minute")
+    #expect(ArchiveFolderDisplay.age(59 * 60) == "59 minutes")
+    #expect(ArchiveFolderDisplay.age(60 * 60) == "1 hour")
+    #expect(ArchiveFolderDisplay.age(23 * 60 * 60) == "23 hours")
+    #expect(ArchiveFolderDisplay.age(24 * 60 * 60) == "1 day")
+    #expect(ArchiveFolderDisplay.age(29 * 24 * 60 * 60) == "29 days")
+    #expect(ArchiveFolderDisplay.age(30 * 24 * 60 * 60) == "1 month")
+    #expect(ArchiveFolderDisplay.age(364 * 24 * 60 * 60) == "12 months")
+    #expect(ArchiveFolderDisplay.age(365 * 24 * 60 * 60) == "1 year")
+}
+
+@Test func archiveFolderSizeMatchesAndroidUnits() {
+    #expect(ArchiveFolderDisplay.size(512) == "512 B")
+    #expect(ArchiveFolderDisplay.size(1_536) == "1.5 KB")
+    #expect(ArchiveFolderDisplay.size(2 * 1_024 * 1_024) == "2.0 MB")
+    #expect(ArchiveFolderDisplay.size(3 * 1_024 * 1_024 * 1_024) == "3.0 GB")
+}
+
 @Test func approvedAppleRecordingUploadDoesNotWaitForWebSocketAcknowledgement() throws {
     let appleRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -192,6 +212,17 @@ private actor CaltopoFolderResolverProbe {
 }
 
 @Test
+func caltopoArchiveFolderNameSeparatesTrackFolderAndDate() {
+    let name = CaltopoTrackFolderResolver.archiveFolderName(
+        trackFolderName: " Drone Tracks ",
+        date: Date(timeIntervalSince1970: 1_721_779_200),
+        timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+
+    #expect(name == "Drone Tracks 24Jul")
+}
+
+@Test
 func caltopoFolderResolutionCoalescesConcurrentPublishers() async throws {
     let resolver = CaltopoTrackFolderResolver()
     let probe = CaltopoFolderResolverProbe()
@@ -230,11 +261,11 @@ func caltopoFolderResolutionKeepsPopulatedArchiveWithoutDeletingPreexistingFolde
     let snapshot = CaltopoArtifactSnapshot(
         folders: [
             CaltopoArtifactFolder(id: "active", title: "Drone Tracks", initiallyVisible: true),
-            CaltopoArtifactFolder(id: "archive-empty", title: "Drone Tracks24Jul", initiallyVisible: false),
-            CaltopoArtifactFolder(id: "archive-used", title: "Drone Tracks24Jul", initiallyVisible: false),
+            CaltopoArtifactFolder(id: "archive-empty", title: "Drone Tracks 24Jul", initiallyVisible: false),
+            CaltopoArtifactFolder(id: "archive-used", title: "Drone Tracks 24Jul", initiallyVisible: false),
             CaltopoArtifactFolder(
                 id: "archive-with-child",
-                title: "Drone Tracks24Jul",
+                title: "Drone Tracks 24Jul",
                 initiallyVisible: false
             ),
             CaltopoArtifactFolder(
@@ -281,12 +312,12 @@ func caltopoFolderResolutionDeletesOnlyItsOwnUnusedRaceLosers() async throws {
         CaltopoArtifactFolder(id: "active-created", title: "Drone Tracks", initiallyVisible: true),
         CaltopoArtifactFolder(
             id: "archive-other",
-            title: "Drone Tracks24Jul",
+            title: "Drone Tracks 24Jul",
             initiallyVisible: false
         ),
         CaltopoArtifactFolder(
             id: "archive-created",
-            title: "Drone Tracks24Jul",
+            title: "Drone Tracks 24Jul",
             initiallyVisible: false
         ),
     ])
@@ -314,7 +345,7 @@ func caltopoFolderResolutionReusesExistingDailyFolder() async throws {
     let resolver = CaltopoTrackFolderResolver()
     let probe = CaltopoFolderResolverProbe(snapshot: CaltopoArtifactSnapshot(folders: [
         CaltopoArtifactFolder(id: "active-existing", title: "DRONE TRACKS", initiallyVisible: true),
-        CaltopoArtifactFolder(id: "archive-existing", title: "drone tracks24jul", initiallyVisible: false),
+        CaltopoArtifactFolder(id: "archive-existing", title: "drone tracks 24jul", initiallyVisible: false),
     ]))
     let result = try await resolver.resolve(
         trackFolderName: "Drone Tracks",
@@ -713,6 +744,35 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
         detailedLabel: "Land rules off"
     ) == "Land rules off")
     #expect(detailedAirspace.contains("Gowen Field"))
+}
+
+@Test func operationalMainScreenUsesIncidentMapContractAndHidesEmptyTrackHeader() {
+    #expect(OperationalMainScreenPresentation.incidentMapLabel == "Incident map")
+    #expect(OperationalMainScreenPresentation.incidentMapValue(
+        mapID: "",
+        mapTitle: ""
+    ) == "Standalone")
+    #expect(OperationalMainScreenPresentation.incidentMapValue(
+        mapID: "map-42",
+        mapTitle: "Washoe Search"
+    ) == "Washoe Search")
+    #expect(OperationalMainScreenPresentation.incidentMapValue(
+        mapID: "map-42",
+        mapTitle: " "
+    ) == "map-42")
+    #expect(!OperationalMainScreenPresentation.showsAircraftHeader(activeTrackCount: 0))
+    #expect(OperationalMainScreenPresentation.showsAircraftHeader(activeTrackCount: 1))
+}
+
+@Test func operationalStreamSetupMatchesAndroidWording() {
+    #expect(OperationalStreamSetupPresentation.instruction(
+        ingestAddress: "rtmp://192.168.1.5:1935",
+        networkSSID: "Incident Wi-Fi"
+    ) == "Stream video to: rtmp://192.168.1.5:1935/<droneDesig> on Incident Wi-Fi network")
+    #expect(OperationalStreamSetupPresentation.instruction(
+        ingestAddress: "rtmp://192.168.1.5:1935/",
+        networkSSID: " "
+    ) == "Stream video to: rtmp://192.168.1.5:1935/<droneDesig> on Wi-Fi name unavailable network")
 }
 
 @Test func operationalContourToggleChangesTileLayerFingerprintWithoutViewportChange() {
@@ -1872,6 +1932,8 @@ private func proximityDrone(
     #expect(visible.points.map(\.title) == ["Clue"])
     #expect(snapshot.lines.map(\.title) == ["Search line"])
     #expect(snapshot.polygons.map(\.title) == ["Division A"])
+    #expect(snapshot.coordinates(forItemID: "polygon").count == 4)
+    #expect(snapshot.coordinates(forItemID: "missing").isEmpty)
     #expect(snapshot.polygons.first?.strokeHex == "#7FFF0000")
     #expect(snapshot.polygons.first?.fillHex == "#33FF0000")
     #expect(snapshot.ignoredTrackCount == 1)
@@ -1891,6 +1953,20 @@ private func proximityDrone(
     )
 
     #expect(resolved == ["local-hidden", "server-hidden", "operator-hidden"])
+}
+
+@Test func caltopoArtifactVisibilityFindsOnlyLegacyPersistedSelectionKeys() {
+    let keys = CaltopoArtifactVisibilityPolicy.legacyPersistedSelectionKeys([
+        "map.visibility.GF7A7ER.items",
+        "map.visibility.GF7A7ER.folders",
+        "map.pilotDisplay.N1234.active",
+        "caltopo.mapID",
+    ])
+
+    #expect(keys == [
+        "map.visibility.GF7A7ER.folders",
+        "map.visibility.GF7A7ER.items",
+    ])
 }
 
 @Test func operationalCoordinateFormatsMatchAndroid() {
@@ -1928,6 +2004,35 @@ private func proximityDrone(
     let snapshot = try CaltopoArtifactDecoder.decode(data: data)
     #expect(snapshot.lines.map(\.title) == ["Root line"])
     #expect(snapshot.folders.first { $0.id == "__caltopo_lines_polygons__" }?.initiallyVisible == true)
+}
+
+@Test func caltopoArtifactSnapshotCountsDuplicateMarkerOccurrences() throws {
+    let data = Data(#"""
+    {"state":{"features":[
+      {"id":"device-marker","geometry":{"type":"Point","coordinates":[-117.9,34.9]},"properties":{"class":"Marker","title":"R2C: iPad","folderId":"tracks"}},
+      {"id":"DEVICE-MARKER","geometry":{"type":"Point","coordinates":[-117.9,34.9]},"properties":{"class":"Marker","title":"R2C: iPad","folderId":"tracks"}}
+    ]}}
+    """#.utf8)
+
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+
+    #expect(snapshot.occurrenceCount(ofItemID: " device-marker ") == 2)
+    #expect(snapshot.occurrenceCount(ofItemID: "") == 0)
+}
+
+@Test func caltopoArtifactVisibilitySuppressesOnlyGeometrylessReplacementAssignments() throws {
+    let data = Data(#"""
+    {"state":{"features":[
+      {"id":"old-ad","properties":{"class":"Assignment","title":"AD 105"}},
+      {"id":"current-ad","geometry":{"type":"Polygon","coordinates":[[[-117.9,34.9],[-117.8,34.9],[-117.8,35.0],[-117.9,34.9]]]},"properties":{"class":"Assignment","title":"AD 105"}},
+      {"id":"pending-ae","properties":{"class":"Assignment","title":"AE 106"}}
+    ]}}
+    """#.utf8)
+
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+
+    #expect(snapshot.items.map(\.id).sorted() == ["current-ad", "old-ad", "pending-ae"])
+    #expect(snapshot.visibilityItems.map(\.id).sorted() == ["current-ad", "pending-ae"])
 }
 
 @Test func caltopoArtifactVisibilityHonorsFolderHierarchyItemsAndOrphans() throws {
@@ -2976,7 +3081,7 @@ private func proximityDrone(
         credentialSecretBase64: "c2VjcmV0"
     ))
     let request = try await client.makeCreateFolderRequest(
-        title: "Drone Tracks23Jul",
+        title: "Drone Tracks 23Jul",
         visible: false,
         labelVisible: false,
         now: Date(timeIntervalSince1970: 1_700_000_000)
@@ -2986,7 +3091,7 @@ private func proximityDrone(
     let payload = try #require(fields["json"]?.data(using: .utf8))
     let root = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
     let properties = try #require(root["properties"] as? [String: Any])
-    #expect(properties["title"] as? String == "Drone Tracks23Jul")
+    #expect(properties["title"] as? String == "Drone Tracks 23Jul")
     #expect(properties["visible"] as? Bool == false)
     #expect(properties["labelVisible"] as? Bool == false)
 }
@@ -3014,7 +3119,7 @@ private func proximityDrone(
         label: "ALPHA1",
         observations: observations,
         folderID: "archive-folder",
-        description: "Video Stream: https://r2c-tracker.com/s/QHkyEQ",
+        description: "https://r2c-tracker.com/s/QHkyEQ",
         now: Date(timeIntervalSince1970: 1_700_000_010)
     )
     #expect(request.url?.path == "/api/v1/map/map123/Shape/track456")
@@ -3026,7 +3131,7 @@ private func proximityDrone(
     #expect(properties["class"] as? String == "Shape")
     #expect(properties["folderId"] as? String == "archive-folder")
     #expect(properties["stroke"] as? String == "#ff00ff")
-    #expect(properties["description"] as? String == "Video Stream: https://r2c-tracker.com/s/QHkyEQ")
+    #expect(properties["description"] as? String == "https://r2c-tracker.com/s/QHkyEQ")
     #expect((geometry["coordinates"] as? [Any])?.count == 2)
 }
 
@@ -3074,7 +3179,7 @@ private func proximityDrone(
     #expect(TrackerTabletLink.markerDescription(
         trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
         tabletName: "Kjt A5 Pro"
-    ) == "R2C tablet: https://r2c-tracker.com/t/Bz2DZg")
+    ) == "https://r2c-tracker.com/t/Bz2DZg")
     #expect(TrackerTabletLink.markerDescription(
         trackerURLPrefix: "",
         tabletName: "Kjt A5 Pro"
@@ -3109,11 +3214,69 @@ private func proximityDrone(
     )
 }
 
+@Test func managedVideoRecordingAssociationUsesExactTrackInterval() throws {
+    let first = ManagedVideoRecordingIdentity.Candidate(
+        sessionID: "first",
+        designator: "1SAR7",
+        startedAt: Date(timeIntervalSince1970: 1),
+        endedAt: Date(timeIntervalSince1970: 11)
+    )
+    let second = ManagedVideoRecordingIdentity.Candidate(
+        sessionID: "second",
+        designator: "1SAR7",
+        startedAt: Date(timeIntervalSince1970: 101),
+        endedAt: Date(timeIntervalSince1970: 111)
+    )
+    let candidates = [second, first]
+
+    #expect(ManagedVideoRecordingIdentity.recording(
+        matching: ["1sar7"],
+        trackStartedAt: Date(timeIntervalSince1970: 2),
+        trackEndedAt: Date(timeIntervalSince1970: 10),
+        candidates: candidates
+    )?.sessionID == "first")
+    #expect(ManagedVideoRecordingIdentity.recording(
+        matching: ["1SAR7"],
+        trackStartedAt: Date(timeIntervalSince1970: 102),
+        trackEndedAt: Date(timeIntervalSince1970: 110),
+        candidates: candidates
+    )?.sessionID == "second")
+}
+
+@Test func managedVideoRecordingAssociationDoesNotReuseStaleRecording() {
+    let stale = ManagedVideoRecordingIdentity.Candidate(
+        sessionID: "stale",
+        designator: "1SAR7",
+        startedAt: Date(timeIntervalSince1970: 1),
+        endedAt: Date(timeIntervalSince1970: 11)
+    )
+
+    #expect(ManagedVideoRecordingIdentity.recording(
+        matching: ["1SAR7"],
+        trackStartedAt: Date(timeIntervalSince1970: 101),
+        trackEndedAt: Date(timeIntervalSince1970: 111),
+        candidates: [stale]
+    ) == nil)
+}
+
+@Test func managedVideoRecordingIdentityParsesMediaMTXStartTime() throws {
+    let date = try #require(ManagedVideoRecordingIdentity.recordingStartedAt(
+        forPath: "/CapturedStreams/1SAR7/1SAR7_2026-08-14_17-32-47-123456.mp4"
+    ))
+    let calendar = Calendar.current
+    #expect(calendar.component(.year, from: date) == 2026)
+    #expect(calendar.component(.month, from: date) == 8)
+    #expect(calendar.component(.day, from: date) == 14)
+    #expect(calendar.component(.hour, from: date) == 17)
+    #expect(calendar.component(.minute, from: date) == 32)
+    #expect(calendar.component(.second, from: date) == 47)
+}
+
 @Test func caltopoArchiveDescriptionIncludesOnlyCapturedVideo() throws {
     let description = CaltopoArchiveDescription.build(
         capturedVideoURL: try #require(URL(string: "https://r2c-tracker.com/s/QHkyEQ"))
     )
-    #expect(description == "Video Stream: https://r2c-tracker.com/s/QHkyEQ")
+    #expect(description == "https://r2c-tracker.com/s/QHkyEQ")
     #expect(CaltopoArchiveDescription.build(capturedVideoURL: nil).isEmpty)
 }
 
@@ -3362,6 +3525,22 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     let encrypted = OrgConfigTokenCodec.encryptPayload(plaintext)
     #expect(encrypted != plaintext)
     #expect(try OrgConfigTokenCodec.decryptPayload(encrypted) == plaintext)
+}
+
+@Test func canonicalCredentialPayloadMatchesAndroidEncryptedBytes() throws {
+    let payload = try OrgConfigTokenCodec.canonicalCredentialPayload([
+        "type": "ct_credentials",
+        "file_version": "1.0",
+        "team_id": "team-7",
+        "credential_id": "credential-9",
+        "credential_secret": "c2VjcmV0",
+        "domain_and_port": "caltopo.com",
+        "track_folder": "Drone Tracks",
+        "empty_optional_value": "",
+    ])
+
+    #expect(payload == #"{"credential_id":"credential-9","credential_secret":"c2VjcmV0","domain_and_port":"caltopo.com","file_version":"1.0","team_id":"team-7","track_folder":"Drone Tracks","type":"ct_credentials"}"#)
+    #expect(OrgConfigTokenCodec.encryptPayload(payload) == "KWsnQCYFCRobGQ49DTstZghhAh4RCxUBJTszJWkLYU1OFx0VCzQ8JiAlXhwSCRcdFRtzaHAqdmQpAgEiX1JDczY9JCVbLT4NGgsvHz4gJmt+ECAAAAAAAAB/MT0kZh5hBwUYCi8ZNCAhICtcYVtORUFATX1wJiwlXxwICFZVUhs0Mz9kcxBvQxgGDhMEDjQ9JSBXMUNWVisCAD83ch02UyAKH1ZDUhsoIjdrfhAgFTMXHRULNDwmICVeMEMR")
 }
 
 @Test func orgConfigBundleDecryptsCredentialsAndReadsRidmap() throws {
@@ -3913,6 +4092,47 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
         maximumIdleMinutes: 2,
         now: Date(timeIntervalSince1970: 1_135)
     ) == 60)
+}
+
+@Test func applicationShutdownCleansOnceAndAllowsDismissalRetry() {
+    var state = ApplicationShutdownState()
+
+    let automaticQuit = state.request(dismissWindow: true)
+    #expect(automaticQuit.shouldStartCleanup)
+    #expect(!automaticQuit.shouldDismissWindow)
+    #expect(state.phase == .cleaning)
+    let shouldDismissAfterCleanup = state.cleanupCompleted()
+    #expect(shouldDismissAfterCleanup)
+    #expect(state.phase == .cleaned)
+
+    let manualRetry = state.request(dismissWindow: true)
+    #expect(!manualRetry.shouldStartCleanup)
+    #expect(manualRetry.shouldDismissWindow)
+}
+
+@Test func applicationShutdownQueuesDismissalRequestedDuringCleanup() {
+    var state = ApplicationShutdownState()
+
+    let backgroundCleanup = state.request(dismissWindow: false)
+    #expect(backgroundCleanup.shouldStartCleanup)
+    #expect(!backgroundCleanup.shouldDismissWindow)
+
+    let operatorQuit = state.request(dismissWindow: true)
+    #expect(!operatorQuit.shouldStartCleanup)
+    #expect(!operatorQuit.shouldDismissWindow)
+    let shouldDismissAfterCleanup = state.cleanupCompleted()
+    #expect(shouldDismissAfterCleanup)
+}
+
+@Test func applicationShutdownResetStartsANewOperationalSession() {
+    var state = ApplicationShutdownState()
+    _ = state.request(dismissWindow: true)
+    _ = state.cleanupCompleted()
+    state.reset()
+
+    #expect(state.phase == .running)
+    #expect(!state.isShutdownRequested)
+    #expect(state.request(dismissWindow: false).shouldStartCleanup)
 }
 @Test func managedVideoApprovalWaitsUntilPreflightIsReady() {
     #expect(!ManagedVideoQualityPolicy.shouldPresentApproval(

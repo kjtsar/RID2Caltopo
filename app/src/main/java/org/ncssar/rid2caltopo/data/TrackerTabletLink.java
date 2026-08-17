@@ -74,7 +74,7 @@ public final class TrackerTabletLink {
     ) {
         if (!trackerConnected) return "";
         String url = shortUrl(trackerUrlPrefix, tabletName);
-        return url == null ? "" : "R2C tablet: " + url;
+        return url == null ? "" : url;
     }
 
     @Nullable

@@ -12,7 +12,9 @@ final class AppleApplicationCleanupCenter {
     private var fullCleanup: Cleanup?
     private var markerCleanupTask: Task<Void, Never>?
     private var fullCleanupTask: Task<Void, Never>?
-    private var fullCleanupCompleted = false
+    private var shutdownState = ApplicationShutdownState()
+    private weak var primaryWindowScene: UIWindowScene?
+    private var sceneDestructionVerificationTask: Task<Void, Never>?
     private var idleTimeoutTask: Task<Void, Never>?
     private var idleAppStartedAt = Date()
     private var idleLastRIDMessageAt: Date?
@@ -21,7 +23,18 @@ final class AppleApplicationCleanupCenter {
     func register(markerCleanup: @escaping Cleanup, fullCleanup: @escaping Cleanup) {
         self.markerCleanup = markerCleanup
         self.fullCleanup = fullCleanup
-        fullCleanupCompleted = false
+        shutdownState.reset()
+        sceneDestructionVerificationTask?.cancel()
+        sceneDestructionVerificationTask = nil
+    }
+
+    var isShutdownRequested: Bool {
+        shutdownState.isShutdownRequested
+    }
+
+    func registerPrimaryWindowScene(_ scene: UIWindowScene?) {
+        guard let scene, scene.session.role == .windowApplication else { return }
+        primaryWindowScene = scene
     }
 
     func configureIdleTimeout(
@@ -62,15 +75,30 @@ final class AppleApplicationCleanupCenter {
     }
 
     private func performFullCleanup(reason: String, dismissWindow: Bool) {
-        guard !fullCleanupCompleted, fullCleanupTask == nil, let fullCleanup else { return }
+        guard let fullCleanup else {
+            AppleLog.error("Lifecycle", "Could not close primary session: cleanup is not registered")
+            return
+        }
+        let request = shutdownState.request(dismissWindow: dismissWindow)
+        if request.shouldDismissWindow {
+            AppleLog.info("Lifecycle", "Application cleanup already completed; retrying primary window dismissal")
+            dismissPrimaryWindow()
+            return
+        }
+        guard request.shouldStartCleanup, fullCleanupTask == nil else {
+            if dismissWindow {
+                AppleLog.info("Lifecycle", "Primary window dismissal queued until application cleanup completes")
+            }
+            return
+        }
         idleTimeoutTask?.cancel()
         idleTimeoutTask = nil
         AppleLog.info("Lifecycle", "Closing primary application session reason=\(reason)")
         fullCleanupTask = runWithBackgroundTime(name: "Close RID2Caltopo session") {
             await fullCleanup()
-            self.fullCleanupCompleted = true
+            let shouldDismissWindow = self.shutdownState.cleanupCompleted()
             AppleLog.info("Lifecycle", "Primary application session cleanup completed")
-            if dismissWindow {
+            if shouldDismissWindow {
                 self.dismissPrimaryWindow()
             }
             self.fullCleanupTask = nil
@@ -132,17 +160,78 @@ final class AppleApplicationCleanupCenter {
     }
 
     private func dismissPrimaryWindow() {
-        guard let scene = UIApplication.shared.connectedScenes.first(where: {
-            $0.session.role == .windowApplication
-        }) else {
+        let applicationScenes: [UIWindowScene] = UIApplication.shared.connectedScenes.compactMap { scene in
+            guard let windowScene = scene as? UIWindowScene,
+                  windowScene.session.role == .windowApplication
+            else { return nil }
+            return windowScene
+        }
+        let scene = primaryWindowScene.flatMap { registeredScene in
+            applicationScenes.first(where: { $0 === registeredScene })
+        } ?? applicationScenes.sorted { sceneRank($0) < sceneRank($1) }.first
+        guard let scene else {
             AppleLog.error("Lifecycle", "Could not close primary window: no application scene")
             return
         }
+        if scene !== primaryWindowScene {
+            AppleLog.warning(
+                "Lifecycle",
+                "Registered primary window was unavailable; using the most active application scene"
+            )
+        }
+        requestSceneDestruction(scene, attempt: 1)
+    }
+
+    private func requestSceneDestruction(_ scene: UIWindowScene, attempt: Int) {
+        let sessionID = scene.session.persistentIdentifier
+        AppleLog.info(
+            "Lifecycle",
+            "Requesting primary window destruction session=\(sessionID) attempt=\(attempt) state=\(scene.activationState.rawValue)"
+        )
         UIApplication.shared.requestSceneSessionDestruction(
             scene.session,
             options: nil
         ) { error in
-            AppleLog.error("Lifecycle", "Could not close primary window: \(error.localizedDescription)")
+            AppleLog.error(
+                "Lifecycle",
+                "Could not close primary window session=\(sessionID): \(error.localizedDescription)"
+            )
+        }
+        sceneDestructionVerificationTask?.cancel()
+        sceneDestructionVerificationTask = Task { @MainActor [weak self, weak scene] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self, let scene else { return }
+            let remainsConnected = UIApplication.shared.connectedScenes.contains(where: {
+                $0.session.persistentIdentifier == sessionID
+            })
+            guard remainsConnected else {
+                AppleLog.info("Lifecycle", "Primary window disconnected session=\(sessionID)")
+                self.sceneDestructionVerificationTask = nil
+                return
+            }
+            if attempt < 2 {
+                AppleLog.warning(
+                    "Lifecycle",
+                    "Primary window remained connected after destruction request; retrying session=\(sessionID)"
+                )
+                self.requestSceneDestruction(scene, attempt: attempt + 1)
+            } else {
+                AppleLog.error(
+                    "Lifecycle",
+                    "Primary window remained connected after two destruction requests session=\(sessionID)"
+                )
+                self.sceneDestructionVerificationTask = nil
+            }
+        }
+    }
+
+    private func sceneRank(_ scene: UIWindowScene) -> Int {
+        switch scene.activationState {
+        case .foregroundActive: 0
+        case .foregroundInactive: 1
+        case .background: 2
+        case .unattached: 3
+        @unknown default: 4
         }
     }
 
@@ -163,6 +252,37 @@ final class AppleApplicationCleanupCenter {
                 UIApplication.shared.endBackgroundTask(taskID)
                 taskID = .invalid
             }
+        }
+    }
+}
+
+final class PrimaryWindowSceneObserverView: UIView {
+    var sceneChanged: ((UIWindowScene?) -> Void)?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        sceneChanged?(window?.windowScene)
+    }
+}
+
+struct PrimaryWindowSceneReader: UIViewRepresentable {
+    let sceneChanged: @MainActor (UIWindowScene?) -> Void
+
+    func makeUIView(context: Context) -> PrimaryWindowSceneObserverView {
+        let view = PrimaryWindowSceneObserverView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        view.sceneChanged = { scene in
+            Task { @MainActor in sceneChanged(scene) }
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: PrimaryWindowSceneObserverView, context: Context) {
+        uiView.sceneChanged = { scene in
+            Task { @MainActor in sceneChanged(scene) }
+        }
+        if let scene = uiView.window?.windowScene {
+            sceneChanged(scene)
         }
     }
 }

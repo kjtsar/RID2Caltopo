@@ -294,6 +294,7 @@ internal fun MapPaneManagementDialogs(
     onFolderVisibilityChanged: (String, Boolean) -> Unit,
     onItemVisibilityChanged: (String, Boolean) -> Unit,
     onAllItemsToggled: (List<String>, Boolean) -> Unit,
+    onZoomToItem: (String) -> Unit,
     showBadTilesHowToDialog: Boolean,
     onShowBadTilesHowToDialogChange: (Boolean) -> Unit,
     showMapCacheSizeDialog: Boolean,
@@ -344,6 +345,7 @@ internal fun MapPaneManagementDialogs(
             onFolderVisibilityChanged = onFolderVisibilityChanged,
             onItemVisibilityChanged = onItemVisibilityChanged,
             onAllItemsToggled = onAllItemsToggled,
+            onZoomToItem = onZoomToItem,
             onDismiss = { onShowMapFoldersDialogChange(false) }
         )
     }

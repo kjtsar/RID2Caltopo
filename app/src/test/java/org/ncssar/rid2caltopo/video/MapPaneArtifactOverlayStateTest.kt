@@ -638,6 +638,27 @@ class MapPaneArtifactOverlayStateTest {
 
         assertEquals(listOf("assignment-aa"), state.polygons.map { it.id })
         assertEquals(0, state.lines.size)
+        assertEquals(true, buildMapFolderUiStates(mapOf("assignment-aa" to assignment))
+            .single().items.single().zoomableAssignment)
+        assertEquals(state.polygons.single().points, artifactGeoPoints(assignment))
+    }
+
+    @Test
+    fun buildMapFolderUiStates_suppressesOnlyGeometrylessReplacementAssignments() {
+        val oldAd = JSONObject()
+            .put("id", "old-ad")
+            .put("properties", JSONObject().put("class", "Assignment").put("title", "AD 105"))
+        val currentAd = assignmentPolygonFeature("current-ad", "AD 105")
+        val pendingAe = JSONObject()
+            .put("id", "pending-ae")
+            .put("properties", JSONObject().put("class", "Assignment").put("title", "AE 106"))
+
+        val items = buildMapFolderUiStates(
+            mapOf("old-ad" to oldAd, "current-ad" to currentAd, "pending-ae" to pendingAe)
+        ).single().items
+
+        assertEquals(listOf("current-ad", "pending-ae"), items.map { it.featureId }.sorted())
+        assertEquals(true, items.single { it.featureId == "current-ad" }.zoomableAssignment)
     }
 
     @Test

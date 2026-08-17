@@ -139,7 +139,7 @@ public actor CaltopoTrackFolderResolver {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone
         formatter.dateFormat = "ddMMM"
-        return normalizedTrackFolderName(trackFolderName) + formatter.string(from: date)
+        return normalizedTrackFolderName(trackFolderName) + " " + formatter.string(from: date)
     }
 
     private static func normalizedTrackFolderName(_ value: String) -> String {

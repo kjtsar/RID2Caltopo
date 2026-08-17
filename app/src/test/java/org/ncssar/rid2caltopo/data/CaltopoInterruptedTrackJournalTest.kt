@@ -40,7 +40,7 @@ class CaltopoInterruptedTrackJournalTest {
             "RID-B",
             "live-b",
             "B_120100Aug11",
-            "Video Stream: https://r2c-tracker.com/s/example",
+            "https://r2c-tracker.com/s/example",
             JSONArray("[[-121.3,39.3,502.0]]"),
         )
 

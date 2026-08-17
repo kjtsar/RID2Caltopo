@@ -400,6 +400,30 @@ final class AppleOrgConfigSettings: ObservableObject {
         defaults.set(trackFolder, forKey: "org.trackFolder")
     }
 
+    func applyManagedOrganization(
+        organizationName: String,
+        trackFolder: String,
+        mutualAidTemplate: MutualAidTemplateCredentials?
+    ) throws {
+        self.organizationName = organizationName.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.trackFolder = Self.normalizedTrackFolder(trackFolder)
+        defaults.set(self.organizationName, forKey: "org.name")
+        defaults.set(self.trackFolder, forKey: "org.trackFolder")
+        if let mutualAidTemplate {
+            try apply(mutualAidTemplate: mutualAidTemplate)
+        } else {
+            for key in [
+                "mutualAid.template.teamID", "mutualAid.template.domainAndPort",
+                "mutualAid.template.sourceLabel", "mutualAid.template.targetFolderHint",
+            ] {
+                defaults.removeObject(forKey: key)
+            }
+            try Self.storeSecret("", account: Self.mutualAidCredentialIDAccount)
+            try Self.storeSecret("", account: Self.mutualAidCredentialSecretAccount)
+        }
+        objectWillChange.send()
+    }
+
     func applyManualTrackerConfiguration(
         trackerURLPrefix: String,
         trackerAPIKey: String
@@ -921,7 +945,7 @@ final class AppleOrgConfigImporter: ObservableObject {
             return
         }
         state = .downloading
-        AppleLog.info("OrgConfig", "Downloading Android \(token.kind.rawValue) QR config label='\(token.displayName)' fileIdLength=\(token.driveFileID.count)")
+        AppleLog.info("OrgConfig", "Downloading \(token.kind.rawValue) QR config label='\(token.displayName)'")
         do {
             var components = URLComponents(string: "https://drive.google.com/uc")
             components?.queryItems = [

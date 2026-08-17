@@ -270,6 +270,7 @@ final class AppleStreamRegistry: ObservableObject {
 
 struct AppleStreamsGridView: View {
     @ObservedObject var registry: AppleStreamRegistry
+    @ObservedObject private var networkDiagnostics = AppleNetworkDiagnosticCenter.shared
     var ingestAddress: String? = nil
     var networkSSID: String? = nil
     var showsSetupHeader = true
@@ -282,6 +283,7 @@ struct AppleStreamsGridView: View {
     var onRestartStreams: (() -> Void)? = nil
     var telemetryText: ((String) -> String?)? = nil
     var coordinateText: ((String) -> String?)? = nil
+    var remoteRequesterEmail: ((String) -> String?)? = nil
     var coordinateDisplayFormat: OperationalCoordinateDisplayFormat = .decimal
     var onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)? = nil
     var telemetryPairingState: ((String) -> AppleStreamTelemetryPairingState) = { _ in .noTelemetry }
@@ -295,6 +297,10 @@ struct AppleStreamsGridView: View {
         return [expanded]
     }
 
+    private var currentNetworkSSID: String? {
+        networkDiagnostics.currentWiFiSSID ?? networkSSID
+    }
+
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
@@ -304,8 +310,8 @@ struct AppleStreamsGridView: View {
                         if ingestAddress.hasPrefix("rtmp://") {
                             Text("Example: \(ingestAddress)/DRONE1")
                                 .font(.headline.monospaced())
-                            if let networkSSID {
-                                Text("Network: \(networkSSID)")
+                            if let currentNetworkSSID {
+                                Text("Network: \(currentNetworkSSID)")
                                     .font(.subheadline)
                             }
                             Text("Replace DRONE1 with the aircraft designator. The controller and iPad must be on the same Wi-Fi network.")
@@ -354,10 +360,12 @@ struct AppleStreamsGridView: View {
         AppleStreamTile(
             session: session,
             ingestAddress: ingestAddress,
+            networkSSID: currentNetworkSSID,
             focused: registry.focusedID == session.id,
             fillsAvailableSpace: fillsAvailableSpace,
             telemetryText: telemetryText?(session.id),
             coordinateText: coordinateText?(session.id),
+            remoteRequesterEmail: remoteRequesterEmail?(session.id),
             coordinateDisplayFormat: coordinateDisplayFormat,
             telemetryPairingState: telemetryPairingState(session.id),
             onCoordinateDisplayFormatChange: onCoordinateDisplayFormatChange,
@@ -422,10 +430,12 @@ private struct AppleStreamTile: View {
     @State private var panAtGestureStart: CGSize = .zero
     @State private var tileSize: CGSize = .zero
     let ingestAddress: String?
+    let networkSSID: String?
     let focused: Bool
     let fillsAvailableSpace: Bool
     let telemetryText: String?
     let coordinateText: String?
+    let remoteRequesterEmail: String?
     let coordinateDisplayFormat: OperationalCoordinateDisplayFormat
     let telemetryPairingState: AppleStreamTelemetryPairingState
     let onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)?
@@ -438,10 +448,12 @@ private struct AppleStreamTile: View {
     init(
         session: AppleLiveStreamSession,
         ingestAddress: String?,
+        networkSSID: String?,
         focused: Bool,
         fillsAvailableSpace: Bool,
         telemetryText: String?,
         coordinateText: String?,
+        remoteRequesterEmail: String?,
         coordinateDisplayFormat: OperationalCoordinateDisplayFormat,
         telemetryPairingState: AppleStreamTelemetryPairingState,
         onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)?,
@@ -454,10 +466,12 @@ private struct AppleStreamTile: View {
         self.session = session
         _model = ObservedObject(wrappedValue: session.model)
         self.ingestAddress = ingestAddress
+        self.networkSSID = networkSSID
         self.focused = focused
         self.fillsAvailableSpace = fillsAvailableSpace
         self.telemetryText = telemetryText
         self.coordinateText = coordinateText
+        self.remoteRequesterEmail = remoteRequesterEmail
         self.coordinateDisplayFormat = coordinateDisplayFormat
         self.telemetryPairingState = telemetryPairingState
         self.onCoordinateDisplayFormatChange = onCoordinateDisplayFormatChange
@@ -579,14 +593,29 @@ private struct AppleStreamTile: View {
                 .padding(.top, 32)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            if model.anomalyThermallySuspended {
-                Label("AD paused: iPad temperature", systemImage: "thermometer.high")
-                    .font(.caption.bold())
-                    .foregroundStyle(.yellow)
-                    .padding(6)
-                    .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 5))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    .padding(6)
+            if remoteRequesterEmail != nil || model.anomalyThermallySuspended {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let remoteRequesterEmail {
+                        Label(
+                            "Requested by \(remoteRequesterEmail)",
+                            systemImage: "person.crop.circle.badge.checkmark"
+                        )
+                        .foregroundStyle(.white)
+                        .accessibilityLabel("Video requested by \(remoteRequesterEmail)")
+                    }
+                    if model.anomalyThermallySuspended {
+                        Label("AD paused: iPad temperature", systemImage: "thermometer.high")
+                            .foregroundStyle(.yellow)
+                    }
+                }
+                .font(.caption.bold())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 5))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(6)
             }
         }
         .modifier(StreamTileSizing(
@@ -684,7 +713,10 @@ private struct AppleStreamTile: View {
             if session.id == "demo",
                let ingestAddress,
                ingestAddress.hasPrefix("rtmp://") {
-                Text("Connect stream to \(ingestAddress)/<droneDesig>")
+                Text(OperationalStreamSetupPresentation.instruction(
+                    ingestAddress: ingestAddress,
+                    networkSSID: networkSSID
+                ))
                     .font(.subheadline.monospaced())
                     .multilineTextAlignment(.center)
                     .textSelection(.enabled)

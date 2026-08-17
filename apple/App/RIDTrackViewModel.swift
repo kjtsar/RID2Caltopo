@@ -69,7 +69,7 @@ final class RIDTrackViewModel: ObservableObject {
                     await self.archive(track)
                     self.peerCoordinator?.droneLost(remoteID: track.aircraftID)
                     self.pendingPublication.removeValue(forKey: track.aircraftID)
-                    await self.finishPublication(remoteID: track.aircraftID)
+                    await self.finishPublication(track: track)
                     self.terrainTasks.removeValue(forKey: track.aircraftID)?.cancel()
                     self.terrainRequestKeyByAircraftID.removeValue(forKey: track.aircraftID)
                     self.terrainResolvedKeyByAircraftID.removeValue(forKey: track.aircraftID)
@@ -585,7 +585,7 @@ final class RIDTrackViewModel: ObservableObject {
 
         for track in await store.snapshot() {
             await archive(track)
-            await finishPublication(remoteID: track.aircraftID)
+            await finishPublication(track: track)
         }
     }
 
@@ -723,15 +723,18 @@ final class RIDTrackViewModel: ObservableObject {
         enqueuePublication(remoteID: relay.remoteID, label: label, observation: observation)
     }
 
-    private func finishPublication(remoteID: String) async {
+    private func finishPublication(track: RidAircraftTrack) async {
+        let remoteID = track.aircraftID
         ownershipActivationTasks.removeValue(forKey: remoteID)?.cancel()
         let publication = publicationChains.removeValue(forKey: remoteID)
         _ = await publication?.value
         let identity = identityProvider?(remoteID)
+        let trackStartedAt = track.points.first?.receivedAt ?? track.lastObservation.receivedAt
+        let trackEndedAt = track.points.last?.receivedAt ?? track.lastObservation.receivedAt
         let videoURL = peerCoordinator?.capturedVideoURL(matching: [
             identity?.mappedID ?? "",
             remoteID,
-        ])
+        ], trackStartedAt: trackStartedAt, trackEndedAt: trackEndedAt)
         let description = CaltopoArchiveDescription.build(capturedVideoURL: videoURL)
         await caltopoPublisher.finish(
             remoteID: remoteID,

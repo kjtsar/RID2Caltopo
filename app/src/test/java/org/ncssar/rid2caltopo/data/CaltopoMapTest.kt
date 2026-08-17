@@ -10,8 +10,17 @@ import org.junit.Test
 import android.location.Location
 import java.lang.reflect.Field
 import java.lang.reflect.Method
+import java.util.Calendar
+import java.util.GregorianCalendar
 
 class CaltopoMapTest {
+
+    @Test
+    fun archiveFolderName_separatesTrackFolderAndDate() {
+        val date = GregorianCalendar(2024, Calendar.JULY, 24, 12, 0).time
+
+        assertEquals("Drone Tracks 24Jul", CaltopoMap.archiveFolderName(" Drone Tracks ", date))
+    }
 
     private lateinit var fixture: TestR2cRuntimeFactory.Fixture
     private lateinit var mapStatusField: Field

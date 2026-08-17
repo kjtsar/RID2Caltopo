@@ -43,7 +43,7 @@ public enum TrackerTabletLink {
             trackerURLPrefix: trackerURLPrefix,
             tabletName: tabletName
         ) else { return "" }
-        return "R2C tablet: \(url.absoluteString)"
+        return url.absoluteString
     }
 
     public static func streamShortURL(

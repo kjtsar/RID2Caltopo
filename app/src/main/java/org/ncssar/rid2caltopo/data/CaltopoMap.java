@@ -893,8 +893,7 @@ public class CaltopoMap {
         resetArtifactStore("ParseMap(full)");
         MyLiveTracksInThisMap = new JSONArray();
         JSONArray markerFeatures = new JSONArray();
-        SimpleDateFormat sdf = new SimpleDateFormat("ddMMM", Locale.US);
-        String archiveFolderName = FolderName + sdf.format(new Date());
+        String archiveFolderName = archiveFolderName(FolderName, new Date());
 
         CTInfo(TAG, String.format(Locale.US,
                 "parseMap() Checking map for folders: '%s' and '%s'",
@@ -962,6 +961,11 @@ public class CaltopoMap {
             getCurrentRuntime().getCalTopoSessionGateway()
                     .addFolder(archiveFolderName, false, false, CaltopoMap::CreateArchiveDirFinished);
         } else LookForExistingLiveTracks();
+    }
+
+    static String archiveFolderName(String trackFolderName, Date date) {
+        SimpleDateFormat formatter = new SimpleDateFormat("ddMMM", Locale.US);
+        return trackFolderName.trim() + " " + formatter.format(date);
     }
 
     private static void PollMapUpdates() {

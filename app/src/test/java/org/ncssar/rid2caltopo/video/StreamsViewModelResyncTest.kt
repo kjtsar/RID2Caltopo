@@ -4,8 +4,57 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamState
+import org.ncssar.rid2caltopo.video.handleStreamTileSingleTap
 
 class StreamsViewModelResyncTest {
+    @Test
+    fun managedVideoStartsDecoderWithoutAVisibleStreamTile() {
+        assertTrue(
+            shouldEnsureManagedVideoRenderSession(
+                managedVideoSourceRequired = true,
+                activeRenderSessionId = null,
+            )
+        )
+        assertFalse(
+            shouldEnsureManagedVideoRenderSession(
+                managedVideoSourceRequired = false,
+                activeRenderSessionId = null,
+            )
+        )
+        assertFalse(
+            shouldEnsureManagedVideoRenderSession(
+                managedVideoSourceRequired = true,
+                activeRenderSessionId = 41L,
+            )
+        )
+    }
+
+    @Test
+    fun streamTileSingleTap_exitsSplitInsteadOfTogglingStreamFocus() {
+        var splitExitCount = 0
+        var focusToggleCount = 0
+
+        handleStreamTileSingleTap(
+            onStreamsPaneTap = { splitExitCount += 1 },
+            onToggleFocus = { focusToggleCount += 1 },
+        )
+
+        assertEquals(1, splitExitCount)
+        assertEquals(0, focusToggleCount)
+    }
+
+    @Test
+    fun streamTileSingleTap_togglesFocusOutsideSplit() {
+        var focusToggleCount = 0
+
+        handleStreamTileSingleTap(
+            onStreamsPaneTap = null,
+            onToggleFocus = { focusToggleCount += 1 },
+        )
+
+        assertEquals(1, focusToggleCount)
+    }
+
     @Test
     fun managedVideoConsumerKeepsDecoderWhenStreamsUiIsInactive() {
         assertTrue(
@@ -23,6 +72,18 @@ class StreamsViewModelResyncTest {
             )
         )
     }
+
+    @Test
+    fun previewLeaseReleaseDoesNotReleaseAnActiveRemoteRequestSource() {
+        assertEquals(
+            setOf("Rescue 1"),
+            managedVideoRequiredSources(
+                requestSources = setOf("Rescue 1"),
+                previewSources = emptySet(),
+            ),
+        )
+    }
+
     @Test
     fun chooseResyncSnapshot_prefersLastSyncedMapWhenFlowSnapshotIsMomentarilyEmpty() {
         val lastSynced = mapOf(

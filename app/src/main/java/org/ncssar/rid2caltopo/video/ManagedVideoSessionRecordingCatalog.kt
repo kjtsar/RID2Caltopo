@@ -34,6 +34,7 @@ data class ManagedVideoSessionRecording(
 object ManagedVideoSessionRecordingCatalog {
     private const val TAG = "ManagedVideoRecordingCatalog"
     private const val ROOT_NAME = "managed-video-session-recordings"
+    internal const val TRACK_ASSOCIATION_GRACE_MS = 30_000L
     private var initializedIncidentKey = ""
 
     @Synchronized
@@ -92,18 +93,63 @@ object ManagedVideoSessionRecordingCatalog {
         snapshot(context).firstOrNull { it.sessionId == sessionId }
 
     @JvmStatic
-    fun findLatestForDesignator(
+    fun findForTrack(
         context: Context,
+        trackStartedAtMs: Long,
+        trackEndedAtMs: Long,
         vararg candidates: String,
+    ): ManagedVideoSessionRecording? = selectForTrack(
+        recordings = snapshot(context),
+        trackStartedAtMs = trackStartedAtMs,
+        trackEndedAtMs = trackEndedAtMs,
+        candidates = candidates.asList(),
+    )
+
+    /**
+     * Select the recording that overlaps this exact track interval. Matching
+     * only the designator is unsafe because a later track can otherwise reuse
+     * the previous flight's most recent recording.
+     */
+    internal fun selectForTrack(
+        recordings: List<ManagedVideoSessionRecording>,
+        trackStartedAtMs: Long,
+        trackEndedAtMs: Long,
+        candidates: List<String>,
     ): ManagedVideoSessionRecording? {
+        if (trackStartedAtMs <= 0L || trackEndedAtMs < trackStartedAtMs) return null
         val normalized = candidates
             .map { it.trim().lowercase() }
             .filter { it.isNotEmpty() }
             .toSet()
         if (normalized.isEmpty()) return null
-        return snapshot(context).firstOrNull {
-            it.droneDesignator.trim().lowercase() in normalized
-        }
+        val allowedStart = trackStartedAtMs - TRACK_ASSOCIATION_GRACE_MS
+        val allowedEnd = trackEndedAtMs + TRACK_ASSOCIATION_GRACE_MS
+        return recordings
+            .asSequence()
+            .filter { it.droneDesignator.trim().lowercase() in normalized }
+            .map { recording ->
+                val recordingEndMs = recording.recordedAt.toEpochMilli()
+                val recordingStartMs = recordingEndMs - recording.durationMs.coerceAtLeast(0L)
+                val overlapsAllowedWindow = recordingEndMs >= allowedStart && recordingStartMs <= allowedEnd
+                if (!overlapsAllowedWindow) return@map null
+                val overlapMs = (
+                    minOf(trackEndedAtMs, recordingEndMs) -
+                        maxOf(trackStartedAtMs, recordingStartMs)
+                    ).coerceAtLeast(0L)
+                val boundaryDistanceMs = minOf(
+                    kotlin.math.abs(recordingStartMs - trackStartedAtMs),
+                    kotlin.math.abs(recordingEndMs - trackEndedAtMs),
+                )
+                Triple(recording, overlapMs, boundaryDistanceMs)
+            }
+            .filterNotNull()
+            .sortedWith(
+                compareByDescending<Triple<ManagedVideoSessionRecording, Long, Long>> { it.second }
+                    .thenBy { it.third }
+                    .thenByDescending { it.first.recordedAt }
+            )
+            .map { it.first }
+            .firstOrNull()
     }
 
     fun advertisement(

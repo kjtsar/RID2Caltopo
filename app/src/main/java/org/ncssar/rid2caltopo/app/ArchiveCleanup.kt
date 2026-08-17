@@ -11,7 +11,6 @@ import androidx.documentfile.provider.DocumentFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 private const val ARCHIVE_DIR_PREFIX = "tracks-"
 private val archiveDirDateFormat = SimpleDateFormat("ddMMMyyyy", Locale.US).apply {
@@ -66,11 +65,23 @@ internal fun parseArchiveDirectoryDateMs(name: String?): Long? {
 
 internal fun formatArchiveAge(ageMs: Long): String {
     val safeAgeMs = ageMs.coerceAtLeast(0L)
-    val hours = TimeUnit.MILLISECONDS.toHours(safeAgeMs)
-    val minutes = TimeUnit.MILLISECONDS.toMinutes(safeAgeMs) % 60
-    val seconds = TimeUnit.MILLISECONDS.toSeconds(safeAgeMs) % 60
-    return String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+    val minuteMs = 60_000L
+    val hourMs = 60L * minuteMs
+    val dayMs = 24L * hourMs
+    val monthMs = 30L * dayMs
+    val yearMs = 365L * dayMs
+    return when {
+        safeAgeMs < minuteMs -> "<1 minute"
+        safeAgeMs < hourMs -> formatArchiveAgeUnit(safeAgeMs / minuteMs, "minute")
+        safeAgeMs < dayMs -> formatArchiveAgeUnit(safeAgeMs / hourMs, "hour")
+        safeAgeMs < monthMs -> formatArchiveAgeUnit(safeAgeMs / dayMs, "day")
+        safeAgeMs < yearMs -> formatArchiveAgeUnit(safeAgeMs / monthMs, "month")
+        else -> formatArchiveAgeUnit(safeAgeMs / yearMs, "year")
+    }
 }
+
+private fun formatArchiveAgeUnit(value: Long, unit: String): String =
+    "$value $unit${if (value == 1L) "" else "s"}"
 
 internal fun formatArchiveSize(bytes: Long): String {
     val safeBytes = bytes.coerceAtLeast(0L)

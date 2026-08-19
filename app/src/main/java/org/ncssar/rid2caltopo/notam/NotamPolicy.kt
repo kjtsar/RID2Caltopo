@@ -57,7 +57,7 @@ internal object NotamPolicy {
     ): String {
         if (loading) return "NOTAMs updating..."
         if (hasError && notices.isEmpty()) return "NOTAMs unavailable"
-        if (!configured) return "NOTAMs pending"
+        if (!configured) return "NOTAMs not configured"
 
         val restrictiveHere = notices.firstOrNull {
             it.intersectsPilotBubble && it.severity == NotamChipSeverity.Danger
@@ -72,7 +72,7 @@ internal object NotamPolicy {
         }
 
         if (notices.isNotEmpty()) return "NOTAMs: ${notices.size} nearby"
-        return if (configured) "NOTAMs clear" else "NOTAMs pending"
+        return if (configured) "NOTAMs clear" else "NOTAMs not configured"
     }
 
     private fun formatDistance(notice: NearbyNotam): String =

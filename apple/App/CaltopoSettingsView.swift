@@ -636,6 +636,7 @@ private final class AppleDeveloperToolsManager: ObservableObject {
         caltopo.resetPersistedState()
         organization.resetPersistedState()
         identities.resetPersistedState()
+        AppleNotamCenter.shared.resetRuntimeState()
         locationProvider.clearLocationOverride()
         iCloudBackup.setEnabled(false, passphrase: "")
         status = "Persisted app state reset. Quit and reopen RID2Caltopo to rebuild all runtime settings."
@@ -967,6 +968,12 @@ struct CaltopoTeamMapBrowser: View {
     @State private var navigationStack: [[CaltopoTeamMapNode]] = []
     @State private var search = ""
 
+    private var credentialsReady: Bool {
+        !settings.teamID.isEmpty &&
+            !settings.credentialID.isEmpty &&
+            !settings.credentialSecret.isEmpty
+    }
+
     private var currentItems: [CaltopoTeamMapNode] {
         navigationStack.last ?? settings.teamMaps
     }
@@ -1038,6 +1045,13 @@ struct CaltopoTeamMapBrowser: View {
             }
             .task {
                 if settings.teamMaps.isEmpty { await settings.loadTeamMaps() }
+            }
+            .onChange(of: credentialsReady) { wasReady, isReady in
+                guard !wasReady, isReady,
+                      settings.teamMaps.isEmpty,
+                      !settings.isLoadingTeamMaps
+                else { return }
+                Task { await settings.loadTeamMaps() }
             }
         }
     }

@@ -43,6 +43,7 @@ class DefaultPeerCoordinatorTest {
             connected = false
             callback?.onFailure(RuntimeException("HTTP $responseCode"), responseCode, responseMessage)
         }
+
     }
 
     private lateinit var transport: FakeTransport
@@ -76,6 +77,20 @@ class DefaultPeerCoordinatorTest {
     fun start_usesTrackerCoordinatorWhenConfigured() {
         DefaultPeerCoordinator.getInstance().start("MAP1", "zone-alpha", "Alpha", null)
 
+        assertTrue(transport.connected)
+    }
+
+    @Test
+    fun resumeAfterReauthentication_reconnectsStoppedTrackerCoordinator() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        TrackerPeerCoordinator.getInstance().stop()
+        assertFalse(transport.connected)
+
+        coordinator.resumeAfterReauthentication()
+
+        assertEquals(2, transport.connectCount)
         assertTrue(transport.connected)
     }
 

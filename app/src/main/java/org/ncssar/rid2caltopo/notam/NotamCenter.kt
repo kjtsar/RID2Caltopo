@@ -32,6 +32,10 @@ object NotamCenter {
         }
     }
 
+    fun resetRuntimeState() {
+        repository.resetRuntimeState()
+    }
+
     fun shutdown() {
         refreshJob?.cancel()
         refreshJob = null

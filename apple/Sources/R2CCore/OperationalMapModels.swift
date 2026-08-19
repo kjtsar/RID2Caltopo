@@ -189,6 +189,27 @@ public struct CaltopoPointArtifact: Identifiable, Codable, Sendable, Equatable {
     public let colorHex: String?
     public let folderID: String
     public let parentItemID: String?
+    public let description: String?
+
+    public init(
+        id: String,
+        coordinate: MapCoordinate,
+        title: String,
+        symbol: String,
+        colorHex: String?,
+        folderID: String,
+        parentItemID: String?,
+        description: String? = nil
+    ) {
+        self.id = id
+        self.coordinate = coordinate
+        self.title = title
+        self.symbol = symbol
+        self.colorHex = colorHex
+        self.folderID = folderID
+        self.parentItemID = parentItemID
+        self.description = description
+    }
 }
 
 public struct CaltopoLineArtifact: Identifiable, Codable, Sendable, Equatable {
@@ -199,6 +220,27 @@ public struct CaltopoLineArtifact: Identifiable, Codable, Sendable, Equatable {
     public let colorHex: String
     public let width: Double
     public let folderID: String
+    public let description: String?
+
+    public init(
+        id: String,
+        itemID: String,
+        coordinates: [MapCoordinate],
+        title: String,
+        colorHex: String,
+        width: Double,
+        folderID: String,
+        description: String? = nil
+    ) {
+        self.id = id
+        self.itemID = itemID
+        self.coordinates = coordinates
+        self.title = title
+        self.colorHex = colorHex
+        self.width = width
+        self.folderID = folderID
+        self.description = description
+    }
 }
 
 public struct CaltopoPolygonArtifact: Identifiable, Codable, Sendable, Equatable {
@@ -210,6 +252,29 @@ public struct CaltopoPolygonArtifact: Identifiable, Codable, Sendable, Equatable
     public let fillHex: String
     public let width: Double
     public let folderID: String
+    public let description: String?
+
+    public init(
+        id: String,
+        itemID: String,
+        coordinates: [MapCoordinate],
+        title: String,
+        strokeHex: String,
+        fillHex: String,
+        width: Double,
+        folderID: String,
+        description: String? = nil
+    ) {
+        self.id = id
+        self.itemID = itemID
+        self.coordinates = coordinates
+        self.title = title
+        self.strokeHex = strokeHex
+        self.fillHex = fillHex
+        self.width = width
+        self.folderID = folderID
+        self.description = description
+    }
 }
 
 public struct CaltopoArtifactSnapshot: Codable, Sendable, Equatable {
@@ -445,6 +510,9 @@ public enum CaltopoArtifactDecoder {
             guard representedFolders.contains(folderID) else { continue }
             let id = string(feature["id"], fallback: UUID().uuidString)
             let title = string(properties["title"], fallback: className.isEmpty ? "Map item" : className)
+            let description = string(properties["description"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
             let geometryType = string(geometry["type"])
             switch geometryType {
             case "Point":
@@ -456,7 +524,8 @@ public enum CaltopoArtifactDecoder {
                         symbol: string(properties["marker-symbol"], fallback: "point"),
                         colorHex: properties["marker-color"] as? String,
                         folderID: folderID,
-                        parentItemID: parentMarkerID(properties)
+                        parentItemID: parentMarkerID(properties),
+                        description: description
                     ))
                 }
             case "LineString":
@@ -506,7 +575,10 @@ public enum CaltopoArtifactDecoder {
                 opacity: number(properties["stroke-opacity"], fallback: 1)
             ),
             width: number(properties["stroke-width"], fallback: 3),
-            folderID: folderID
+            folderID: folderID,
+            description: string(properties["description"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
         ))
     }
 
@@ -530,7 +602,10 @@ public enum CaltopoArtifactDecoder {
                 opacity: number(properties["fill-opacity"], fallback: 0.20)
             ),
             width: number(properties["stroke-width"], fallback: 3),
-            folderID: folderID
+            folderID: folderID,
+            description: string(properties["description"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
         ))
     }
 

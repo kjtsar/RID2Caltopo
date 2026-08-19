@@ -644,6 +644,33 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun assignmentDiagnosticsExplainGeometryVisibilityAndViewport() {
+        val assignment = assignmentPolygonFeature("assignment-aa", "AA")
+        val summary = assignmentDiagnosticSummary(
+            features = mapOf("assignment-aa" to assignment),
+            hiddenFolderIds = emptySet(),
+            hiddenItemIds = emptySet(),
+            viewport = boundingBoxFromPoints(artifactGeoPoints(assignment)),
+        )
+
+        assertTrue(summary.contains("assignments=1 geometryless=0"))
+        assertTrue(summary.contains("assignment-aa points="))
+        assertTrue(summary.contains("visible=true inViewport=true"))
+    }
+
+    @Test
+    fun artifactOverlayRetainsDescriptionsForInspection() {
+        val assignment = assignmentPolygonFeature("assignment-desc", "Area Delta").apply {
+            getJSONObject("properties").put("description", "Search the north drainage")
+        }
+
+        val state = buildArtifactOverlayState(listOf(assignment))
+
+        assertEquals("Area Delta", state.polygons.single().title)
+        assertEquals("Search the north drainage", state.polygons.single().description)
+    }
+
+    @Test
     fun buildMapFolderUiStates_suppressesOnlyGeometrylessReplacementAssignments() {
         val oldAd = JSONObject()
             .put("id", "old-ad")

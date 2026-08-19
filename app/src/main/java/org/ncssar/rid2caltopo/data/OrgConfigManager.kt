@@ -260,11 +260,21 @@ object OrgConfigManager {
         current.put("configs", rebuilt)
         val applied = CaltopoClient.ApplyOrgConfigBundle(current.toString())
         if (applied) {
+            CaltopoClient.SetTrackerManagedCaltopoCredentials(
+                CaltopoClient.GetCaltopoCredentials()
+            )
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putLong(KEY_MANAGED_VERSION_MS, versionMs)
                 .apply()
         }
         return applied
+    }
+
+    @JvmStatic
+    fun invalidateManagedConfigurationVersion(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .remove(KEY_MANAGED_VERSION_MS)
+            .apply()
     }
 
     @JvmStatic
@@ -276,21 +286,57 @@ object OrgConfigManager {
         advertisedVersionMs: Long
     ) {
         if (advertisedVersionMs == 0L || advertisedVersionMs == getManagedVersionMs(context)) return
+        enqueueManagedConfigurationSync(
+            context,
+            "${trackerOrigin.trimEnd('/')}/${organization.lowercase()}/api/v1/organization-config/current",
+            deviceToken
+        )
+    }
+
+    /** Bootstrap a newly enrolled device before it has a CalTopo map or coordination socket. */
+    @JvmStatic
+    fun syncManagedConfigurationAfterEnrollment(
+        context: Context,
+        trackerBaseUrl: String,
+        deviceToken: String
+    ) {
+        enqueueManagedConfigurationSync(
+            context,
+            "${trackerBaseUrl.trimEnd('/')}/api/v1/organization-config/current",
+            deviceToken
+        )
+    }
+
+    private fun enqueueManagedConfigurationSync(
+        context: Context,
+        endpoint: String,
+        deviceToken: String
+    ) {
         executor.execute {
             try {
                 val request = Request.Builder()
-                    .url("${trackerOrigin.trimEnd('/')}/${organization.lowercase()}/api/v1/organization-config/current")
+                    .url(endpoint)
                     .header("X-SAR-Token", deviceToken)
+                    .header(
+                        "X-R2C-Functionality-Release",
+                        BuildConfig.TRACKER_FUNCTIONALITY_RELEASE.toString()
+                    )
                     .header("Cache-Control", "no-cache")
                     .get()
                     .build()
                 CaltopoSession.MyOkHttpClient.newCall(request).execute().use { response ->
+                    if (response.code == 204) {
+                        CaltopoClient.CTInfo(TAG, "No managed organization configuration is published.")
+                        return@use
+                    }
                     if (!response.isSuccessful) throw IllegalStateException(
                         "Tracker returned HTTP ${response.code} for organization configuration."
                     )
                     val root = JSONObject(response.body?.string().orEmpty())
                     val versionMs = root.getLong("versionMs")
-                    if (versionMs != getManagedVersionMs(context) &&
+                    val needsApply = versionMs != getManagedVersionMs(context) ||
+                        !CaltopoCredentials.sniffTest(CaltopoClient.GetCaltopoCredentials())
+                    if (needsApply &&
                         !applyManagedSnapshot(context, root.getJSONObject("config"), versionMs)) {
                         throw IllegalStateException("Organization configuration could not be applied.")
                     }

@@ -200,6 +200,69 @@ class WaypointTrackTest {
     }
 
     @Test
+    fun shouldPublishGeoJsonStatsForTracker_recoversLegacyConfirmedTeamTrack() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        val legacyConfirmedTrack = geoJsonWithOrgAndRid("NCSSAR", "RIDLEGACY1")
+        legacyConfirmedTrack.getJSONArray("features")
+            .getJSONObject(0)
+            .getJSONObject("properties")
+            .getJSONObject("r2c_prop")
+            .put("mid", "1sar7DjMn4Pr")
+
+        assertTrue(
+            WaypointTrack.ShouldPublishGeoJsonStatsForTracker(
+                legacyConfirmedTrack
+            )
+        )
+        assertFalse(
+            WaypointTrack.ShouldPublishGeoJsonStatsForTracker(
+                geoJsonWithOrgAndRid("NCSSAR", "RIDUNKNOWN")
+            )
+        )
+    }
+
+    @Test
+    fun prepareForArchive_preservesAuthorizedUploadAfterFlightConfirmationClears() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        confirmTeamDrone("RIDSNAPSHOT1", "NCSSAR")
+        val drone = activeDrone("RIDSNAPSHOT1", "1sar7DjMn4Pr")
+        val track = WaypointTrack(drone.trackLabel(), drone)
+        track.addWaypoint(39.153000, -121.132000, 100L, 1_000L)
+
+        track.prepareForArchive()
+        CaltopoClient.ClearCurrentPeerDroneConfirmation("RIDSNAPSHOT1")
+        drone.reset()
+
+        val geoJson = track.getGeoJson()!!
+        val r2cProp = geoJson.getJSONArray("features")
+            .getJSONObject(0)
+            .getJSONObject("properties")
+            .getJSONObject("r2c_prop")
+        assertTrue(r2cProp.getBoolean("tracker_upload_authorized"))
+        assertEquals("RIDSNAPSHOT1", r2cProp.getString("rid"))
+        assertEquals("1sar7DjMn4Pr", r2cProp.getString("mid"))
+        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJson))
+    }
+
+    @Test
+    fun prepareForArchive_doesNotAuthorizeTrackConfirmedAfterFlightEnds() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        val drone = activeDrone("RIDUNCONFIRMED1", "RIDUNCONFIRMED1")
+        val track = WaypointTrack(drone.trackLabel(), drone)
+
+        track.prepareForArchive()
+        confirmTeamDrone("RIDUNCONFIRMED1", "NCSSAR")
+
+        val geoJson = track.getGeoJson()!!
+        val r2cProp = geoJson.getJSONArray("features")
+            .getJSONObject(0)
+            .getJSONObject("properties")
+            .getJSONObject("r2c_prop")
+        assertFalse(r2cProp.getBoolean("tracker_upload_authorized"))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJson))
+    }
+
+    @Test
     fun shouldMarkGeoJsonStatsReportedForResponse_doesNotReportLocalUploadSkip() {
         assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(WaypointTrack.GEOJSON_STATS_UPLOAD_SKIPPED))
         assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(408))
@@ -277,6 +340,16 @@ class WaypointTrackTest {
         assertFalse(WaypointTrack.IsTrackDirectoryWithinRecentDays("tracks-03Jun2026", 2, today))
         assertFalse(WaypointTrack.IsTrackDirectoryWithinRecentDays("tracks-06Jun2026", 2, today))
         assertFalse(WaypointTrack.IsTrackDirectoryWithinRecentDays("cache", 2, today))
+    }
+
+    @Test
+    fun isTrackFileActive_usesCurrentTimeInsteadOfReportMarkerTime() {
+        val hourMs = TimeUnit.HOURS.toMillis(1)
+        val now = 10 * hourMs
+
+        assertTrue(WaypointTrack.IsTrackFileActive(now - hourMs + 1, now))
+        assertFalse(WaypointTrack.IsTrackFileActive(now - hourMs, now))
+        assertFalse(WaypointTrack.IsTrackFileActive(0, now))
     }
 
     private fun activeDrone(remoteId: String, mappedId: String): CtDroneSpec {

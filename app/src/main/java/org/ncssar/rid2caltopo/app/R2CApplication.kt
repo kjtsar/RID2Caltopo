@@ -13,6 +13,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.R2CMqttManager
+import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheStartupMaintenance
@@ -32,6 +33,7 @@ class R2CApplication : Application() {
 
         initializeCrashlyticsProbe()
         AppConfigStore.initialize(this)
+        TrackerEnrollmentClient.retryManagedConfigurationBootstrap(this)
         FaaConfigManager.refreshIfNeededOnStartup(this)
         AirspaceCenter.initialize(this)
         NotamCenter.initialize(this)
@@ -78,6 +80,11 @@ class R2CApplication : Application() {
                         "pss=${info.pss} rss=${info.rss} " +
                         "description='${info.description.orEmpty()}'"
                 )
+                if (info.reason == ApplicationExitInfo.REASON_ANR) {
+                    AnrTraceStore.capture(this, info)?.let { captureSummary ->
+                        CTDebug(TAG, captureSummary)
+                    }
+                }
             }
         }.onFailure { error ->
             CTError(TAG, "Historical process exit probe failed: ${error.javaClass.simpleName}: ${error.message}")

@@ -11,12 +11,13 @@ class ArchiveDirPromptStateTest {
 
         resetPersistedStateAndRequestRequiredSetup(
             resetState = { calls += "reset" },
+            resetNotamRuntimeState = { calls += "notam-reset" },
             requestArchiveSelection = { calls += "archive" },
             requestNotamRefresh = { calls += "notam" },
             requestAirspaceRefresh = { calls += "airspace" }
         )
 
-        assertTrue(calls == listOf("reset", "notam", "airspace", "archive"))
+        assertTrue(calls == listOf("reset", "notam-reset", "notam", "airspace", "archive"))
     }
 
     @Test

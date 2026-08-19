@@ -8,6 +8,7 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import android.content.Context;
 import android.os.Build;
 
 import org.ncssar.rid2caltopo.BuildConfig;
@@ -968,6 +969,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             putFinite(jo, "lng", myLon);
             jo.put("appVersion", BuildConfig.VERSION_NAME);
             jo.put("appVersionCode", BuildConfig.VERSION_CODE);
+            jo.put("trackerFunctionalityRelease", BuildConfig.TRACKER_FUNCTIONALITY_RELEASE);
             jo.put("caltopoRttMs", myCaltopoRttMs);
             CTDebug(TAG, String.format(Locale.US,
                     "sendHello(): mapId=%s zoneId=%s lat=%.6f lng=%.6f rttMs=%d",
@@ -1232,6 +1234,34 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     CTDebug(TAG, String.format(Locale.US,
                             "hello_ack received from tracker after %d ms",
                             helloAckAtMs - helloSeqSentAtMs));
+                    break;
+                case "reauthentication_required":
+                    boolean managedCaltopoCleared =
+                            CaltopoClient.QuarantineTrackerManagedCaltopoCredentials();
+                    Context appContext = R2CApplication.getAppCtxt();
+                    if (managedCaltopoCleared && appContext != null) {
+                        OrgConfigManager.invalidateManagedConfigurationVersion(appContext);
+                    }
+                    CTWarn(TAG, "Tracker requires reauthentication; tracker access paused; "
+                            + (managedCaltopoCleared
+                            ? "tracker-managed CalTopo credentials cleared"
+                            : "independent CalTopo credentials preserved"));
+                    String reauthenticationUrl = jo.optString("reauthenticationUrl", "");
+                    R2CActivity activity = R2CActivity.getR2CActivity();
+                    if (activity != null && !reauthenticationUrl.isEmpty()) {
+                        activity.beginTrackerReauthentication(reauthenticationUrl);
+                    } else {
+                        CaltopoClient.ShowToast(
+                                managedCaltopoCleared
+                                        ? "Tracker access is paused. Tracker-managed CalTopo credentials were cleared; RID2Caltopo remains available offline."
+                                        : "Tracker access is paused. Independent CalTopo credentials and offline RID2Caltopo operation remain available.");
+                    }
+                    stop();
+                    break;
+                case "upgrade_required":
+                    CTWarn(TAG, jo.optString(
+                            "message", "Tracker requires a newer functionality release"));
+                    stop();
                     break;
                 case "heartbeat_ack":
                     onHeartbeatAck(jo);
@@ -1634,6 +1664,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     Request upload = new Request.Builder()
                             .url(origin + request.uploadPath)
                             .header("X-SAR-Token", token)
+                            .header("X-R2C-Functionality-Release",
+                                    Integer.toString(BuildConfig.TRACKER_FUNCTIONALITY_RELEASE))
                             .header("X-R2C-Filename", recording.getFile().getName())
                             .header("Content-Range", "bytes " + start + "-"
                                     + (start + length - 1) + "/" + total)

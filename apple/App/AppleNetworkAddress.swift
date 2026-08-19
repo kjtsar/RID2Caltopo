@@ -71,12 +71,19 @@ enum AppleNetworkAddress {
 /// Event-driven network diagnostics. NWPathMonitor supplies changes; no polling or probes are used.
 @MainActor
 final class AppleNetworkDiagnosticCenter: ObservableObject {
+    enum RefreshReason: String {
+        case networkPathChanged = "path_changed"
+        case locationAuthorizationChanged = "location_authorization_changed"
+        case applicationBecameActive = "application_became_active"
+    }
+
     static let shared = AppleNetworkDiagnosticCenter()
 
     @Published private(set) var currentSnapshotID = "none"
     @Published private(set) var currentWiFiSSID: String?
 
     private var monitor: NWPathMonitor?
+    private var latestPath: NWPath?
     private let monitorQueue = DispatchQueue(label: "org.ncssar.rid2caltopo.network-diagnostics")
     private var previousTransitionKey: String?
     private var nextSnapshotNumber = 1
@@ -87,7 +94,9 @@ final class AppleNetworkDiagnosticCenter: ObservableObject {
         monitor = pathMonitor
         pathMonitor.pathUpdateHandler = { [weak self] path in
             Task { @MainActor [weak self] in
-                await self?.record(path: path)
+                guard let self else { return }
+                self.latestPath = path
+                await self.record(path: path, reason: .networkPathChanged)
             }
         }
         pathMonitor.start(queue: monitorQueue)
@@ -96,9 +105,18 @@ final class AppleNetworkDiagnosticCenter: ObservableObject {
     func stop() {
         monitor?.cancel()
         monitor = nil
+        latestPath = nil
     }
 
-    private func record(path: NWPath) async {
+    /// Re-reads Wi-Fi identity even when the network path itself has not changed.
+    /// This is required after Location authorization changes because iOS may have
+    /// returned no SSID for the same path before permission was granted.
+    func refresh(reason: RefreshReason) async {
+        guard let latestPath else { return }
+        await record(path: latestPath, reason: reason)
+    }
+
+    private func record(path: NWPath, reason requestedReason: RefreshReason) async {
         let ssid = await AppleNetworkAddress.currentWiFiSSID()
         let interfaces = Self.interfaceSummary(path)
         let ipv4 = AppleNetworkAddress.ipv4DiagnosticSummary()
@@ -115,7 +133,7 @@ final class AppleNetworkDiagnosticCenter: ObservableObject {
         ].joined(separator: "|")
         guard transitionKey != previousTransitionKey else { return }
 
-        let reason = previousTransitionKey == nil ? "startup" : "path_changed"
+        let reason = previousTransitionKey == nil ? "startup" : requestedReason.rawValue
         previousTransitionKey = transitionKey
         currentWiFiSSID = ssid
         currentSnapshotID = "net-\(nextSnapshotNumber)"
@@ -163,6 +181,16 @@ final class AppleNetworkDiagnosticCenter: ObservableObject {
 
 enum AppleDeviceIdentity {
     static let storedNameKey = "device.stableDisplayName"
+    static let installationIDKey = "tracker.zoneID"
+
+    static func installationID(defaults: UserDefaults = .standard) -> String {
+        if let existing = defaults.string(forKey: installationIDKey), !existing.isEmpty {
+            return existing
+        }
+        let value = UUID().uuidString.lowercased()
+        defaults.set(value, forKey: installationIDKey)
+        return value
+    }
 
     @MainActor
     static var displayName: String {

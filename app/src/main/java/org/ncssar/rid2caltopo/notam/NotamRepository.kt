@@ -16,10 +16,13 @@ import org.ncssar.rid2caltopo.airspace.OperatingArea
 import org.json.JSONArray
 import org.json.JSONObject
 import org.ncssar.rid2caltopo.app.R2CApplication
+import org.ncssar.rid2caltopo.app.R2CActivity
+import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import java.time.Instant
 import java.time.ZoneId
@@ -71,8 +74,28 @@ internal class NotamRepository {
     private var lastFetchedNotices: List<NearbyNotam> = emptyList()
     private var lastErrorMessage: String? = null
     private var lastSuccessfulFetchAtMs: Long = 0L
+    private val resetLock = Any()
+    private var resetGeneration: Long = 0L
+
+    fun resetRuntimeState() {
+        synchronized(resetLock) {
+            resetGeneration += 1L
+            lastRefreshLocation = null
+            lastRefreshAtMs = 0L
+            lastFetchedNotices = emptyList()
+            lastErrorMessage = null
+            lastSuccessfulFetchAtMs = 0L
+            _uiState.value = buildUiState(
+                location = null,
+                configured = NotamAuthManager.isConfigured(),
+                loading = false,
+                notices = emptyList()
+            )
+        }
+    }
 
     suspend fun refresh(force: Boolean = false) {
+        val refreshGeneration = synchronized(resetLock) { resetGeneration }
         val enabled = CaltopoClient.GetNotamEnabled()
         val configured = NotamAuthManager.isConfigured()
         val location = CaltopoMap.GetMyLocation()
@@ -99,19 +122,27 @@ internal class NotamRepository {
         }
 
         val retainedNotices = if (lastFetchedNotices.isNotEmpty()) lastFetchedNotices else _uiState.value.notices
-        _uiState.value = buildUiState(
-            location = location,
-            configured = configured,
-            loading = true,
-            notices = retainedNotices
-        )
+        if (!publishIfCurrent(
+                refreshGeneration,
+                buildUiState(
+                    location = location,
+                    configured = configured,
+                    loading = true,
+                    notices = retainedNotices
+                )
+            )) return
         val now = System.currentTimeMillis()
         val notices = if (configured) {
             try {
                 val fetched = fetchNearbyNotams(location, forceFull = force)
-                lastFetchedNotices = fetched.notices
-                lastSuccessfulFetchAtMs = now
-                lastErrorMessage = null
+                val accepted = synchronized(resetLock) {
+                    if (refreshGeneration != resetGeneration) return@synchronized false
+                    lastFetchedNotices = fetched.notices
+                    lastSuccessfulFetchAtMs = now
+                    lastErrorMessage = null
+                    true
+                }
+                if (!accepted) return
                 if (CTDebugEnabled(TAG)) {
                     CTDebug(
                         TAG,
@@ -120,7 +151,12 @@ internal class NotamRepository {
                 }
                 fetched.notices
             } catch (e: Exception) {
-                lastErrorMessage = classifyNotamErrorMessage(e)
+                val accepted = synchronized(resetLock) {
+                    if (refreshGeneration != resetGeneration) return@synchronized false
+                    lastErrorMessage = classifyNotamErrorMessage(e)
+                    true
+                }
+                if (!accepted) return
                 if (CTDebugEnabled(TAG)) {
                     CTDebug(TAG, "Fetch failed: ${lastErrorMessage}")
                 }
@@ -140,18 +176,28 @@ internal class NotamRepository {
                 )
             )
         }
-        lastRefreshLocation = location?.let { Location(it) }
-        lastRefreshAtMs = now
-        if (configured && lastErrorMessage == null) {
-            CaltopoClient.SetNotamLastUpdatedEpochMs(now)
+        synchronized(resetLock) {
+            if (refreshGeneration != resetGeneration) return
+            lastRefreshLocation = location?.let { Location(it) }
+            lastRefreshAtMs = now
+            if (configured && lastErrorMessage == null) {
+                CaltopoClient.SetNotamLastUpdatedEpochMs(now)
+            }
+            _uiState.value = buildUiState(
+                location = location,
+                configured = configured,
+                loading = false,
+                notices = notices
+            )
         }
-        _uiState.value = buildUiState(
-            location = location,
-            configured = configured,
-            loading = false,
-            notices = notices
-        )
     }
+
+    private fun publishIfCurrent(generation: Long, state: NotamUiState): Boolean =
+        synchronized(resetLock) {
+            if (generation != resetGeneration) return@synchronized false
+            _uiState.value = state
+            true
+        }
 
     private fun shouldRefresh(location: Location?): Boolean {
         if (lastRefreshAtMs == 0L) return true
@@ -213,6 +259,7 @@ internal class NotamRepository {
         val request = Request.Builder()
             .url(url)
             .header("X-SAR-Token", NotamAuthManager.proxyToken())
+            .header("X-R2C-Functionality-Release", BuildConfig.TRACKER_FUNCTIONALITY_RELEASE.toString())
             .get()
             .build()
         return executeNotamRequest(request, "NOTAM query") { body ->
@@ -249,6 +296,7 @@ internal class NotamRepository {
         val request = Request.Builder()
             .url(url)
             .header("X-SAR-Token", NotamAuthManager.proxyToken())
+            .header("X-R2C-Functionality-Release", BuildConfig.TRACKER_FUNCTIONALITY_RELEASE.toString())
             .get()
             .build()
         return executeNotamRequest(request, "NOTAM delta query") { body ->
@@ -278,6 +326,38 @@ internal class NotamRepository {
                     CTDebug(TAG, "$requestLabel response http=${response.code}")
                 }
                 if (!response.isSuccessful) {
+                    val errorBody = response.body?.string().orEmpty()
+                    val errorDetail = runCatching {
+                        JSONObject(errorBody).optJSONObject("detail")
+                    }.getOrNull()
+                    val errorCode = errorDetail?.optString("code")
+                    if (errorCode == "reauthentication_required") {
+                        val managedCaltopoCleared =
+                            CaltopoClient.QuarantineTrackerManagedCaltopoCredentials()
+                        if (managedCaltopoCleared) {
+                            R2CApplication.getAppCtxt()?.let {
+                                OrgConfigManager.invalidateManagedConfigurationVersion(it)
+                            }
+                        }
+                        errorDetail.optString("reauthentication_url")
+                            .takeIf { it.isNotBlank() }
+                            ?.let { url ->
+                                R2CActivity.getR2CActivity()
+                                    ?.beginTrackerReauthentication(url)
+                            }
+                        CaltopoClient.ShowToast(
+                            if (managedCaltopoCleared) {
+                                "Tracker access is paused. Tracker-managed CalTopo credentials " +
+                                    "were cleared; offline RID2Caltopo remains available."
+                            } else {
+                                "Tracker access is paused. Independent CalTopo credentials and " +
+                                    "offline RID2Caltopo operation remain available."
+                            }
+                        )
+                        throw IOException(
+                            "Tracker requires reauthentication."
+                        )
+                    }
                     val message = when (response.code) {
                         401, 403 -> {
                             NotamAuthManager.authorizationFailureMessage(response.code)

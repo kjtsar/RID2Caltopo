@@ -7,6 +7,7 @@ public enum TrackerCoordinationWireError: Error, Sendable, Equatable {
 }
 
 public struct TrackerCoordinationClient: Sendable, Equatable {
+    public static let trackerFunctionalityRelease = 148
     public let mapID: String
     public let zoneID: String
     public let name: String
@@ -165,6 +166,36 @@ public enum TrackerCoordinationEndpoint {
     }
 }
 
+public enum TrackerReauthenticationChallenge {
+    public static func url(fromEnrollmentResponse data: Data) -> URL? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let credential = root["credential"] as? [String: Any],
+              credential["state"] as? String == "reauth_required",
+              let rawURL = credential["reauthentication_url"] as? String
+        else { return nil }
+        return trustedURL(rawURL)
+    }
+
+    public static func url(fromHTTPError data: Data, statusCode: Int) -> URL? {
+        guard statusCode == 401 || statusCode == 403,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let detail = root["detail"] as? [String: Any],
+              detail["code"] as? String == "reauthentication_required",
+              let rawURL = detail["reauthentication_url"] as? String
+        else { return nil }
+        return trustedURL(rawURL)
+    }
+
+    private static func trustedURL(_ rawURL: String) -> URL? {
+        guard let url = URL(string: rawURL),
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased(),
+              host == "r2c-tracker.com" || host.hasSuffix(".r2c-tracker.com")
+        else { return nil }
+        return url
+    }
+}
+
 public enum TrackerCoordinationWire {
     public static func hello(
         client: TrackerCoordinationClient,
@@ -182,6 +213,7 @@ public enum TrackerCoordinationWire {
             "lng": finite(position.longitude),
             "appVersion": client.appVersion,
             "appVersionCode": client.appVersionCode,
+            "trackerFunctionalityRelease": TrackerCoordinationClient.trackerFunctionalityRelease,
             "caltopoRttMs": position.caltopoRTTMilliseconds,
         ])
     }

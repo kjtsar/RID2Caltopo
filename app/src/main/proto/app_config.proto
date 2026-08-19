@@ -152,4 +152,6 @@ message AppConfig {
   MutualAidTemplate mutual_aid_template = 81;
   repeated CaltopoProfile caltopo_profiles = 90;
   string active_caltopo_profile_id = 91;
+  // unknown, independent, or tracker. Unknown is conservative for legacy data.
+  string caltopo_credential_origin = 92;
 }

@@ -32,6 +32,7 @@ import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import org.ncssar.rid2caltopo.data.SimpleTimer
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class ActiveScreen {
     MAIN,
@@ -204,6 +205,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private var screenBeforeConnectionOverlay: ActiveScreen? = null
     private var lastDroneListSignature: List<DroneSpecUiSignature>? = null
     private var lastUnknownDroneConfirmationOrganization = ""
+    private val credentialRecoveryScheduled = AtomicBoolean(false)
 
     var mapHierarchy by mutableStateOf<List<CaltopoNode>?>(null)
         private set
@@ -632,9 +634,31 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     fun housekeeping() {
         _appUptime.value = uptimeTimer.durationAsString()
         refreshOperationalProfiles()
+        recoverMapBrowserAfterCredentialRestore()
         val newDeviceName = R2CActivity.MyDeviceName
                 if (_hostname.value.isEmpty() || _hostname.value != newDeviceName) {
             _hostname.value = newDeviceName
+        }
+    }
+
+    private fun recoverMapBrowserAfterCredentialRestore() {
+        if (!shouldResumeMapConnectionAfterCredentialRestore(overlay, hasCredentials) ||
+            !credentialRecoveryScheduled.compareAndSet(false, true)
+        ) {
+            return
+        }
+        viewModelScope.launch(Dispatchers.Main) {
+            try {
+                if (shouldResumeMapConnectionAfterCredentialRestore(overlay, hasCredentials)) {
+                    CTDebug(
+                        tag,
+                        "Managed CalTopo credentials restored; resuming map selection automatically"
+                    )
+                    onUIEvent(UIEvent.ConfigFileLoaded)
+                }
+            } finally {
+                credentialRecoveryScheduled.set(false)
+            }
         }
     }
 
@@ -862,6 +886,11 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             (mappedId.isNotEmpty() && mappedId != drone.remoteId)
     }
 }
+
+internal fun shouldResumeMapConnectionAfterCredentialRestore(
+    overlay: OverlayState,
+    hasCredentials: Boolean
+): Boolean = overlay is OverlayState.RequestConfigFile && hasCredentials
 
 class R2CViewModelFactory(private val uptimeTimer: SimpleTimer) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {

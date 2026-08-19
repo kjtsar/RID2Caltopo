@@ -147,7 +147,7 @@ public enum OperationalNotamPolicy {
             return "NOTAMs: NOTICE \(distanceLabel(notice))"
         }
         if !notices.isEmpty { return "NOTAMs: \(notices.count) nearby" }
-        return configured ? "NOTAMs clear" : "NOTAMs pending"
+        return configured ? "NOTAMs clear" : "NOTAMs not configured"
     }
 
     public static func inferSeverity(text: String, intersectsPilotArea: Bool) -> OperationalNotamSeverity {

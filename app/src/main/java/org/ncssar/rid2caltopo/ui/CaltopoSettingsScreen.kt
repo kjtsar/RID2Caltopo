@@ -39,6 +39,7 @@ fun CaltopoSettingsScreen(
     val caltopoTeamId by settingsViewModel.caltopoTeamId.collectAsState()
     val caltopoCredentialId by settingsViewModel.caltopoCredentialId.collectAsState()
     val caltopoCredentialSecret by settingsViewModel.caltopoCredentialSecret.collectAsState()
+    val caltopoCredentialError by settingsViewModel.caltopoCredentialError.collectAsState()
     val trackerUrl by settingsViewModel.trackerUrl.collectAsState()
     val trackerApiKey by settingsViewModel.trackerApiKey.collectAsState()
     val mutualAidTeamId by settingsViewModel.mutualAidTeamId.collectAsState()
@@ -75,12 +76,10 @@ fun CaltopoSettingsScreen(
     val externalDisplayAllowInteraction by settingsViewModel.externalDisplayAllowInteraction.collectAsState()
     val externalDisplayAlertRouting by settingsViewModel.externalDisplayAlertRouting.collectAsState()
     val dismissAndSave = {
-        settingsViewModel.saveSettings()
-        onDismiss()
+        if (settingsViewModel.saveSettings()) onDismiss()
     }
     val showDeveloperTools = {
-        settingsViewModel.saveSettings()
-        onShowDeveloperTools()
+        if (settingsViewModel.saveSettings()) onShowDeveloperTools()
     }
 
     Dialog(onDismissRequest = dismissAndSave) {
@@ -158,6 +157,7 @@ fun CaltopoSettingsScreen(
                     value = caltopoTeamId,
                     onValueChange = settingsViewModel::onCaltopoTeamIdChanged,
                     label = { Text("Team ID") },
+                    isError = caltopoCredentialError != null,
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -165,6 +165,7 @@ fun CaltopoSettingsScreen(
                     value = caltopoCredentialId,
                     onValueChange = settingsViewModel::onCaltopoCredentialIdChanged,
                     label = { Text("Credential ID") },
+                    isError = caltopoCredentialError != null,
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -172,10 +173,19 @@ fun CaltopoSettingsScreen(
                     value = caltopoCredentialSecret,
                     onValueChange = settingsViewModel::onCaltopoCredentialSecretChanged,
                     label = { Text("Credential secret") },
+                    isError = caltopoCredentialError != null,
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth()
                 )
+                caltopoCredentialError?.let { error ->
+                    Text(
+                        text = error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 OutlinedTextField(
                     value = caltopoUrl,
                     onValueChange = settingsViewModel::onCaltopoDomainAndPortChanged,

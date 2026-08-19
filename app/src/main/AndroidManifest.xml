@@ -70,6 +70,29 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="r2c2" />
             </intent-filter>
+            <!-- Verified tracker enrollment links open directly from Android QR scanners. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="r2c-tracker.com"
+                    android:pathPattern="/.*/enroll" />
+            </intent-filter>
+            <!-- Browser fallback when verified-link state is unavailable or stale. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="r2cenroll" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="r2creauth" />
+            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

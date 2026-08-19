@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.notam
 
+import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.airspace.AirspaceChipSeverity
 import org.ncssar.rid2caltopo.airspace.AirspaceUiState
 import org.junit.Assert.assertEquals
@@ -8,6 +9,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NotamPolicyTest {
+    @Test
+    fun runtimeResetClearsNotamResultAndRequiresConfigurationAgain() {
+        CaltopoClient.ResetPersistedClientState()
+
+        NotamCenter.resetRuntimeState()
+
+        assertEquals("NOTAMs not configured", NotamCenter.uiState.value.chipLabel)
+        assertFalse(NotamCenter.uiState.value.configured)
+        assertTrue(NotamCenter.uiState.value.notices.isEmpty())
+        assertEquals(0L, CaltopoClient.GetNotamLastUpdatedEpochMs())
+    }
+
     @Test
     fun toolbarUsesBriefAirspaceLabelWhileStateRetainsAirportDetails() {
         assertEquals(
@@ -134,7 +147,7 @@ class NotamPolicyTest {
         )
 
         assertEquals(
-            "NOTAMs pending",
+            "NOTAMs not configured",
             NotamPolicy.chipLabel(
                 notices = listOf(placeholder),
                 configured = false,

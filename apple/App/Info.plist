@@ -49,6 +49,8 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>r2c2</string>
+				<string>r2cenroll</string>
+				<string>r2creauth</string>
 				<string>r2cfaa1</string>
 				<string>r2cma1</string>
 			</array>

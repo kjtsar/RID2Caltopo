@@ -48,6 +48,7 @@ class ImportConfigRoutingTest {
         CaltopoClient.ResetPersistedClientState()
         var notamRefreshRequested = false
         var airspaceRefreshRequested = false
+        var trackReplayRequested = false
 
         applyTrackerEnrollmentAndRefreshNotams(
             result = TrackerEnrollmentResult(
@@ -58,7 +59,8 @@ class ImportConfigRoutingTest {
                 enrollmentUrl = "https://r2c-tracker.com/test/enroll?token=campaign-token"
             ),
             requestNotamRefresh = { notamRefreshRequested = true },
-            requestAirspaceRefresh = { airspaceRefreshRequested = true }
+            requestAirspaceRefresh = { airspaceRefreshRequested = true },
+            requestTrackReplay = { trackReplayRequested = true }
         )
 
         assertEquals("https://tracker.example.test/faa/notams", CaltopoClient.GetTrackerFaaProxyUrl())
@@ -68,6 +70,7 @@ class ImportConfigRoutingTest {
         )
         assertTrue(notamRefreshRequested)
         assertTrue(airspaceRefreshRequested)
+        assertTrue(trackReplayRequested)
         CaltopoClient.ResetPersistedClientState()
     }
 }

@@ -42,8 +42,13 @@ final class AppleCaltopoSettings: ObservableObject {
     @Published private(set) var isLoadingTeamMaps = false
 
     private let defaults: UserDefaults
+    private var credentialOrigin: String
     private static let keychainService = "org.ncssar.RID2CaltopoApple.caltopo"
     private static let secretAccount = "credential-secret"
+    private static let credentialOriginKey = "caltopo.credentialOrigin"
+    private static let originUnknown = "unknown"
+    private static let originIndependent = "independent"
+    private static let originTracker = "tracker"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -59,6 +64,8 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialID = defaults.string(forKey: "caltopo.credentialID") ?? ""
         credentialSecret = Self.loadSecret() ?? ""
         teamID = defaults.string(forKey: "caltopo.teamID") ?? ""
+        credentialOrigin = defaults.string(forKey: Self.credentialOriginKey)
+            ?? Self.originUnknown
         status = enabled ? "Standalone; select the incident map" : "Publishing disabled"
     }
 
@@ -76,8 +83,12 @@ final class AppleCaltopoSettings: ObservableObject {
     }
 
     @discardableResult
-    func save() -> AppleCaltopoConfiguration {
+    func save(markCredentialsIndependent: Bool = true) -> AppleCaltopoConfiguration {
         let value = configuration
+        if markCredentialsIndependent {
+            credentialOrigin = Self.originIndependent
+            defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
+        }
         defaults.set(value.enabled, forKey: "caltopo.enabled")
         defaults.set(value.domainAndPort, forKey: "caltopo.domain")
         defaults.set(value.mapID, forKey: "caltopo.mapID")
@@ -102,7 +113,9 @@ final class AppleCaltopoSettings: ObservableObject {
         if !credentials.credentialSecret.isEmpty { credentialSecret = credentials.credentialSecret }
         teamID = credentials.teamID
         defaults.set(teamID, forKey: "caltopo.teamID")
-        _ = save()
+        credentialOrigin = Self.originIndependent
+        defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
+        _ = save(markCredentialsIndependent: false)
         status = "Android QR credentials loaded; select the incident Map ID to publish"
     }
 
@@ -113,7 +126,9 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialSecret = object["credential_secret"] as? String ?? ""
         teamID = object["team_id"] as? String ?? ""
         defaults.set(teamID, forKey: "caltopo.teamID")
-        _ = save()
+        credentialOrigin = Self.originTracker
+        defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
+        _ = save(markCredentialsIndependent: false)
         status = "Managed organization credentials loaded; select the incident map"
     }
 
@@ -125,7 +140,9 @@ final class AppleCaltopoSettings: ObservableObject {
         if !profile.credentialSecret.isEmpty { credentialSecret = profile.credentialSecret }
         teamID = profile.teamID
         defaults.set(teamID, forKey: "caltopo.teamID")
-        _ = save()
+        credentialOrigin = Self.originIndependent
+        defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
+        _ = save(markCredentialsIndependent: false)
         status = "Android mutual-aid QR loaded for \(profile.displayName)"
     }
 
@@ -138,7 +155,9 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialSecret = profile.credentialSecret
         teamID = profile.teamID
         defaults.set(teamID, forKey: "caltopo.teamID")
-        _ = save()
+        credentialOrigin = Self.originIndependent
+        defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
+        _ = save(markCredentialsIndependent: false)
         status = mapID.isEmpty
             ? "Profile restored; select the incident map"
             : "Connected to \(profile.mapTitle)"
@@ -165,7 +184,9 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialSecret = object["credential_secret"] as? String ?? ""
         teamID = object["team_id"] as? String ?? ""
         defaults.set(teamID, forKey: "caltopo.teamID")
-        _ = save()
+        credentialOrigin = Self.originIndependent
+        defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
+        _ = save(markCredentialsIndependent: false)
         status = "Configuration restored from local backup"
     }
 
@@ -210,7 +231,7 @@ final class AppleCaltopoSettings: ObservableObject {
         mapID = map.id
         mapTitle = map.title
         enabled = true
-        let value = save()
+        let value = save(markCredentialsIndependent: false)
         status = "Connected to \(map.title)"
         return value
     }
@@ -234,8 +255,39 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialSecret = ""
         teamID = ""
         teamMaps = []
+        credentialOrigin = Self.originUnknown
         status = "Not configured"
+        for key in [
+            "caltopo.enabled", "caltopo.domainAndPort", "caltopo.mapID",
+            "caltopo.mapTitle", "caltopo.credentialID", "caltopo.teamID",
+            Self.credentialOriginKey,
+        ] {
+            defaults.removeObject(forKey: key)
+        }
         try? Self.storeSecret("")
+    }
+
+    /// Clears credentials delivered by Tracker while leaving independently entered or
+    /// imported credentials available during offline operation and Tracker outages.
+    @discardableResult
+    func quarantineTrackerManagedCredentials() -> Bool {
+        guard credentialOrigin != Self.originIndependent else {
+            status = "Tracker authorization paused; independent CalTopo credentials preserved"
+            return false
+        }
+        enabled = false
+        mapID = ""
+        mapTitle = ""
+        credentialID = ""
+        credentialSecret = ""
+        teamID = ""
+        teamMaps = []
+        credentialOrigin = Self.originTracker
+        defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
+        defaults.removeObject(forKey: AppleManagedOrganizationConfig.versionDefaultsKey)
+        _ = save(markCredentialsIndependent: false)
+        status = "Tracker-managed CalTopo credentials cleared pending reauthentication"
+        return true
     }
 
     private func findMap(id: String, in nodes: [CaltopoTeamMapNode]) -> CaltopoTeamMap? {

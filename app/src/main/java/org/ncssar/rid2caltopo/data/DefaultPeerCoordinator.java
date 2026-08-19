@@ -152,6 +152,55 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public synchronized void resumeAfterReauthentication() {
+        if (startedMapId == null || startedGuid == null || startedName == null) {
+            CaltopoClient.CTDebug(
+                    "DefaultPeerCoord",
+                    "resumeAfterReauthentication(): coordination has not started yet; normal startup will connect."
+            );
+            return;
+        }
+        if (!shouldUseTrackerCoordinator()) {
+            CaltopoClient.CTWarn(
+                    "DefaultPeerCoord",
+                    "resumeAfterReauthentication(): tracker is no longer configured."
+            );
+            return;
+        }
+
+        PeerCoordinator trackerCoordinator = TrackerPeerCoordinator.getInstance();
+        if (activeCoordinator != trackerCoordinator || !trackerSelected) {
+            trackerFallbackActive = false;
+            trackerUnavailableDetail = "";
+            switchToCoordinator(trackerCoordinator, true);
+            return;
+        }
+
+        CaltopoClient.CTInfo(
+                "DefaultPeerCoord",
+                "resumeAfterReauthentication(): reconnecting tracker coordination in place."
+        );
+        TrackerPeerCoordinator.getInstance().setHardFailureListener(this::handleTrackerHardFailure);
+        trackerCoordinator.setPeerListChangedListener(peerListChangedListener);
+        trackerCoordinator.setCoordinationIndicatorListener(this::handleChildCoordinationIndicatorStateChanged);
+        trackerCoordinator.setVideoStreamRequestListener(videoStreamRequestListener);
+        trackerCoordinator.updateManagedVideoStreams(managedVideoIncidentName, managedVideoStreams);
+        trackerCoordinator.start(startedMapId, startedGuid, startedName, startedBrokerUri);
+        trackerCoordinator.updateCaltopoRtt(myCaltopoRttMs);
+        trackerCoordinator.updateMyPosition(myLat, myLon);
+        for (ActiveTrackRegistration registration : activeTracks.values()) {
+            if (!registration.coordinatorActivated) continue;
+            trackerCoordinator.onLiveTrackCreated(
+                    registration.liveTrack,
+                    registration.droneSpec,
+                    registration.distMeters,
+                    registration.firstSeenTs
+            );
+        }
+        emitCoordinationIndicatorIfChanged();
+    }
+
+    @Override
     public void onLiveTrackCreated(@NonNull LiveTrackOwnerDelegate liveTrack,
                                    @NonNull CtDroneSpec droneSpec,
                                    double distMeters,

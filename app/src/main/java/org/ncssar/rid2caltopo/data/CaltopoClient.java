@@ -202,6 +202,7 @@ class ClientClassState {
     public String caltopoTrackFolder;
     public String caltopoDomainAndPort;
     public CaltopoCredentials caltopoCredentials;
+    public String caltopoCredentialOrigin;
     public long newTrackDelayInSeconds;
     public long maxFlatlineToneDurationInSeconds;
     public long bridgeCheckDistanceFeet;
@@ -256,6 +257,7 @@ class ClientClassState {
         archivePath = "";
         caltopoTrackFolder = "Drone Tracks";
         caltopoCredentials = new CaltopoCredentials();
+        caltopoCredentialOrigin = CaltopoClient.CALTOPO_CREDENTIAL_ORIGIN_UNKNOWN;
         caltopoDomainAndPort = "caltopo.com";
         usePeersFlag = true;
         standaloneR2cCoordinationEnabled = false;
@@ -390,6 +392,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     static final long ProcessId = Process.myPid();
     private static final String BASE_URL = "https://caltopo.com/api/v1/position/report/";
     private static final String TAG = "CaltopoClient";
+    public static final String CALTOPO_CREDENTIAL_ORIGIN_UNKNOWN = "unknown";
+    public static final String CALTOPO_CREDENTIAL_ORIGIN_INDEPENDENT = "independent";
+    public static final String CALTOPO_CREDENTIAL_ORIGIN_TRACKER = "tracker";
     private static final String ICON_LATENCY_TAG = "RidIconLatency";
     public static final int DebugLevelError = 0;
     public static final int DebugLevelWarn = 1;
@@ -704,6 +709,34 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (registeredDrone == null || registeredDrone.isLocalArchiveOnly()) return false;
         if (!CurrentPeerConfirmedDroneRemoteIds.contains(trimmedRemoteId)) return false;
         return normalizedDroneOrg.equals(NormalizeOrgName(registeredDrone.getOrg()));
+    }
+
+    public static boolean IsTrackerUploadIdentityForConfiguredOrg(
+            @Nullable String remoteId,
+            @Nullable String droneOrg
+    ) {
+        if (remoteId == null) return false;
+        String trimmedRemoteId = remoteId.trim();
+        if (RejectNonCanonicalRemoteId(
+                "IsTrackerUploadIdentityForConfiguredOrg()", trimmedRemoteId)) return false;
+        String normalizedDroneOrg = NormalizeOrgName(droneOrg);
+        String normalizedTrackerOrg = NormalizeOrgName(GetTrackerUploadOrgName());
+        return !normalizedDroneOrg.isEmpty() &&
+                normalizedDroneOrg.equals(normalizedTrackerOrg);
+    }
+
+    public static boolean IsPersistedTeamDroneForTrackerUpload(
+            @Nullable String remoteId,
+            @Nullable String droneOrg
+    ) {
+        if (!IsTrackerUploadIdentityForConfiguredOrg(remoteId, droneOrg) || remoteId == null) {
+            return false;
+        }
+        ClientClassState ccs = GetState();
+        if (ccs.cachedDroneSpecTable == null) return false;
+        CtDroneSpec registeredDrone = ccs.cachedDroneSpecTable.get(remoteId.trim());
+        if (registeredDrone == null || registeredDrone.isLocalArchiveOnly()) return false;
+        return NormalizeOrgName(droneOrg).equals(NormalizeOrgName(registeredDrone.getOrg()));
     }
 
     public static int GetActiveFlightCount() {
@@ -1764,16 +1797,70 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void SetCaltopoCredentials(@NonNull CaltopoCredentials cred)
             throws RuntimeException {
+        SetCaltopoCredentialsWithOrigin(cred, CALTOPO_CREDENTIAL_ORIGIN_INDEPENDENT);
+    }
+
+    public static void SetTrackerManagedCaltopoCredentials(@NonNull CaltopoCredentials cred)
+            throws RuntimeException {
+        SetCaltopoCredentialsWithOrigin(cred, CALTOPO_CREDENTIAL_ORIGIN_TRACKER);
+    }
+
+    private static void SetCaltopoCredentialsWithOrigin(
+            @NonNull CaltopoCredentials cred,
+            @NonNull String origin) throws RuntimeException {
         if (!CaltopoCredentials.sniffTest(cred)) {
             throw new RuntimeException("CaltopoSessionConfig.setCaltopoConfig() bad spec.");
         }
 
         ClientClassState ccs = GetState();
-        if (!CaltopoCredentials.credentialsAreEqual(cred, ccs.caltopoCredentials)) {
+        boolean credentialsChanged = !CaltopoCredentials.credentialsAreEqual(
+                cred, ccs.caltopoCredentials);
+        boolean originChanged = !origin.equals(ccs.caltopoCredentialOrigin);
+        if (credentialsChanged || originChanged) {
             ccs.caltopoCredentials = cred;
+            ccs.caltopoCredentialOrigin = origin;
             NotifySettingsChanged();
-            ArchiveState("caltopo credentials changed");
+            ArchiveState("caltopo credentials changed; origin=" + origin);
         }
+    }
+
+    @NonNull
+    public static String GetCaltopoCredentialOrigin() {
+        String origin = GetState().caltopoCredentialOrigin;
+        return origin == null || origin.isEmpty()
+                ? CALTOPO_CREDENTIAL_ORIGIN_UNKNOWN : origin;
+    }
+
+    /**
+     * Disable only CalTopo credentials that came from Tracker. Legacy credentials with
+     * unknown provenance are cleared conservatively; explicitly independent credentials
+     * remain available for offline and degraded-network operation.
+     */
+    public static synchronized boolean QuarantineTrackerManagedCaltopoCredentials() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (CALTOPO_CREDENTIAL_ORIGIN_INDEPENDENT.equals(GetCaltopoCredentialOrigin())) {
+            ArchiveState("tracker reauthentication preserved independent caltopo credentials");
+            return false;
+        }
+        ccs.caltopoCredentials = new CaltopoCredentials();
+        if (ccs.caltopoProfiles != null) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if ("HOME".equals(profile.profileType)) {
+                    profile.credentials = new CaltopoCredentials();
+                }
+            }
+        }
+        ccs.mutualAidTemplate = new MutualAidTemplateRecord();
+        ccs.caltopoCredentialOrigin = CALTOPO_CREDENTIAL_ORIGIN_TRACKER;
+        try {
+            CaltopoMap.ResetMapConnection(0);
+        } catch (Exception error) {
+            CTWarn(TAG, "QuarantineTrackerManagedCaltopoCredentials(): map reset raised", error);
+        }
+        NotifySettingsChanged();
+        ArchiveState("tracker-managed caltopo credentials cleared pending reauthentication");
+        return true;
     }
 
     public static void SetCaltopoDomainAndPort(@NonNull String dAndP) {
@@ -1953,6 +2040,35 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ccs.trackerApiKey = trackerApiKey.trim();
         NotifySettingsChanged();
         ArchiveState("home tracker enrollment changed");
+    }
+
+    /** Clear organization-managed secrets when Tracker requires user reauthentication. */
+    public static synchronized void RequireManagedReauthentication() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        ccs.trackerApiKey = "";
+        ccs.trackerUrlPfx = "";
+        ccs.trackerFaaProxyUrl = "";
+        ccs.caltopoCredentials = new CaltopoCredentials();
+        ccs.cachedDroneSpecTable = new Hashtable<>();
+        CurrentPeerConfirmedDroneRemoteIds.clear();
+        if (ccs.caltopoProfiles != null) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                profile.credentials = new CaltopoCredentials();
+                profile.trackerApiKey = "";
+                profile.trackerUrlPfx = "";
+            }
+        }
+        UpdateDroneSpecs();
+        SetUsePeers(false);
+        SetStandaloneR2cCoordinationEnabled(false);
+        try {
+            CaltopoMap.ResetMapConnection(0);
+        } catch (Exception error) {
+            CTWarn(TAG, "RequireManagedReauthentication(): map reset raised", error);
+        }
+        NotifySettingsChanged();
+        ArchiveState("managed credentials cleared pending reauthentication");
     }
 
     @NonNull
@@ -3572,7 +3688,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             String filepath = BuildDebugLogFilename(System.currentTimeMillis());
             Context ctxt = R2CApplication.getAppCtxt();
             if (null != ctxt) try {
-                DocumentFile dataFilepath = todaysArchiveDir.createFile("text/plain", filepath);
+                DocumentFile dataFilepath = DocumentFileCompat.createFileWithExactName(
+                        todaysArchiveDir, "text/plain", filepath);
                 ContentResolver resolver = ctxt.getContentResolver();
                 synchronized (DebugLogLock) {
                     if (DebugLogPath == null && null != dataFilepath) {
@@ -4084,6 +4201,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 .put(body) // This sets the method to PUT
                 .header("User-Agent", "RID2Caltopo/0.1")
                 .header("X-SAR-Token", trackerApiKey)
+                .header("X-R2C-Functionality-Release",
+                        Integer.toString(BuildConfig.TRACKER_FUNCTIONALITY_RELEASE))
                 .build();
 
         if (CTDebugEnabled(TAG)) CTDebug(TAG, "BgPublishStats(): uploading " + geoJsonString.length() + " characters to '" + urlStr + "'");

@@ -227,7 +227,8 @@ internal data class ArtifactPointSpec(
     val lng: Double,
     val title: String,
     val markerSymbol: String,
-    val markerColor: String?
+    val markerColor: String?,
+    val description: String = ""
 )
 
 internal data class ArtifactLineSpec(
@@ -235,7 +236,8 @@ internal data class ArtifactLineSpec(
     val points: List<GeoPoint>,
     val color: Int,
     val width: Float,
-    val title: String
+    val title: String,
+    val description: String = ""
 )
 
 internal data class ArtifactPolygonSpec(
@@ -244,7 +246,13 @@ internal data class ArtifactPolygonSpec(
     val strokeColor: Int,
     val fillColor: Int,
     val strokeWidth: Float,
-    val title: String
+    val title: String,
+    val description: String = ""
+)
+
+internal data class ArtifactInspection(
+    val title: String,
+    val description: String
 )
 
 internal data class ArtifactOverlayState(

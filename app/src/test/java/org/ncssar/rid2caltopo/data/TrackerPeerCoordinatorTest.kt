@@ -152,6 +152,67 @@ class TrackerPeerCoordinatorTest {
         assertEquals("android", hello.optString("appPlatform"))
         assertEquals(BuildConfig.VERSION_CODE, hello.optInt("appVersionCode"))
         assertEquals(BuildConfig.VERSION_NAME, hello.optString("appVersion"))
+        assertEquals(
+            BuildConfig.TRACKER_FUNCTIONALITY_RELEASE,
+            hello.optInt("trackerFunctionalityRelease")
+        )
+    }
+
+    @Test
+    fun reauthenticationRequired_preservesIndependentCredentialsAndStopsTracker() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        CaltopoClient.SetCaltopoCredentials(CaltopoCredentials("team", "credential", "secret"))
+        CaltopoClient.SetHomeTrackerCredentials(
+            "https://r2c-tracker.com/ncssar",
+            "r2c_dev_managed-secret"
+        )
+        val credentialsBefore = CaltopoClient.GetCaltopoCredentials()
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        transport.receive(JSONObject()
+            .put("type", "reauthentication_required")
+            .put("clearManagedConfiguration", false)
+            .put(
+                "reauthenticationUrl",
+                "https://r2c-tracker.com/ncssar/device-reauthenticate?token=signed"
+            )
+            .toString())
+
+        assertEquals("r2c_dev_managed-secret", CaltopoClient.GetHomeTrackerApiKey())
+        val credentialsAfter = CaltopoClient.GetCaltopoCredentials()
+        assertEquals(credentialsBefore.teamId, credentialsAfter.teamId)
+        assertEquals(credentialsBefore.credentialId, credentialsAfter.credentialId)
+        assertEquals(credentialsBefore.credentialSecret, credentialsAfter.credentialSecret)
+        assertTrue(transport.disconnectCount > 0)
+    }
+
+    @Test
+    fun reauthenticationRequired_clearsTrackerManagedCaltopoButKeepsTrackerToken() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        CaltopoClient.SetTrackerManagedCaltopoCredentials(
+            CaltopoCredentials("team", "credential", "secret")
+        )
+        CaltopoClient.SetHomeTrackerCredentials(
+            "https://r2c-tracker.com/ncssar",
+            "r2c_dev_managed-secret"
+        )
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        transport.receive(JSONObject()
+            .put("type", "reauthentication_required")
+            .put("clearManagedConfiguration", false)
+            .put(
+                "reauthenticationUrl",
+                "https://r2c-tracker.com/ncssar/device-reauthenticate?token=signed"
+            )
+            .toString())
+
+        assertEquals("r2c_dev_managed-secret", CaltopoClient.GetHomeTrackerApiKey())
+        val credentialsAfter = CaltopoClient.GetCaltopoCredentials()
+        assertTrue(credentialsAfter.teamId.isNullOrEmpty())
+        assertTrue(credentialsAfter.credentialId.isNullOrEmpty())
+        assertTrue(credentialsAfter.credentialSecret.isNullOrEmpty())
+        assertTrue(transport.disconnectCount > 0)
     }
 
     @Test
@@ -856,6 +917,26 @@ class TrackerPeerCoordinatorTest {
         assertEquals(0, failureCount)
         assertEquals("failure", coordinator.getLastReconnectCauseForTesting())
         assertEquals(PeerCoordinator.CoordinationIndicatorState.DEGRADED, coordinator.coordinationIndicatorState)
+    }
+
+    @Test
+    fun trackerServiceOutage_doesNotClearTrackerManagedCaltopoCredentials() {
+        CaltopoClient.SetTrackerManagedCaltopoCredentials(
+            CaltopoCredentials("team", "credential", "secret")
+        )
+        transport.autoOpen = false
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.fail(503, "Service Unavailable")
+
+        val credentials = CaltopoClient.GetCaltopoCredentials()
+        assertEquals("team", credentials.teamId)
+        assertEquals("credential", credentials.credentialId)
+        assertEquals("secret", credentials.credentialSecret)
+        assertEquals(
+            CaltopoClient.CALTOPO_CREDENTIAL_ORIGIN_TRACKER,
+            CaltopoClient.GetCaltopoCredentialOrigin()
+        )
     }
 
     @Test

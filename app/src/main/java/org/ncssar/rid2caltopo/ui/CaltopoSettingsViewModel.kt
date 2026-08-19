@@ -23,6 +23,22 @@ import org.ncssar.rid2caltopo.data.RemoteVideoControlPrefs
 import org.ncssar.rid2caltopo.notam.NotamAuthManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
+
+internal enum class CaltopoCredentialFieldState {
+    BLANK,
+    COMPLETE,
+    PARTIAL,
+}
+
+internal fun caltopoCredentialFieldState(teamId: String, credentialId: String, secret: String): CaltopoCredentialFieldState {
+    val populatedCount = listOf(teamId, credentialId, secret).count { it.trim().isNotEmpty() }
+    return when (populatedCount) {
+        0 -> CaltopoCredentialFieldState.BLANK
+        3 -> CaltopoCredentialFieldState.COMPLETE
+        else -> CaltopoCredentialFieldState.PARTIAL
+    }
+}
+
 class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListener {
     private var isSaving = false
 
@@ -83,6 +99,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     val caltopoCredentialId = _caltopoCredentialId.asStateFlow()
     private val _caltopoCredentialSecret = MutableStateFlow(initialCaltopoCredentials.credentialSecret ?: "")
     val caltopoCredentialSecret = _caltopoCredentialSecret.asStateFlow()
+    private val _caltopoCredentialError = MutableStateFlow<String?>(null)
+    val caltopoCredentialError = _caltopoCredentialError.asStateFlow()
 
     private val _trackerUrl = MutableStateFlow(CaltopoClient.GetHomeTrackerUrlPfx())
     val trackerUrl = _trackerUrl.asStateFlow()
@@ -209,9 +227,18 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onTrackFolderChanged(value: String) { _trackFolder.value = value }
     fun onIncidentChanged(value: String) { _incident.value = value }
     fun onOpPeriodChanged(value: String) { _opPeriod.value = value }
-    fun onCaltopoTeamIdChanged(value: String) { _caltopoTeamId.value = value }
-    fun onCaltopoCredentialIdChanged(value: String) { _caltopoCredentialId.value = value }
-    fun onCaltopoCredentialSecretChanged(value: String) { _caltopoCredentialSecret.value = value }
+    fun onCaltopoTeamIdChanged(value: String) {
+        _caltopoTeamId.value = value
+        _caltopoCredentialError.value = null
+    }
+    fun onCaltopoCredentialIdChanged(value: String) {
+        _caltopoCredentialId.value = value
+        _caltopoCredentialError.value = null
+    }
+    fun onCaltopoCredentialSecretChanged(value: String) {
+        _caltopoCredentialSecret.value = value
+        _caltopoCredentialError.value = null
+    }
     fun onTrackerUrlChanged(value: String) {
         _trackerUrl.value = value
         trackerManuallyEdited = true
@@ -326,7 +353,21 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _externalDisplayAlertRouting.value = routing
     }
 
-    fun saveSettings() {
+    fun saveSettings(): Boolean {
+        val trimmedCaltopoTeamId = _caltopoTeamId.value.trim()
+        val trimmedCaltopoCredentialId = _caltopoCredentialId.value.trim()
+        val trimmedCaltopoCredentialSecret = _caltopoCredentialSecret.value.trim()
+        val credentialFieldState = caltopoCredentialFieldState(
+            trimmedCaltopoTeamId,
+            trimmedCaltopoCredentialId,
+            trimmedCaltopoCredentialSecret,
+        )
+        if (credentialFieldState == CaltopoCredentialFieldState.PARTIAL) {
+            _caltopoCredentialError.value =
+                "Enter Team ID, Credential ID, and Credential secret together, or leave all three blank."
+            return false
+        }
+        _caltopoCredentialError.value = null
         isSaving = true
         try {
         val restartMediaMtx = CaltopoClient.GetCaptureVideoStreamsFlag() != _captureIncomingVideo.value
@@ -334,13 +375,15 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         CaltopoClient.SetTrackFolderName(_trackFolder.value.trim())
         CaltopoClient.SetIncident(_incident.value.trim())
         CaltopoClient.SetOpPeriod(_opPeriod.value.trim())
-        CaltopoClient.SetCaltopoCredentials(
-            CaltopoCredentials(
-                _caltopoTeamId.value.trim(),
-                _caltopoCredentialId.value.trim(),
-                _caltopoCredentialSecret.value.trim()
+        if (credentialFieldState == CaltopoCredentialFieldState.COMPLETE) {
+            CaltopoClient.SetCaltopoCredentials(
+                CaltopoCredentials(
+                    trimmedCaltopoTeamId,
+                    trimmedCaltopoCredentialId,
+                    trimmedCaltopoCredentialSecret,
+                )
             )
-        )
+        }
         if (trackerManuallyEdited) {
             CaltopoClient.SetHomeTrackerCredentials(
                 _trackerUrl.value.trim(),
@@ -410,6 +453,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
             isSaving = false
             settingsChanged()
         }
+        return true
     }
 
     private fun buildNotamStatus(): String {

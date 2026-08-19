@@ -44,6 +44,7 @@ final class AppleNotamCenter: ObservableObject {
     private var lastAttempt = Date.distantPast
     private var lastSuccessfulNotices: [OperationalNotam] = []
     private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration: UInt = 0
     private var proxyURL: URL?
     private var proxyToken = ""
 
@@ -97,11 +98,17 @@ final class AppleNotamCenter: ObservableObject {
         rebuildState(loading: true, coordinate: coordinate, error: state.errorMessage)
         refreshTask = Task { [weak self] in
             guard let self else { return }
-            defer { refreshTask = nil }
+            let generation = refreshGeneration
+            defer {
+                if generation == refreshGeneration {
+                    refreshTask = nil
+                }
+            }
             do {
                 guard let coordinate else { throw AppleNotamError.locationUnavailable }
                 guard isConfigured else { throw AppleNotamError.proxyUnavailable }
                 let notices = try await fetchNotams(coordinate: coordinate)
+                guard generation == refreshGeneration, !Task.isCancelled else { return }
                 lastFetchCoordinate = coordinate
                 lastSuccessfulNotices = notices
                 rebuildState(loading: false, coordinate: coordinate, error: nil, successfulAt: Date())
@@ -110,11 +117,37 @@ final class AppleNotamCenter: ObservableObject {
                     "Fetched \(notices.count) notices radiusStatuteMiles=\(radiusStatuteMiles)"
                 )
             } catch {
+                guard generation == refreshGeneration, !Task.isCancelled else { return }
                 let message = error.localizedDescription
                 rebuildState(loading: false, coordinate: coordinate, error: message)
                 AppleLog.error("NOTAM", message)
             }
         }
+    }
+
+    func resetRuntimeState() {
+        refreshGeneration &+= 1
+        refreshTask?.cancel()
+        refreshTask = nil
+        proxyURL = nil
+        proxyToken = ""
+        lastFetchCoordinate = nil
+        lastAttempt = .distantPast
+        lastSuccessfulNotices = []
+        enabled = false
+        showOnMap = true
+        autoRefresh = true
+        radiusStatuteMiles = 1
+        refreshIntervalSeconds = 1_800
+        state = AppleNotamState(
+            visible: true,
+            enabled: false,
+            configured: false,
+            chipSeverity: .neutral,
+            chipLabel: "NOTAMs disabled",
+            statusLine: "Nearby NOTAM monitoring is disabled.",
+            radiusStatuteMiles: 1
+        )
     }
 
     func refreshNow(location: CLLocation?) { update(location: location, force: true) }
@@ -229,6 +262,10 @@ final class AppleNotamCenter: ObservableObject {
         var request = URLRequest(url: url)
         request.timeoutInterval = 45
         request.setValue(proxyToken, forHTTPHeaderField: "X-SAR-Token")
+        request.setValue(
+            String(TrackerCoordinationClient.trackerFunctionalityRelease),
+            forHTTPHeaderField: "X-R2C-Functionality-Release"
+        )
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AppleNotamError.service("No HTTP NOTAM response") }
         guard (200 ..< 300).contains(http.statusCode) else { throw AppleNotamError.service("NOTAM query failed (HTTP \(http.statusCode)).") }

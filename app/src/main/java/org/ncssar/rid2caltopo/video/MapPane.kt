@@ -730,6 +730,7 @@ internal fun SplitMapPane(
     val staleTrackCutoffMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
     var selectedNotam by remember { mutableStateOf<NearbyNotam?>(null) }
     var selectedNotamGroup by remember { mutableStateOf<List<NearbyNotam>?>(null) }
+    var selectedArtifact by remember { mutableStateOf<ArtifactInspection?>(null) }
     val dronePointEntries = viewModel.droneStates.mapNotNull { (designator, state) ->
         val stateTs = state.source.mostRecentMsecTimestamp
         var lat = state.lastLat
@@ -782,6 +783,18 @@ internal fun SplitMapPane(
         selectedNotamGroup = selectedNotamGroup,
         onSelectedNotamGroupChange = { selectedNotamGroup = it }
     )
+    selectedArtifact?.let { artifact ->
+        AlertDialog(
+            onDismissRequest = { selectedArtifact = null },
+            title = { Text(artifact.title) },
+            text = {
+                Text(artifact.description.ifBlank { "No description is available for this map item." })
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedArtifact = null }) { Text("Close") }
+            }
+        )
+    }
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
     // GeoTIFF tile names covering all currently-visible drone positions.
@@ -1858,6 +1871,19 @@ internal fun SplitMapPane(
                                 "renderable=${artifactOverlayState.totalFeatures} mergedDeltas=$cacheChangedDuringHydration"
                         )
                     }
+                    if (mergedFeatures.values.any {
+                            it.optJSONObject("properties")?.optString("class") == "Assignment"
+                        }
+                    ) {
+                        CTInfo(
+                            MAP_PANE_TAG,
+                            "Assignment hydration ($reason): " + assignmentDiagnosticSummary(
+                                features = mergedFeatures,
+                                hiddenFolderIds = overlayHiddenFolderIds,
+                                hiddenItemIds = overlayHiddenItemIds,
+                            ),
+                        )
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -2699,7 +2725,14 @@ internal fun SplitMapPane(
                             fillColor = polygonSpec.fillColor,
                             strokeWidth = 0f
                         )
-                        setOnClickListener { _, _, _ -> false }
+                        if (!isInsetMode) {
+                            setOnClickListener { _, _, _ ->
+                                selectedArtifact = ArtifactInspection(polygonSpec.title, polygonSpec.description)
+                                true
+                            }
+                        } else {
+                            setOnClickListener { _, _, _ -> false }
+                        }
                     }
                     mapView.overlays.add(polygonFill)
                     managedOverlays.add(polygonFill)
@@ -2708,6 +2741,12 @@ internal fun SplitMapPane(
                         setPoints(closedPolylinePoints(polygonSpec.points))
                         title = polygonSpec.title
                         applyPolylineStyle(this, polygonSpec.strokeColor, polygonSpec.strokeWidth * lineScale)
+                        if (!isInsetMode) {
+                            setOnClickListener { _, _, _ ->
+                                selectedArtifact = ArtifactInspection(polygonSpec.title, polygonSpec.description)
+                                true
+                            }
+                        }
                     }
                     mapView.overlays.add(polygonBoundary)
                     managedOverlays.add(polygonBoundary)
@@ -2802,6 +2841,12 @@ internal fun SplitMapPane(
                         setPoints(lineSpec.points)
                         title = lineSpec.title
                         applyPolylineStyle(this, lineSpec.color, lineSpec.width * lineScale)
+                        if (!isInsetMode) {
+                            setOnClickListener { _, _, _ ->
+                                selectedArtifact = ArtifactInspection(lineSpec.title, lineSpec.description)
+                                true
+                            }
+                        }
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -2973,23 +3018,28 @@ internal fun SplitMapPane(
                             )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = point.title
+                        snippet = point.description
                     }
-                    if (!isInsetMode) viewModel.clueSnapshotForTitle(point.title)?.let { snapshot ->
+                    if (!isInsetMode) {
+                        val snapshot = viewModel.clueSnapshotForTitle(point.title)
+                        val viewableSnapshot = snapshot?.takeIf {
+                            it.fullImage != null || it.fullImagePath != null
+                        }
                         marker.infoWindow = LocalMarkerInfoWindow(
                             mapView = mapView,
                             titleText = point.title,
-                            descriptionText = marker.snippet ?: "",
-                            thumbnail = snapshot.thumbnail,
-                            onOpenSnapshot = if (snapshot.fullImage != null || snapshot.fullImagePath != null) {
+                            descriptionText = point.description,
+                            thumbnail = snapshot?.thumbnail,
+                            onOpenSnapshot = viewableSnapshot?.let { captured ->
                                 {
                                     openClueSnapshotInExternalViewer(
                                         context,
-                                        snapshot.title,
-                                        snapshot.fullImage,
-                                        snapshot.fullImagePath,
+                                        captured.title,
+                                        captured.fullImage,
+                                        captured.fullImagePath,
                                     )
                                 }
-                            } else null,
+                            },
                             markerId = null,
                             onDelete = null
                         )
@@ -3778,6 +3828,11 @@ internal fun SplitMapPane(
                             folders = buildMapFolderUiStates(artifactStoreById),
                             hiddenFolderIds = hiddenFolderIds,
                             hiddenItemIds = hiddenItemIds
+                        ) + " | " + assignmentDiagnosticSummary(
+                            features = artifactStoreById,
+                            hiddenFolderIds = hiddenFolderIds,
+                            hiddenItemIds = hiddenItemIds,
+                            viewport = currentMapView?.boundingBox,
                         )
                     )
                     settingsMenuExpanded = false

@@ -81,6 +81,7 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.R2CMqttManager
+import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
 import org.ncssar.rid2caltopo.data.PeerCoordinator
 import org.ncssar.rid2caltopo.data.VideoStreamViewRequest
 import org.ncssar.rid2caltopo.data.VideoMediaOffer
@@ -137,12 +138,11 @@ private const val EXTRA_OPEN_STREAMS_QUALIFICATION =
     "org.ncssar.rid2caltopo.extra.OPEN_STREAMS_QUALIFICATION"
 
 internal fun buildLogArchiveEntryName(rawName: String?): String {
-    val baseName = rawName?.trim().orEmpty().ifBlank { "log_unknown" }
-    return if (baseName.lowercase(Locale.US).endsWith(".txt")) {
-        baseName
-    } else {
-        "$baseName.txt"
+    var baseName = rawName?.trim().orEmpty().ifBlank { "log_unknown" }
+    while (baseName.lowercase(Locale.US).endsWith(".txt.txt")) {
+        baseName = baseName.dropLast(4)
     }
+    return if (baseName.lowercase(Locale.US).endsWith(".txt")) baseName else "$baseName.txt"
 }
 
 internal fun shouldShowBluetoothDisabledPanel(
@@ -190,6 +190,9 @@ private fun BluetoothDisabledDialog(
         },
     )
 }
+
+internal fun shouldOpenTrackerReauthentication(browserAlreadyOpen: Boolean): Boolean =
+    !browserAlreadyOpen
 
 @Composable
 private fun VideoStreamRequestDialog(
@@ -431,6 +434,7 @@ class R2CActivity :
     private var displayManager: DisplayManager? = null
     private var bluetoothDisabled by mutableStateOf(false)
     private var launchDisclaimerAccepted by mutableStateOf(false)
+    private var trackerReauthenticationBrowserOpen = false
     private var pendingVideoStreamRequest by mutableStateOf<VideoStreamViewRequest?>(null)
     private var pendingRecordingDownloadRequest by mutableStateOf<RecordingDownloadRequest?>(null)
     private var pendingVideoPreflightRouteKind by mutableStateOf<String?>(null)
@@ -626,6 +630,17 @@ class R2CActivity :
                             zos.closeEntry()
                         }
                     }
+                    File(context.filesDir, ANR_TRACE_DIRECTORY)
+                        .listFiles()
+                        .orEmpty()
+                        .filter { it.isFile }
+                        .forEach { traceFile ->
+                            val entry = ZipEntry("$ANR_TRACE_DIRECTORY/${traceFile.name}")
+                            entry.time = traceFile.lastModified()
+                            zos.putNextEntry(entry)
+                            traceFile.inputStream().use { it.copyTo(zos) }
+                            zos.closeEntry()
+                        }
                 }
                 Triple(zipFile, selectedDirs.size, logFiles.size)
             } catch (e: Exception) {
@@ -654,13 +669,52 @@ class R2CActivity :
         startActivity(Intent.createChooser(intent, "Send Logs via..."))
     }
 
-    /**
-     * Handle an r2c2:// URI fired by the OS camera. The R2C2 bundle applies
-     * team configuration and redeems a per-device tracker enrollment.
-     */
+    /** Handle organization/configuration and tracker-enrollment links from the OS. */
     private fun handleR2cIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
+        if (uri.scheme == "r2creauth") {
+            trackerReauthenticationBrowserOpen = false
+            // Consume the callback before acting on it. Keeping the VIEW intent attached to
+            // the activity can replay it after a configuration change or activity restart.
+            setIntent(Intent(this, R2CActivity::class.java).setAction(Intent.ACTION_MAIN))
+            when (uri.host) {
+                "complete" -> {
+                    showToast("Tracker reauthentication succeeded. Configuration was preserved.")
+                    TrackerEnrollmentClient.retryManagedConfigurationBootstrap(this)
+                    R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                        .resumeAfterReauthentication()
+                }
+                "erase" -> {
+                    CaltopoClient.RequireManagedReauthentication()
+                    showToast("Managed RID map, Tracker, and CalTopo credentials were erased.")
+                }
+            }
+            return
+        }
+        TrackerEnrollmentClient.normalizedEnrollmentUrl(uri.toString())?.let { enrollmentUrl ->
+            CTDebug(TAG, "handleR2cIntent(): redeeming tracker enrollment app link")
+            lifecycleScope.launch {
+                runCatching {
+                    TrackerEnrollmentClient.redeem(this@R2CActivity, enrollmentUrl).also {
+                        TrackerEnrollmentClient.apply(it)
+                    }
+                }.onSuccess { result ->
+                    showToast("Organization '${result.organization}' imported; tracker enrollment installed.")
+                    NotamCenter.requestImmediateRefresh()
+                    AirspaceCenter.requestImmediateRefresh()
+                    CaltopoClient.CheckUnreportedFiles()
+                }.onFailure { error ->
+                    showToast(error.message ?: "Tracker enrollment failed.")
+                    CTError(
+                        TAG,
+                        "handleR2cIntent(): tracker enrollment failed",
+                        error as? Exception ?: RuntimeException(error)
+                    )
+                }
+            }
+            return
+        }
         when (uri.scheme) {
             OrgConfigToken.QR_SCHEME -> {
                 val token = OrgConfigToken.MAGIC_PREFIX +
@@ -718,6 +772,7 @@ class R2CActivity :
 
     override fun onResume() {
         super.onResume()
+        trackerReauthenticationBrowserOpen = false
         reloadExternalDisplayConfig()
         refreshBluetoothDisabledState("resume")
     }
@@ -1499,6 +1554,26 @@ class R2CActivity :
             snackTextView.setTextIsSelectable(true)
             snackTextView.maxLines = 5
             snackbar.show()
+        }
+    }
+
+    fun beginTrackerReauthentication(url: String) {
+        runOnUiThread {
+            if (!shouldOpenTrackerReauthentication(trackerReauthenticationBrowserOpen)) {
+                CTDebug(TAG, "Tracker reauthentication browser is already open")
+                return@runOnUiThread
+            }
+            trackerReauthenticationBrowserOpen = true
+            showToast(
+                "Tracker access is paused. Sign in with an authorized account; " +
+                    "your RID map and CalTopo configuration are preserved."
+            )
+            runCatching {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            }.onFailure {
+                trackerReauthenticationBrowserOpen = false
+                showToast("Unable to open Tracker reauthentication.")
+            }
         }
     }
 

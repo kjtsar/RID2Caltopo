@@ -11,8 +11,8 @@ def generatedReleaseNotesAssetsDir = layout.buildDirectory.dir("generated/releas
 def generatedLegalAssetsDir = layout.buildDirectory.dir("generated/legal/assets/legal")
 def generatedAppConfigProtoDir = layout.buildDirectory.dir("generated/source/proto/main/java")
 def versionMajor = 2
-def versionMinor = 0
-def versionPatch = 3
+def versionMinor = 1
+def versionPatch = 0
 def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
 def canonicalReleaseNotesFile = rootProject.file("release-notes/${appVersionName}/whats_new.txt")
 def runProcess = { File workingDirectory, List command, Map environmentOverrides = [:], boolean ignoreExitValue = false ->
@@ -220,7 +220,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 136
+        versionCode = 137
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
@@ -231,6 +231,7 @@ android {
 
         android.buildFeatures.buildConfig = true
         buildConfigField "String", "BUILD_VERSION", "\"${appVersionName}\""
+        buildConfigField "int", "TRACKER_FUNCTIONALITY_RELEASE", "148"
         def buildTime = new Date()
         buildConfigField "String", "BUILD_TIME", "\"${buildTime.format('ddLLLyyyy:HHmmss')}\""
         buildConfigField "boolean", "ENABLE_FFMPEG_PROBE", "true"

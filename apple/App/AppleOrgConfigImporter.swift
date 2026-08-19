@@ -659,6 +659,16 @@ final class AppleOrgConfigSettings: ObservableObject {
         bridgeCheckDistanceFeet = 20
         maximumIdleMinutes = 120
         sourceDescription = "Not loaded"
+        trackerEnrollmentURL = ""
+        for key in [
+            "org.name", "org.teamID", "org.trackerURLPrefix", "org.faaProxyURL",
+            "org.trackerEnrollmentURL", "org.sourceDescription", "org.joinToken",
+            "org.mutualAidToken", "mutualAid.template.teamID",
+            "mutualAid.template.domainAndPort", "mutualAid.template.sourceLabel",
+            "mutualAid.template.targetFolderHint",
+        ] {
+            defaults.removeObject(forKey: key)
+        }
         for account in [
             Self.trackerAccount,
             Self.faaClientIDAccount,
@@ -880,6 +890,7 @@ final class AppleOrgConfigImporter: ObservableObject {
     let profileLifecycle = AppleCaltopoProfileLifecycle.shared
     var caltopoConfigurationHandler: ((AppleCaltopoConfiguration) -> Void)?
     var notamEnrollmentAppliedHandler: ((String, String, String) -> Void)?
+    var trackerReauthenticationRequiredHandler: ((URL) -> Void)?
 
     var statusText: String {
         switch state {
@@ -896,7 +907,9 @@ final class AppleOrgConfigImporter: ObservableObject {
 
     func importTrackerEnrollment(
         _ rawURL: String,
-        orgSettings: AppleOrgConfigSettings
+        caltopoSettings: AppleCaltopoSettings,
+        orgSettings: AppleOrgConfigSettings,
+        identityStore: AppleDroneConfirmationStore
     ) async {
         state = .downloading
         let deviceName = AppleDeviceIdentity.displayName
@@ -913,12 +926,36 @@ final class AppleOrgConfigImporter: ObservableObject {
                 faaProxyURL: result.faaProxyURL,
                 enrollmentURL: rawURL
             )
+            try profileLifecycle.captureHome(org: orgSettings, caltopo: caltopoSettings)
             AppleNotamCenter.shared.enabled = true
             notamEnrollmentAppliedHandler?(
                 orgSettings.faaProxyURL,
                 orgSettings.trackerURLPrefix,
                 orgSettings.trackerAPIKey
             )
+            if let url = result.reauthenticationURL {
+                trackerReauthenticationRequiredHandler?(url)
+            }
+            do {
+                if let managed = try await AppleTrackerEnrollmentClient.fetchManagedOrganizationConfig(
+                    trackerBaseURL: result.trackerBaseURL,
+                    deviceToken: result.deviceToken
+                ) {
+                    try AppleManagedOrganizationConfig.apply(
+                        snapshot: managed.snapshot,
+                        versionMs: managed.versionMs,
+                        caltopo: caltopoSettings,
+                        organization: orgSettings,
+                        identities: identityStore
+                    )
+                    caltopoConfigurationHandler?(caltopoSettings.configuration)
+                }
+            } catch {
+                AppleLog.error(
+                    "OrgConfig",
+                    "Initial managed configuration sync failed; tracker will retry: \(error.localizedDescription)"
+                )
+            }
             state = .applied("Joined \(result.organization) on r2c-tracker.")
             AppleLog.info(
                 "OrgConfig",
@@ -995,6 +1032,9 @@ final class AppleOrgConfigImporter: ObservableObject {
                     orgSettings.trackerURLPrefix,
                     orgSettings.trackerAPIKey
                 )
+                if let url = enrollment.reauthenticationURL {
+                    trackerReauthenticationRequiredHandler?(url)
+                }
                 let extras = [
                     bundle.mutualAidTemplate == nil ? nil : "mutual-aid template",
                 ].compactMap { $0 }
@@ -1088,6 +1128,9 @@ final class AppleOrgConfigImporter: ObservableObject {
                 orgSettings.trackerURLPrefix,
                 orgSettings.trackerAPIKey
             )
+            if let url = enrollment.reauthenticationURL {
+                trackerReauthenticationRequiredHandler?(url)
+            }
             state = .applied(
                 "Loaded \(url.lastPathComponent): \(bundle.mappings.count) RID mapping(s)."
             )
@@ -1316,7 +1359,12 @@ struct ConfigImportView: View {
         let trackerEnrollment = isTrackerEnrollment
         Task { @MainActor in
             if trackerEnrollment {
-                await importer.importTrackerEnrollment(value, orgSettings: orgSettings)
+                await importer.importTrackerEnrollment(
+                    value,
+                    caltopoSettings: caltopoSettings,
+                    orgSettings: orgSettings,
+                    identityStore: identityStore
+                )
             } else {
                 await importer.importToken(
                     value,

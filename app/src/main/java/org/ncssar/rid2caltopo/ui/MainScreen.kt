@@ -67,6 +67,7 @@ import org.ncssar.rid2caltopo.app.ArchiveCleanupDeleteResult
 import org.ncssar.rid2caltopo.app.ArchiveCleanupDirectoryOption
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.LogArchiveDayOption
+import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.app.canDeleteArchiveCleanupSelection
 import org.ncssar.rid2caltopo.app.defaultSelectedArchiveCleanupDirectories
 import org.ncssar.rid2caltopo.app.formatArchiveSize
@@ -111,20 +112,24 @@ private fun showConfigImportToast(context: Context, message: String) {
 internal fun applyTrackerEnrollmentAndRefreshNotams(
     result: TrackerEnrollmentResult,
     requestNotamRefresh: () -> Unit = NotamCenter::requestImmediateRefresh,
-    requestAirspaceRefresh: () -> Unit = AirspaceCenter::requestImmediateRefresh
+    requestAirspaceRefresh: () -> Unit = AirspaceCenter::requestImmediateRefresh,
+    requestTrackReplay: () -> Unit = CaltopoClient::CheckUnreportedFiles
 ) {
     TrackerEnrollmentClient.apply(result)
     requestNotamRefresh()
     requestAirspaceRefresh()
+    requestTrackReplay()
 }
 
 internal fun resetPersistedStateAndRequestRequiredSetup(
     resetState: () -> Unit = CaltopoClient::ResetPersistedClientState,
+    resetNotamRuntimeState: () -> Unit = NotamCenter::resetRuntimeState,
     requestArchiveSelection: () -> Unit,
     requestNotamRefresh: () -> Unit = NotamCenter::requestImmediateRefresh,
     requestAirspaceRefresh: () -> Unit = AirspaceCenter::requestImmediateRefresh
 ) {
     resetState()
+    resetNotamRuntimeState()
     requestNotamRefresh()
     requestAirspaceRefresh()
     requestArchiveSelection()
@@ -555,6 +560,9 @@ fun MainScreen(
                 }
             } else {
                 CTDebug(tag, "loadConfigFileLauncher() picker closed w/o selection.")
+                if (localViewModel.overlay == OverlayState.RequestConfigFile) {
+                    localViewModel.onUIEvent(UIEvent.DismissRequested)
+                }
             }
         }
     )
@@ -790,6 +798,9 @@ fun MainScreen(
                             applyTrackerEnrollmentAndRefreshNotams(it)
                         }
                     }.onSuccess { result ->
+                        result.reauthenticationUrl?.let { url ->
+                            R2CActivity.getR2CActivity()?.beginTrackerReauthentication(url)
+                        }
                         showConfigImportToast(
                             context,
                             "Organization '${result.organization}' imported; tracker enrollment installed."

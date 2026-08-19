@@ -292,6 +292,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     @Published private(set) var heartbeatAcknowledgedAtMilliseconds: Int64 = 0
     @Published private(set) var heartbeatSequenceAcknowledged: Int64 = 0
     @Published private(set) var recommendedAppVersionCode = 0
+    @Published private(set) var reauthenticationRequiredGeneration = 0
+    @Published private(set) var reauthenticationURL: URL?
     @Published private(set) var recommendedUpdateURL: URL?
     @Published private(set) var pendingVideoStreamRequest: AppleVideoStreamViewRequest?
     @Published private(set) var pendingRecordingDownloadRequest: AppleRecordingDownloadRequest?
@@ -390,6 +392,7 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var heartbeatTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var authorizationRecoveryTask: Task<Void, Never>?
     private var observedSightings: [String: TrackerCoordinationSighting] = [:]
     private var firstSightingsSent: Set<String> = []
     private var seenVideoStreamRequestIDs: [String] = []
@@ -444,13 +447,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         let pair = AsyncStream<TrackerCoordinationEvent>.makeStream(bufferingPolicy: .bufferingNewest(256))
         events = pair.stream
         eventContinuation = pair.continuation
-        if let existing = defaults.string(forKey: "tracker.zoneID"), !existing.isEmpty {
-            zoneID = existing
-        } else {
-            let value = UUID().uuidString.lowercased()
-            defaults.set(value, forKey: "tracker.zoneID")
-            zoneID = value
-        }
+        zoneID = AppleDeviceIdentity.installationID(defaults: defaults)
         zoneName = AppleDeviceIdentity.displayName
         client = Self.makeClient(mapID: "", zoneID: zoneID, zoneName: zoneName)
         protocolState = TrackerCoordinationProtocolState(localZoneID: zoneID)
@@ -466,6 +463,14 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     var localZoneID: String { zoneID }
+
+    func requireReauthentication(at url: URL) {
+        reauthenticationURL = url
+        reauthenticationRequiredGeneration &+= 1
+        status = .unavailable
+        statusDetail = "Tracker reauthentication required"
+        stopTransport()
+    }
 
     func configureOrganizationConfig(
         snapshotProvider: @escaping () throws -> [String: Any],
@@ -545,7 +550,8 @@ final class AppleTrackerCoordinator: ObservableObject {
         standaloneR2CCoordinationEnabled: Bool,
         trackerURLPrefix: String,
         trackerAPIKey: String,
-        mapID: String
+        mapID: String,
+        forceReconnect: Bool = false
     ) {
         let normalizedURL = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKey = trackerAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -558,19 +564,21 @@ final class AppleTrackerCoordinator: ObservableObject {
             && self.trackerURLPrefix == normalizedURL
             && self.trackerAPIKey == normalizedKey
             && self.mapID == normalizedMapID
-        guard !unchanged else { return }
+        guard !unchanged || forceReconnect else { return }
         stopTransport()
         self.usePeers = usePeers
         self.standaloneR2CCoordinationEnabled = standaloneR2CCoordinationEnabled
         self.trackerURLPrefix = normalizedURL
         self.trackerAPIKey = normalizedKey
         self.mapID = normalizedMapID
-        if trackerConfigurationChanged && !normalizedURL.isEmpty && !normalizedKey.isEmpty {
+        if (trackerConfigurationChanged || forceReconnect)
+            && !normalizedURL.isEmpty && !normalizedKey.isEmpty {
             trackerKnownUnavailable = false
         } else if previouslyConfigured && (normalizedURL.isEmpty || normalizedKey.isEmpty) {
             trackerKnownUnavailable = true
         }
         client = Self.makeClient(mapID: normalizedMapID, zoneID: zoneID, zoneName: zoneName)
+        reauthenticationURL = nil
         protocolState = TrackerCoordinationProtocolState(localZoneID: zoneID)
         resetAcknowledgements()
         observedSightings.removeAll()
@@ -597,6 +605,9 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
         if normalizedMapID.isEmpty {
             statusDetail = "Connecting to tracker without an active CalTopo map"
+        }
+        if forceReconnect {
+            AppleLog.info("TrackerPeer", "Reconnecting tracker after credential refresh")
         }
         connect()
     }
@@ -725,9 +736,17 @@ final class AppleTrackerCoordinator: ObservableObject {
         request.timeoutInterval = 20
         request.setValue("RID2Caltopo/coordination", forHTTPHeaderField: "User-Agent")
         request.setValue(trackerAPIKey, forHTTPHeaderField: "X-SAR-Token")
+        request.setValue(
+            String(TrackerCoordinationClient.trackerFunctionalityRelease),
+            forHTTPHeaderField: "X-R2C-Functionality-Release"
+        )
         let socket = session.webSocketTask(with: request)
         self.socket = socket
         socket.resume()
+        // Queue the first receive immediately. Tracker can accept, send a
+        // reauthentication challenge, and close before URLSession delivers
+        // didOpen; waiting for didOpen loses that device-specific challenge.
+        startReceiveLoop(socket: socket, generation: currentGeneration)
     }
 
     private func startReceiveLoop(
@@ -768,11 +787,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     private func socketOpened(generation: UUID) {
-        guard generation == self.generation, let socket else { return }
+        guard generation == self.generation, socket != nil else { return }
         connected = true
-        // Match Android's WebSocketListener lifecycle: no reads or protocol
-        // messages are started until the transport has reported onOpen.
-        startReceiveLoop(socket: socket, generation: generation)
         let now = Self.nowMilliseconds
         protocolState.transportOpened(helloSentAtMilliseconds: now)
         firstSightingsSent.removeAll()
@@ -795,6 +811,23 @@ final class AppleTrackerCoordinator: ObservableObject {
         case let .data(value): data = value
         case let .string(value): data = Data(value.utf8)
         @unknown default: return
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let type = object["type"] as? String {
+            if type == "reauthentication_required" {
+                if let url = (object["reauthenticationUrl"] as? String)
+                    .flatMap(URL.init(string:)) {
+                    requireReauthentication(at: url)
+                }
+                return
+            }
+            if type == "upgrade_required" {
+                status = .unavailable
+                statusDetail = object["message"] as? String
+                    ?? "Tracker requires a newer functionality release"
+                stopTransport()
+                return
+            }
         }
         if handleOrganizationConfigMessage(data) || handleManagedVideoMessage(data) {
             return
@@ -883,6 +916,10 @@ final class AppleTrackerCoordinator: ObservableObject {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 60
         request.setValue(trackerAPIKey, forHTTPHeaderField: "X-SAR-Token")
+        request.setValue(
+            String(TrackerCoordinationClient.trackerFunctionalityRelease),
+            forHTTPHeaderField: "X-R2C-Functionality-Release"
+        )
         Task { @MainActor [weak self] in
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
@@ -1037,6 +1074,10 @@ final class AppleTrackerCoordinator: ObservableObject {
                     upload.httpMethod = "PUT"
                     upload.timeoutInterval = 60 * 60
                     upload.setValue(apiKey, forHTTPHeaderField: "X-SAR-Token")
+                    upload.setValue(
+                        String(TrackerCoordinationClient.trackerFunctionalityRelease),
+                        forHTTPHeaderField: "X-R2C-Functionality-Release"
+                    )
                     upload.setValue(fileURL.lastPathComponent, forHTTPHeaderField: "X-R2C-Filename")
                     upload.setValue("video/mp4", forHTTPHeaderField: "Content-Type")
                     upload.setValue(
@@ -2065,6 +2106,7 @@ final class AppleTrackerCoordinator: ObservableObject {
             status = .unavailable
             statusDetail = "Tracker unavailable (\(detail))"
             AppleLog.error("TrackerPeer", statusDetail)
+            recoverReauthenticationChallenge()
             return
         }
         socketClosed(generation: generation, detail: detail)
@@ -2087,6 +2129,44 @@ final class AppleTrackerCoordinator: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             self.reconnectTask = nil
             self.connect()
+        }
+    }
+
+    private func recoverReauthenticationChallenge() {
+        authorizationRecoveryTask?.cancel()
+        guard let baseURL = URL(string: trackerURLPrefix), !trackerAPIKey.isEmpty else { return }
+        let url = baseURL.appendingPathComponent("api/v1/organization-config/current")
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 20
+        request.setValue(trackerAPIKey, forHTTPHeaderField: "X-SAR-Token")
+        request.setValue(
+            String(TrackerCoordinationClient.trackerFunctionalityRelease),
+            forHTTPHeaderField: "X-R2C-Functionality-Release"
+        )
+        authorizationRecoveryTask = Task { @MainActor [weak self] in
+            defer { self?.authorizationRecoveryTask = nil }
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard !Task.isCancelled,
+                      let http = response as? HTTPURLResponse,
+                      let url = TrackerReauthenticationChallenge.url(
+                          fromHTTPError: data,
+                          statusCode: http.statusCode
+                      )
+                else { return }
+                self?.requireReauthentication(at: url)
+                AppleLog.info(
+                    "TrackerPeer",
+                    "Recovered reauthentication challenge after HTTP \(http.statusCode) WebSocket rejection"
+                )
+            } catch {
+                guard !Task.isCancelled else { return }
+                AppleLog.error(
+                    "TrackerPeer",
+                    "Reauthentication challenge recovery failed: \(error.localizedDescription)"
+                )
+            }
         }
     }
 
@@ -2278,6 +2358,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     private func stopTransport() {
         reconnectTask?.cancel()
         reconnectTask = nil
+        authorizationRecoveryTask?.cancel()
+        authorizationRecoveryTask = nil
         for requestID in Array(mediaPeersByRequestID.keys) {
             stopLocalMediaSession(requestID: requestID)
         }

@@ -16,6 +16,7 @@ import org.ncssar.rid2caltopo.video.anomaly.PersonRelevanceMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.RejectedExecutionException
 import kotlin.math.max
 
 data class StreamTelemetrySnapshot(
@@ -241,6 +242,8 @@ class FfmpegProbeService(
     private val personRelevanceModeByDesignator = mutableMapOf<String, PersonRelevanceMode>()
     private val cachedAnomalyDebugSummaryBySessionId = mutableMapOf<Long, String?>()
     private val lastAnomalyDebugFetchAtMsBySessionId = mutableMapOf<Long, Long>()
+    private val sourceInfoBySessionId = mutableMapOf<Long, FfmpegBridge.VideoSourceInfo>()
+    private val sourceInfoFetchPending = mutableSetOf<Long>()
     private val localPlaybackPausedByDesignator = mutableMapOf<String, Boolean>()
     private val pendingRepublishByDesignator = mutableMapOf<String, UpstreamRepublishMarker>()
     private val anomalyPauseReasonByDesignator = mutableMapOf<String, String>()
@@ -699,8 +702,43 @@ class FfmpegProbeService(
     }
 
     fun videoSourceInfo(designator: String): FfmpegBridge.VideoSourceInfo? {
-        val sessionId = activeRenderSessionId(designator) ?: return null
-        return FfmpegBridge.videoSourceInfo(sessionId)
+        val request = synchronized(stateLock) {
+            val sessionId = renderSessions[designator] ?: suspendedRenderSessions[designator]
+                ?: return@synchronized null
+            Triple(
+                sessionId,
+                sourceInfoBySessionId[sessionId],
+                !closing && sourceInfoFetchPending.add(sessionId),
+            )
+        } ?: return null
+        if (request.third) {
+            try {
+                sessionExecutionLanes.executeControl {
+                    val sourceInfo = try {
+                        FfmpegBridge.videoSourceInfo(request.first)
+                    } finally {
+                        synchronized(stateLock) {
+                            sourceInfoFetchPending.remove(request.first)
+                        }
+                    }
+                    if (sourceInfo != null) {
+                        synchronized(stateLock) {
+                            if (renderSessions[designator] == request.first ||
+                                suspendedRenderSessions[designator] == request.first ||
+                                managedRenderSessions[request.first]?.designator == designator
+                            ) {
+                                sourceInfoBySessionId[request.first] = sourceInfo
+                            }
+                        }
+                    }
+                }
+            } catch (_: RejectedExecutionException) {
+                synchronized(stateLock) {
+                    sourceInfoFetchPending.remove(request.first)
+                }
+            }
+        }
+        return request.second
     }
 
     private fun sessionIdsForDesignatorLocked(designator: String): List<Long> {
@@ -731,6 +769,8 @@ class FfmpegProbeService(
             managedRenderSessions.clear()
             auxiliaryRenderSessions.clear()
             retiringSessionIds.clear()
+            sourceInfoBySessionId.clear()
+            sourceInfoFetchPending.clear()
             telemetryByDesignator.clear()
             remoteIdCandidatesByDesignator.clear()
             renderDelayMsByDesignator.clear()
@@ -1502,6 +1542,8 @@ class FfmpegProbeService(
             }
             managedRenderSessions.remove(sessionId)
             auxiliaryRenderSessions.remove(sessionId)
+            sourceInfoBySessionId.remove(sessionId)
+            sourceInfoFetchPending.remove(sessionId)
             if (isLocalFile &&
                 eofObserved &&
                 renderSessions[designator] == null &&

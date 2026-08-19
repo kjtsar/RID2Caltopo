@@ -15,6 +15,12 @@ private struct ArtifactZoomRequest: Equatable {
     let coordinates: [MapCoordinate]
 }
 
+private struct ArtifactInspection: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String?
+}
+
 enum AppleOperationalStatusChipTone {
     case accent
     case danger
@@ -401,6 +407,7 @@ struct RIDTrackMapView: View {
     @State private var operatorAdjustedViewport = false
     @State private var pendingSnapshot: PendingClueSnapshot?
     @State private var selectedClueID: UUID?
+    @State private var selectedArtifactInspection: ArtifactInspection?
     @State private var capturingSnapshot = false
     @State private var clueError: String?
     @State private var showNotams = false
@@ -528,6 +535,13 @@ struct RIDTrackMapView: View {
             Button("OK") { mapTileNotice = nil }
         } message: {
             Text(mapTileNotice ?? "")
+        }
+        .alert(item: $selectedArtifactInspection) { artifact in
+            Alert(
+                title: Text(artifact.title),
+                message: Text(artifact.description ?? "No description is available for this map item."),
+                dismissButton: .default(Text("Close"))
+            )
         }
         .sheet(isPresented: pairingSheetPresented) {
             if let pairingStreamID {
@@ -911,6 +925,10 @@ struct RIDTrackMapView: View {
                 artifactZoomRequest: artifacts.zoomRequest,
                 operatorAdjustedViewport: $operatorAdjustedViewport,
                 onSelectClue: { selectedClueID = $0 },
+                onSelectArtifact: { title, description in
+                    guard !inset else { return }
+                    selectedArtifactInspection = ArtifactInspection(title: title, description: description)
+                },
                 onSelectAircraft: { remoteID in
                     focusedAircraftID = remoteID
                     if followFocusedDrone { operatorAdjustedViewport = false }
@@ -2388,6 +2406,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     let artifactZoomRequest: ArtifactZoomRequest?
     @Binding var operatorAdjustedViewport: Bool
     let onSelectClue: (UUID) -> Void
+    let onSelectArtifact: (String, String?) -> Void
     let onSelectAircraft: (String) -> Void
     let onOperatorViewportGesture: () -> Void
     let onLongPressTile: (Int, Int, Int) -> Void
@@ -2398,6 +2417,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             viewportMemory: viewportMemory,
             operatorAdjustedViewport: $operatorAdjustedViewport,
             onSelectClue: onSelectClue,
+            onSelectArtifact: onSelectArtifact,
             onSelectAircraft: onSelectAircraft,
             onOperatorViewportGesture: onOperatorViewportGesture,
             onLongPressTile: onLongPressTile
@@ -2423,6 +2443,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             ])
         }
         context.coordinator.installLongPress(on: map)
+        context.coordinator.installArtifactTap(on: map)
         map.onBoundsLayout = { [weak coordinator = context.coordinator] map in
             coordinator?.restoreViewportBoundsIfNeeded(on: map)
         }
@@ -2442,6 +2463,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     func updateUIView(_ map: MKMapView, context: Context) {
         context.coordinator.onSelectAircraft = onSelectAircraft
         context.coordinator.onSelectClue = onSelectClue
+        context.coordinator.onSelectArtifact = onSelectArtifact
         context.coordinator.onOperatorViewportGesture = onOperatorViewportGesture
         context.coordinator.onLongPressTile = onLongPressTile
         map.showsUserLocation = false
@@ -2519,7 +2541,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, MKMapViewDelegate {
+    final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         @Binding private var viewport: MKCoordinateRegion
         private let viewportMemory: AppleMapViewportMemory
         @Binding private var operatorAdjustedViewport: Bool
@@ -2544,6 +2566,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
         private var restoredViewportBounds = false
         private var regionChangeWasUserGesture = false
         var onSelectClue: (UUID) -> Void
+        var onSelectArtifact: (String, String?) -> Void
         var onSelectAircraft: (String) -> Void
         var onOperatorViewportGesture: () -> Void
         var onLongPressTile: (Int, Int, Int) -> Void
@@ -2553,6 +2576,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             viewportMemory: AppleMapViewportMemory,
             operatorAdjustedViewport: Binding<Bool>,
             onSelectClue: @escaping (UUID) -> Void,
+            onSelectArtifact: @escaping (String, String?) -> Void,
             onSelectAircraft: @escaping (String) -> Void,
             onOperatorViewportGesture: @escaping () -> Void,
             onLongPressTile: @escaping (Int, Int, Int) -> Void
@@ -2565,6 +2589,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
                 : nil
             initialViewportSource = pendingVisibleMapRect == nil ? .none : .preservedTransition
             self.onSelectClue = onSelectClue
+            self.onSelectArtifact = onSelectArtifact
             self.onSelectAircraft = onSelectAircraft
             self.onOperatorViewportGesture = onOperatorViewportGesture
             self.onLongPressTile = onLongPressTile
@@ -2977,6 +3002,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
                 map.addAnnotation(ArtifactAnnotation(
                     coordinate: artifact.coordinate.clCoordinate,
                     title: artifact.title,
+                    description: artifact.description,
                     symbol: artifact.symbol,
                     color: UIColor(hex: artifact.colorHex) ?? ArtifactAnnotation.defaultColor(for: artifact.symbol),
                     colorHex: artifact.colorHex
@@ -2989,7 +3015,9 @@ private struct OperationalMKMapView: UIViewRepresentable {
                         coordinates: coordinates,
                         count: coordinates.count,
                         color: UIColor(hex: artifact.colorHex) ?? .systemOrange,
-                        width: artifact.width
+                        width: artifact.width,
+                        artifactTitle: artifact.title,
+                        artifactDescription: artifact.description
                     ),
                     level: .aboveLabels
                 )
@@ -3002,7 +3030,9 @@ private struct OperationalMKMapView: UIViewRepresentable {
                         count: coordinates.count,
                         stroke: UIColor(hex: artifact.strokeHex) ?? .systemOrange,
                         fill: UIColor(hex: artifact.fillHex) ?? .systemOrange.withAlphaComponent(0.2),
-                        width: artifact.width
+                        width: artifact.width,
+                        artifactTitle: artifact.title,
+                        artifactDescription: artifact.description
                     ),
                     level: .aboveLabels
                 )
@@ -3392,6 +3422,62 @@ private struct OperationalMKMapView: UIViewRepresentable {
             }
             guard let aircraft = view.annotation as? AircraftAnnotation else { return }
             onSelectAircraft(aircraft.remoteID)
+        }
+
+        func installArtifactTap(on map: MKMapView) {
+            let tap = UITapGestureRecognizer(target: self, action: #selector(handleArtifactTap(_:)))
+            tap.cancelsTouchesInView = false
+            tap.delegate = self
+            map.addGestureRecognizer(tap)
+        }
+
+        @objc private func handleArtifactTap(_ gesture: UITapGestureRecognizer) {
+            guard gesture.state == .ended,
+                  !currentInset,
+                  let map = gesture.view as? MKMapView
+            else { return }
+            let location = gesture.location(in: map)
+            if map.annotations.contains(where: { annotation in
+                guard !(annotation is MKUserLocation),
+                      let view = map.view(for: annotation),
+                      !view.isHidden
+                else { return false }
+                return view.frame.insetBy(dx: -8, dy: -8).contains(location)
+            }) {
+                return
+            }
+            let mapPoint = MKMapPoint(map.convert(location, toCoordinateFrom: map))
+            for overlay in map.overlays.reversed() {
+                if let polygon = overlay as? StyledPolygon,
+                   let title = polygon.artifactTitle,
+                   let renderer = map.renderer(for: polygon) as? MKPolygonRenderer,
+                   renderer.path?.contains(renderer.point(for: mapPoint)) == true {
+                    onSelectArtifact(title, polygon.artifactDescription)
+                    return
+                }
+                if let line = overlay as? StyledPolyline,
+                   let title = line.artifactTitle,
+                   let renderer = map.renderer(for: line) as? MKPolylineRenderer,
+                   let path = renderer.path {
+                    let hitPath = path.copy(
+                        strokingWithWidth: max(renderer.lineWidth, 22),
+                        lineCap: .round,
+                        lineJoin: .round,
+                        miterLimit: 0
+                    )
+                    if hitPath.contains(renderer.point(for: mapPoint)) {
+                        onSelectArtifact(title, line.artifactDescription)
+                        return
+                    }
+                }
+            }
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
         }
     }
 }
@@ -3834,17 +3920,23 @@ private final class StyledPolyline: MKPolyline {
     var color: UIColor = .systemBlue
     var width: CGFloat = 3
     var layer: OperationalMapRenderLayer = .staticMap
+    var artifactTitle: String?
+    var artifactDescription: String?
 
     convenience init(
         coordinates: [CLLocationCoordinate2D],
         count: Int,
         color: UIColor,
         width: Double,
+        artifactTitle: String? = nil,
+        artifactDescription: String? = nil,
         layer: OperationalMapRenderLayer = .staticMap
     ) {
         self.init(coordinates: coordinates, count: count)
         self.color = color
         self.width = width
+        self.artifactTitle = artifactTitle
+        self.artifactDescription = artifactDescription
         self.layer = layer
     }
 }
@@ -3854,6 +3946,8 @@ private final class StyledPolygon: MKPolygon {
     var fill: UIColor = .systemOrange.withAlphaComponent(0.2)
     var width: CGFloat = 3
     var layer: OperationalMapRenderLayer = .staticMap
+    var artifactTitle: String?
+    var artifactDescription: String?
 
     convenience init(
         coordinates: [CLLocationCoordinate2D],
@@ -3861,12 +3955,16 @@ private final class StyledPolygon: MKPolygon {
         stroke: UIColor,
         fill: UIColor,
         width: Double,
+        artifactTitle: String? = nil,
+        artifactDescription: String? = nil,
         layer: OperationalMapRenderLayer = .staticMap
     ) {
         self.init(coordinates: coordinates, count: count)
         self.stroke = stroke
         self.fill = fill
         self.width = width
+        self.artifactTitle = artifactTitle
+        self.artifactDescription = artifactDescription
         self.layer = layer
     }
 }
@@ -3986,6 +4084,7 @@ private final class ArtifactAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
     let mapLayer: OperationalMapRenderLayer
     dynamic let coordinate: CLLocationCoordinate2D
     let title: String?
+    let subtitle: String?
     let systemSymbol: String
     let caltopoSymbol: String
     let color: UIColor
@@ -3994,6 +4093,7 @@ private final class ArtifactAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
     init(
         coordinate: CLLocationCoordinate2D,
         title: String,
+        description: String? = nil,
         symbol: String,
         color: UIColor,
         colorHex: String?,
@@ -4002,6 +4102,7 @@ private final class ArtifactAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
         self.mapLayer = mapLayer
         self.coordinate = coordinate
         self.title = title
+        subtitle = description
         caltopoSymbol = symbol
         systemSymbol = Self.systemSymbol(for: symbol)
         self.color = color

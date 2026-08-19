@@ -1,5 +1,44 @@
 import Foundation
 import Testing
+
+@Test func appleTrackerEnrollmentLinksOpenTheInstalledApp() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let contentView = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/ContentView.swift"),
+        encoding: .utf8
+    )
+    let enrollmentClient = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/RidMappingAdminView.swift"),
+        encoding: .utf8
+    )
+    let importer = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleOrgConfigImporter.swift"),
+        encoding: .utf8
+    )
+    let infoPlist = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/Info.plist"),
+        encoding: .utf8
+    )
+    let entitlements = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/RID2CaltopoApple.entitlements"),
+        encoding: .utf8
+    )
+
+    #expect(contentView.contains("AppleTrackerEnrollmentClient.normalizedEnrollmentURL"))
+    #expect(contentView.contains("trackerReauthenticationBrowserOpen"))
+    #expect(contentView.contains("guard !trackerReauthenticationBrowserOpen else { return }"))
+    #expect(contentView.contains("of: peerCoordinator.reauthenticationRequiredGeneration,"))
+    #expect(contentView.contains("initial: true"))
+    #expect(enrollmentClient.contains("static let appLinkScheme = \"r2cenroll\""))
+    #expect(enrollmentClient.contains("fetchManagedOrganizationConfig"))
+    #expect(enrollmentClient.contains("\"installation_id\": AppleDeviceIdentity.installationID()"))
+    #expect(importer.contains("AppleManagedOrganizationConfig.apply"))
+    #expect(infoPlist.contains("<string>r2cenroll</string>"))
+    #expect(entitlements.contains("<string>applinks:r2c-tracker.com</string>"))
+}
 @testable import R2CCore
 
 @Test func archiveFolderAgeUsesLargestRequestedWholeUnit() {
@@ -44,6 +83,128 @@ import Testing
     )
     let acknowledgement = source[ackStart.lowerBound..<ackEnd.lowerBound]
     #expect(!acknowledgement.contains("uploadRecording(request)"))
+}
+
+@Test func appleQueuesTrackerReceiveBeforeTheOpenCallback() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let source = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleTrackerCoordinator.swift"),
+        encoding: .utf8
+    )
+    let connectStart = try #require(source.range(of: "private func connect()"))
+    let receiveLoopStart = try #require(
+        source.range(of: "private func startReceiveLoop(", range: connectStart.upperBound..<source.endIndex)
+    )
+    let connect = source[connectStart.lowerBound..<receiveLoopStart.lowerBound]
+    #expect(connect.contains("socket.resume()"))
+    #expect(connect.contains("startReceiveLoop(socket: socket, generation: currentGeneration)"))
+
+    let openedStart = try #require(source.range(of: "private func socketOpened(generation:"))
+    let openedEnd = try #require(
+        source.range(of: "private func received(", range: openedStart.upperBound..<source.endIndex)
+    )
+    let opened = source[openedStart.lowerBound..<openedEnd.lowerBound]
+    #expect(!opened.contains("startReceiveLoop"))
+}
+
+@Test func trackerReauthenticationChallengeDecodesFastAPIErrorResponse() throws {
+    let data = try JSONSerialization.data(withJSONObject: [
+        "detail": [
+            "code": "reauthentication_required",
+            "reauthentication_url": "https://r2c-tracker.com/ncssar/device-reauthenticate?token=test",
+        ],
+    ])
+    #expect(
+        TrackerReauthenticationChallenge.url(fromHTTPError: data, statusCode: 403)?.absoluteString
+            == "https://r2c-tracker.com/ncssar/device-reauthenticate?token=test"
+    )
+    #expect(TrackerReauthenticationChallenge.url(fromHTTPError: data, statusCode: 500) == nil)
+    #expect(TrackerReauthenticationChallenge.url(fromHTTPError: Data(), statusCode: 403) == nil)
+}
+
+@Test func trackerEnrollmentResponseCarriesImmediateReauthenticationChallenge() throws {
+    let data = try JSONSerialization.data(withJSONObject: [
+        "credential": [
+            "state": "reauth_required",
+            "reauthentication_url": "https://r2c-tracker.com/ncssar/device-reauthenticate?token=test",
+        ],
+    ])
+    #expect(
+        TrackerReauthenticationChallenge.url(fromEnrollmentResponse: data)?.absoluteString
+            == "https://r2c-tracker.com/ncssar/device-reauthenticate?token=test"
+    )
+    let untrusted = try JSONSerialization.data(withJSONObject: [
+        "credential": [
+            "state": "reauth_required",
+            "reauthentication_url": "https://example.test/steal",
+        ],
+    ])
+    #expect(TrackerReauthenticationChallenge.url(fromEnrollmentResponse: untrusted) == nil)
+}
+
+@Test func directAppleTrackerEnrollmentRefreshesHomeProfileAndOpensReauthentication() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let source = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleOrgConfigImporter.swift"),
+        encoding: .utf8
+    )
+    let start = try #require(source.range(of: "func importTrackerEnrollment("))
+    let end = try #require(
+        source.range(of: "func importToken(", range: start.upperBound..<source.endIndex)
+    )
+    let enrollment = source[start.lowerBound..<end.lowerBound]
+    #expect(enrollment.contains("profileLifecycle.captureHome"))
+    #expect(enrollment.contains("trackerReauthenticationRequiredHandler?(url)"))
+}
+
+@Test func appleTrackerCredentialRefreshForcesCoordinatorReconnect() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let contentView = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/ContentView.swift"),
+        encoding: .utf8
+    )
+    let coordinator = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleTrackerCoordinator.swift"),
+        encoding: .utf8
+    )
+
+    #expect(contentView.contains("notams.refreshNow(location: locationProvider.lastLocation)\n                    configurePeerCoordinator(forceReconnect: true)"))
+    #expect(contentView.contains("Reauthentication completed; configuration preserved"))
+    #expect(contentView.contains("configurePeerCoordinator(forceReconnect: true)"))
+    #expect(coordinator.contains("guard !unchanged || forceReconnect else { return }"))
+    #expect(coordinator.contains("trackerConfigurationChanged || forceReconnect"))
+    #expect(coordinator.contains("reauthenticationURL = nil"))
+}
+
+@Test func appleWiFiIdentityRefreshesAfterPermissionAndLifecycleChanges() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let contentView = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/ContentView.swift"),
+        encoding: .utf8
+    )
+    let diagnostics = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleNetworkAddress.swift"),
+        encoding: .utf8
+    )
+
+    #expect(contentView.contains(".onChange(of: locationProvider.authorizationStatus)"))
+    #expect(contentView.contains("refresh(reason: .locationAuthorizationChanged)"))
+    #expect(contentView.contains("refresh(reason: .applicationBecameActive)"))
+    #expect(diagnostics.contains("self.latestPath = path"))
+    #expect(diagnostics.contains("refresh(reason: RefreshReason) async"))
+    #expect(diagnostics.contains("self.record(path: path, reason: .networkPathChanged)"))
 }
 
 @Test func managedVideoProbeQueueUsesShallowBackpressureBound() {
@@ -844,6 +1005,15 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(notices[0].title == "Temporary flight restriction")
     #expect(notices[0].altitudeBand?.ceilingLabel == "400 FT")
     #expect(OperationalNotamPolicy.chipLabel(notices: notices, configured: true, loading: false, hasError: false).contains("RESTRICTED"))
+}
+
+@Test func operationalNotamUnconfiguredLabelDoesNotImplyPendingRequest() {
+    #expect(OperationalNotamPolicy.chipLabel(
+        notices: [],
+        configured: false,
+        loading: false,
+        hasError: false
+    ) == "NOTAMs not configured")
 }
 
 @Test func operationalLandRestrictionParsesAgencyLinksAndBoundaryPolicy() throws {
@@ -1916,9 +2086,9 @@ private func proximityDrone(
     {"state":{"features":[
       {"id":"ops","properties":{"class":"Folder","title":"Operations","visible":true}},
       {"id":"hidden","properties":{"class":"Folder","title":"Hidden","visible":false}},
-      {"id":"marker","geometry":{"type":"Point","coordinates":[-104.99,39.74]},"properties":{"class":"Marker","title":"Clue","folderId":"ops","marker-symbol":"aperture","marker-color":"#FF00FF"}},
-      {"id":"line","geometry":{"type":"LineString","coordinates":[[-105,39.7],[-104.9,39.8]]},"properties":{"class":"Shape","title":"Search line","folderId":"ops","stroke":"#00FF00","stroke-width":4}},
-      {"id":"polygon","geometry":{"type":"Polygon","coordinates":[[[-105,39.7],[-104.9,39.7],[-104.9,39.8],[-105,39.7]]]},"properties":{"class":"Assignment","title":"Division A","stroke":"#FF0000","stroke-opacity":0.5,"fill":"#FF0000","fill-opacity":0.2}},
+      {"id":"marker","geometry":{"type":"Point","coordinates":[-104.99,39.74]},"properties":{"class":"Marker","title":"Clue","description":"Inspect marker","folderId":"ops","marker-symbol":"aperture","marker-color":"#FF00FF"}},
+      {"id":"line","geometry":{"type":"LineString","coordinates":[[-105,39.7],[-104.9,39.8]]},"properties":{"class":"Shape","title":"Search line","description":"Inspect line","folderId":"ops","stroke":"#00FF00","stroke-width":4}},
+      {"id":"polygon","geometry":{"type":"Polygon","coordinates":[[[-105,39.7],[-104.9,39.7],[-104.9,39.8],[-105,39.7]]]},"properties":{"class":"Assignment","title":"Division A","description":"Search the north drainage","stroke":"#FF0000","stroke-opacity":0.5,"fill":"#FF0000","fill-opacity":0.2}},
       {"id":"hidden-marker","geometry":{"type":"Point","coordinates":[-104,39]},"properties":{"class":"Marker","title":"Hidden clue","folderId":"hidden"}},
       {"id":"hidden-media","geometry":{"type":"Point","coordinates":[-104,39]},"properties":{"class":"MapMediaObject","title":"Hidden clue photo","parentId":"Marker:hidden-marker","marker-symbol":"aperture"}},
       {"id":"live","geometry":{"type":"LineString","coordinates":[[-105,39],[-104,40]]},"properties":{"class":"LiveTrack","title":"Duplicate aircraft","folderId":"ops"}}
@@ -1932,6 +2102,9 @@ private func proximityDrone(
     #expect(visible.points.map(\.title) == ["Clue"])
     #expect(snapshot.lines.map(\.title) == ["Search line"])
     #expect(snapshot.polygons.map(\.title) == ["Division A"])
+    #expect(snapshot.points.first?.description == "Inspect marker")
+    #expect(snapshot.lines.first?.description == "Inspect line")
+    #expect(snapshot.polygons.first?.description == "Search the north drainage")
     #expect(snapshot.coordinates(forItemID: "polygon").count == 4)
     #expect(snapshot.coordinates(forItemID: "missing").isEmpty)
     #expect(snapshot.polygons.first?.strokeHex == "#7FFF0000")
@@ -3684,6 +3857,10 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(hello["guid"] as? String == "zone-alpha")
     #expect(hello["appPlatform"] as? String == "ios")
     #expect((hello["appVersionCode"] as? NSNumber)?.intValue == 1)
+    #expect(
+        (hello["trackerFunctionalityRelease"] as? NSNumber)?.intValue
+            == TrackerCoordinationClient.trackerFunctionalityRelease
+    )
 
     let identity = TrackerCoordinationIdentity(
         remoteID: "DRONE1",

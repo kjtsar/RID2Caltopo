@@ -9,6 +9,7 @@ import org.ncssar.rid2caltopo.ui.MapFolderUiState
 import org.ncssar.rid2caltopo.ui.MapItemUiState
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
+import java.util.Locale
 
 private const val CALTOPO_ASSIGNMENTS_FOLDER_ID = "__caltopo_assignments__"
 private const val CALTOPO_ASSIGNMENTS_FOLDER_TITLE = "Assignments"
@@ -113,6 +114,58 @@ internal fun mapFolderUiDebugSummary(
     return (listOf("folders=${folders.size}") + folderSummaries).joinToString(separator = " | ")
 }
 
+internal fun assignmentDiagnosticSummary(
+    features: Map<String, JSONObject>,
+    hiddenFolderIds: Set<String>,
+    hiddenItemIds: Set<String>,
+    viewport: BoundingBox? = null,
+): String {
+    val assignments = features.values.mapNotNull { feature ->
+        val props = feature.optJSONObject("properties") ?: return@mapNotNull null
+        if (props.optString("class") != "Assignment") return@mapNotNull null
+        val id = feature.optString("id").ifBlank { "?" }
+        val title = artifactDisplayTitle(props, id, "Assignment")
+        val folderId = effectiveArtifactFolderId(props, "Assignment")
+        val points = artifactGeoPoints(feature)
+        val bounds = points.takeIf { it.isNotEmpty() }?.let(::boundingBoxFromPoints)
+        val visible = folderId !in hiddenFolderIds && id !in hiddenItemIds
+        val inViewport = bounds?.let { viewportBounds ->
+            viewport?.let { assignmentBoundsIntersect(it, viewportBounds) }
+        }
+        val boundsSummary = bounds?.let {
+            String.format(
+                Locale.US,
+                "%.5f,%.5f..%.5f,%.5f",
+                it.latSouth,
+                it.lonWest,
+                it.latNorth,
+                it.lonEast,
+            )
+        } ?: "none"
+        "$title($id points=${points.size} bounds=$boundsSummary visible=$visible" +
+            (inViewport?.let { " inViewport=$it" } ?: "") + ")"
+    }
+    val geometryless = assignments.count { " points=0 " in it }
+    val viewportSummary = viewport?.let {
+        String.format(
+            Locale.US,
+            " viewport=%.5f,%.5f..%.5f,%.5f",
+            it.latSouth,
+            it.lonWest,
+            it.latNorth,
+            it.lonEast,
+        )
+    }.orEmpty()
+    return "assignments=${assignments.size} geometryless=$geometryless$viewportSummary " +
+        "items=[${assignments.take(50).joinToString(separator = "; ")}]"
+}
+
+private fun assignmentBoundsIntersect(viewport: BoundingBox, assignment: BoundingBox): Boolean =
+    assignment.lonEast >= viewport.lonWest &&
+        assignment.lonWest <= viewport.lonEast &&
+        assignment.latNorth >= viewport.latSouth &&
+        assignment.latSouth <= viewport.latNorth
+
 internal fun buildArtifactOverlayState(
     features: Collection<JSONObject>,
     hiddenFolderIds: Set<String> = emptySet(),
@@ -149,6 +202,7 @@ internal fun buildArtifactOverlayState(
         if (featureId.isNotBlank() && featureId in hiddenItemIds) continue
         if (isMediaObjectWithHiddenParent(properties, featuresById, hiddenFolderIds, hiddenItemIds)) continue
         val featureTitle = artifactDisplayTitle(properties, featureId, className)
+        val featureDescription = properties?.optString("description").orEmpty().trim()
         val markerSymbol = properties?.optString("marker-symbol", "point").orEmpty().ifBlank { "point" }
         val markerColor = properties?.optString("marker-color")
         val trackLikeFeature = isTrackLikeFeature(properties, className)
@@ -171,6 +225,7 @@ internal fun buildArtifactOverlayState(
         ignoredTrackLikeFeatures += appendGeometryArtifact(
             featureId = featureId,
             featureTitle = featureTitle,
+            featureDescription = featureDescription,
             geometry = geometry,
             strokeColor = strokeColor,
             fillColor = fillColor,
@@ -409,6 +464,7 @@ private fun isTrackLikeFeature(properties: JSONObject?, className: String): Bool
 private fun appendGeometryArtifact(
     featureId: String,
     featureTitle: String,
+    featureDescription: String,
     geometry: JSONObject,
     strokeColor: Int,
     fillColor: Int,
@@ -435,7 +491,8 @@ private fun appendGeometryArtifact(
                 lng = geoPoint.longitude,
                 title = featureTitle,
                 markerSymbol = markerSymbol,
-                markerColor = markerColor
+                markerColor = markerColor,
+                description = featureDescription
             )
         }
 
@@ -446,7 +503,9 @@ private fun appendGeometryArtifact(
                 val coords = geometry.optJSONArray("coordinates") ?: return ignoredTrackLike
                 val geoPoints = geoPointsFromLine(coords)
                 if (geoPoints.isNotEmpty()) {
-                    linesOut += ArtifactLineSpec(featureId, geoPoints, strokeColor, strokeWidth, featureTitle)
+                    linesOut += ArtifactLineSpec(
+                        featureId, geoPoints, strokeColor, strokeWidth, featureTitle, featureDescription
+                    )
                 }
             }
         }
@@ -461,7 +520,9 @@ private fun appendGeometryArtifact(
                 }
                 val geoPoints = geoPointsFromLine(lineCoords)
                 if (geoPoints.isNotEmpty()) {
-                    linesOut += ArtifactLineSpec(featureId, geoPoints, strokeColor, strokeWidth, "$featureTitle[$i]")
+                    linesOut += ArtifactLineSpec(
+                        featureId, geoPoints, strokeColor, strokeWidth, "$featureTitle[$i]", featureDescription
+                    )
                 }
             }
         }
@@ -477,7 +538,8 @@ private fun appendGeometryArtifact(
                     strokeColor,
                     fillColor,
                     strokeWidth,
-                    featureTitle
+                    featureTitle,
+                    featureDescription
                 )
             }
         }
@@ -495,7 +557,8 @@ private fun appendGeometryArtifact(
                         strokeColor,
                         fillColor,
                         strokeWidth,
-                        "$featureTitle[$i]"
+                        "$featureTitle[$i]",
+                        featureDescription
                     )
                 }
             }
@@ -508,6 +571,7 @@ private fun appendGeometryArtifact(
                 ignoredTrackLike += appendGeometryArtifact(
                     featureId = featureId,
                     featureTitle = "$featureTitle[$i]",
+                    featureDescription = featureDescription,
                     geometry = nested,
                     strokeColor = strokeColor,
                     fillColor = fillColor,
@@ -557,7 +621,13 @@ internal fun artifactLogSummary(feature: JSONObject): String {
         description.length <= 48 -> " desc=\"$description\""
         else -> " desc=\"${description.take(45)}...\""
     }
-    return "id=$featureId class=$className title=\"$title\"$descriptionSummary"
+    val geometrySummary = if (className == "Assignment") {
+        val points = artifactGeoPoints(feature)
+        " geometryPoints=${points.size} zoomable=${points.isNotEmpty()}"
+    } else {
+        ""
+    }
+    return "id=$featureId class=$className title=\"$title\"$descriptionSummary$geometrySummary"
 }
 
 private fun geoPointFromLngLat(coords: JSONArray): GeoPoint? {

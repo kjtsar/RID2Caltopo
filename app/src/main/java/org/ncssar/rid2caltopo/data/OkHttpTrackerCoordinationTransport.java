@@ -8,6 +8,7 @@ import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
+import org.ncssar.rid2caltopo.BuildConfig;
 
 import java.io.EOFException;
 import java.util.concurrent.TimeUnit;
@@ -42,6 +43,8 @@ final class OkHttpTrackerCoordinationTransport implements TrackerCoordinationTra
                 .header("User-Agent", "RID2Caltopo/coordination");
         if (apiKey != null && !apiKey.isEmpty()) {
             builder.header("X-SAR-Token", apiKey);
+            builder.header("X-R2C-Functionality-Release",
+                    Integer.toString(BuildConfig.TRACKER_FUNCTIONALITY_RELEASE));
         }
         WebSocket newSocket = client.newWebSocket(builder.build(), new WebSocketListener() {
             @Override

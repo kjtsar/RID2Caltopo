@@ -23,9 +23,28 @@ struct AppleTrackerEnrollmentResult: Sendable {
     let trackerBaseURL: String
     let deviceToken: String
     let faaProxyURL: String
+    let reauthenticationURL: URL?
+}
+
+struct AppleManagedOrganizationConfigResult: @unchecked Sendable {
+    let snapshot: [String: Any]
+    let versionMs: Int64
 }
 
 enum AppleTrackerEnrollmentClient {
+    static let appLinkScheme = "r2cenroll"
+
+    static func normalizedEnrollmentURL(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isEnrollmentURL(trimmed) { return trimmed }
+        guard let wrapper = URLComponents(string: trimmed),
+              wrapper.scheme?.lowercased() == appLinkScheme,
+              let nested = wrapper.queryItems?.first(where: { $0.name == "url" })?.value,
+              isEnrollmentURL(nested)
+        else { return nil }
+        return nested.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func isEnrollmentURL(_ value: String) -> Bool {
         guard let components = URLComponents(
             string: value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,10 +90,16 @@ enum AppleTrackerEnrollmentClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(
+            String(TrackerCoordinationClient.trackerFunctionalityRelease),
+            forHTTPHeaderField: "X-R2C-Functionality-Release"
+        )
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "token": token,
             "device_name": deviceName,
             "platform": "ios",
+            "installation_id": AppleDeviceIdentity.installationID(),
+            "functionality_release": TrackerCoordinationClient.trackerFunctionalityRelease,
         ])
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -98,8 +123,41 @@ enum AppleTrackerEnrollmentClient {
             organization: designator,
             trackerBaseURL: baseURL,
             deviceToken: apiKey,
-            faaProxyURL: faaProxyURL
+            faaProxyURL: faaProxyURL,
+            reauthenticationURL: TrackerReauthenticationChallenge.url(
+                fromEnrollmentResponse: data
+            )
         )
+    }
+
+    static func fetchManagedOrganizationConfig(
+        trackerBaseURL: String,
+        deviceToken: String
+    ) async throws -> AppleManagedOrganizationConfigResult? {
+        guard let baseURL = URL(string: trackerBaseURL) else {
+            throw EnrollmentError.invalidResponse
+        }
+        var request = URLRequest(
+            url: baseURL.appendingPathComponent("api/v1/organization-config/current")
+        )
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 60
+        request.setValue(deviceToken, forHTTPHeaderField: "X-SAR-Token")
+        request.setValue(
+            String(TrackerCoordinationClient.trackerFunctionalityRelease),
+            forHTTPHeaderField: "X-R2C-Functionality-Release"
+        )
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw EnrollmentError.invalidResponse
+        }
+        if http.statusCode == 204 { return nil }
+        guard (200 ..< 300).contains(http.statusCode),
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let versionMs = (root["versionMs"] as? NSNumber)?.int64Value,
+              let snapshot = root["config"] as? [String: Any]
+        else { throw EnrollmentError.invalidResponse }
+        return AppleManagedOrganizationConfigResult(snapshot: snapshot, versionMs: versionMs)
     }
 
     enum EnrollmentError: LocalizedError {

@@ -693,7 +693,13 @@ fun StandAloneOptionsDialog(
     hasCreds: Boolean,
     onAction: () -> Unit
 ) {
-    val titleText = if (!hasNetwork) "No Network Connection" else if (loading) "Connect to Map" else "Credentials Required"
+    val titleText = if (!hasNetwork) {
+        "No Network Connection"
+    } else if (loading && hasCreds) {
+        "Connect to Map"
+    } else {
+        "Credentials Required"
+    }
     val msgText = if (!hasNetwork) {
         "Turn on your device's WiFi and connect to hotspot before continuing"
     } else if (hasCreds) {
@@ -712,7 +718,14 @@ fun StandAloneOptionsDialog(
                 ) {
                     CircularProgressIndicator(modifier = Modifier.size(40.dp))
                     Spacer(modifier = Modifier.height(16.dp))
-                    Text("Fetching Map Hierarchy...")
+                    Text(
+                        if (hasCreds) {
+                            "Fetching map hierarchy…"
+                        } else {
+                            "Waiting for CalTopo credentials. Complete reauthentication, " +
+                                "or stay offline and load credentials manually."
+                        }
+                    )
                 }
             } else {
                 Text(msgText)

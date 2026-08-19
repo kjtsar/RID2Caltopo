@@ -156,6 +156,7 @@ struct ContentView: View {
     @State private var dismissedUpdateVersionCode = 0
     @State private var pendingCredentialProfileID: String?
     @State private var showCredentialSwitchConfirmation = false
+    @State private var trackerReauthenticationBrowserOpen = false
     @AppStorage("video.captureStreams") private var captureStreams = false
 
     private var startupRoot: some View {
@@ -598,6 +599,10 @@ struct ContentView: View {
                     )
                     notams.enabled = true
                     notams.refreshNow(location: locationProvider.lastLocation)
+                    configurePeerCoordinator(forceReconnect: true)
+                }
+                orgConfigImporter.trackerReauthenticationRequiredHandler = { url in
+                    peerCoordinator.requireReauthentication(at: url)
                 }
                 ridTracks.configurePeerCoordination(
                     peerCoordinator,
@@ -782,6 +787,27 @@ struct ContentView: View {
             }
             .onOpenURL { url in
                 let rawValue = url.absoluteString
+                if url.scheme == "r2creauth" {
+                    trackerReauthenticationBrowserOpen = false
+                    if url.host == "complete" {
+                        AppleLog.info(
+                            "TrackerPeer",
+                            "Reauthentication completed; configuration preserved"
+                        )
+                        configurePeerCoordinator(forceReconnect: true)
+                    } else if url.host == "erase" {
+                        droneConfirmations.resetPersistedState()
+                        caltopoSettings.resetPersistedState()
+                        orgConfigSettings.resetPersistedState()
+                        configurePeerCoordinator()
+                    }
+                    return
+                }
+                if let enrollmentURL = AppleTrackerEnrollmentClient.normalizedEnrollmentURL(rawValue) {
+                    pendingImportToken = enrollmentURL
+                    showImportConfig = true
+                    return
+                }
                 guard AndroidConfigTokenCodec.decode(rawValue) != nil else {
                     AppleLog.error("OrgConfig", "Ignored unrecognised URL scheme payload")
                     return
@@ -862,6 +888,11 @@ struct ContentView: View {
             .onChange(of: locationProvider.statusText) { _, status in
                 AppleLog.info("Location", status)
             }
+            .onChange(of: locationProvider.authorizationStatus) { _, _ in
+                Task {
+                    await networkDiagnostics.refresh(reason: .locationAuthorizationChanged)
+                }
+            }
             .onChange(of: locationProvider.lastLocation?.timestamp) { _, _ in
                 peerCoordinator.updatePosition(locationProvider.lastLocation)
                 publishLocalDeviceMarker()
@@ -874,8 +905,12 @@ struct ContentView: View {
                 updateIdleTimerPolicy(for: phase)
                 switch phase {
                 case .active:
+                    trackerReauthenticationBrowserOpen = false
                     mediaMTX.ensureHealthy(captureStreams: captureStreams)
-                    Task { await ridTracks.setLocalDeviceMarkerPublishingEnabled(true) }
+                    Task {
+                        await networkDiagnostics.refresh(reason: .applicationBecameActive)
+                        await ridTracks.setLocalDeviceMarkerPublishingEnabled(true)
+                    }
                 case .background:
                     removeLocalDeviceMarkerInBackground()
                 case .inactive:
@@ -909,6 +944,31 @@ struct ContentView: View {
             .onChange(of: peerCoordinator.statusDetail) { _, detail in
                 AppleLog.info("TrackerPeer", detail)
                 publishLocalDeviceMarker(force: true)
+            }
+            .onChange(
+                of: peerCoordinator.reauthenticationRequiredGeneration,
+                initial: true
+            ) { _, generation in
+                guard generation > 0 else { return }
+                let managedCaltopoCleared =
+                    caltopoSettings.quarantineTrackerManagedCredentials()
+                if managedCaltopoCleared {
+                    ridTracks.configureCaltopo(
+                        caltopoSettings.configuration,
+                        trackFolderName: orgConfigSettings.trackFolder
+                    )
+                }
+                AppleLog.warning(
+                    "TrackerPeer",
+                    managedCaltopoCleared
+                        ? "Tracker access paused; Tracker-managed CalTopo credentials cleared; offline RID remains available"
+                        : "Tracker access paused; independent CalTopo credentials and offline RID remain available"
+                )
+                if let url = peerCoordinator.reauthenticationURL {
+                    guard !trackerReauthenticationBrowserOpen else { return }
+                    trackerReauthenticationBrowserOpen = true
+                    openURL(url)
+                }
             }
             .onChange(of: peerCoordinator.heartbeatAcknowledgedAtMilliseconds) { _, _ in
                 publishLocalDeviceMarker()
@@ -1895,7 +1955,7 @@ struct ContentView: View {
         return "\(currentIncidentKey)|\(currentIncidentName)|\(streamRegistry.managedPresenceRevision)|\(streams)"
     }
 
-    private func configurePeerCoordinator() {
+    private func configurePeerCoordinator(forceReconnect: Bool = false) {
         guard !AppleApplicationCleanupCenter.shared.isShutdownRequested else { return }
         let arguments = ProcessInfo.processInfo.arguments
         peerCoordinator.configureOrganizationConfig(
@@ -1923,7 +1983,8 @@ struct ContentView: View {
                 orgConfigSettings.standaloneR2CCoordinationEnabled,
             trackerURLPrefix: argumentValue("--tracker-url") ?? orgConfigSettings.trackerURLPrefix,
             trackerAPIKey: argumentValue("--tracker-token") ?? orgConfigSettings.trackerAPIKey,
-            mapID: argumentValue("--tracker-map") ?? caltopoSettings.mapID
+            mapID: argumentValue("--tracker-map") ?? caltopoSettings.mapID,
+            forceReconnect: forceReconnect
         )
         publishLocalDeviceMarker(force: true)
     }

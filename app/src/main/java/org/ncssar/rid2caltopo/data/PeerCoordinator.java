@@ -37,6 +37,8 @@ public interface PeerCoordinator {
     }
 
     void start(@NonNull String mapId, @NonNull String guid, @NonNull String name, @Nullable String brokerUri);
+    default void resumeAfterReauthentication() {
+    }
     void stop();
     void onLiveTrackCreated(@NonNull LiveTrackOwnerDelegate liveTrack,
                             @NonNull CtDroneSpec droneSpec,

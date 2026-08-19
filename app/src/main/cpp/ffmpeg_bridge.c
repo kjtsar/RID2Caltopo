@@ -1481,14 +1481,11 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
                                       bool allow_person_offer) {
     anomaly_result_t result;
     memset(&result, 0, sizeof(result));
-    anomaly_config_t cfg;
-    if (cfg_override != NULL) {
-        cfg = *cfg_override;
-    } else {
-        pthread_mutex_lock(&g_lock);
-        cfg = session->anomaly_cfg;
-        pthread_mutex_unlock(&g_lock);
-    }
+    // Callers snapshot configuration before acquiring anomaly_lock.  Falling
+    // back to g_lock here would invert that hierarchy.
+    anomaly_config_t cfg = cfg_override != NULL
+            ? *cfg_override
+            : (anomaly_config_t) {0};
     int64_t started_at_us = monotonic_us();
     trace_begin_section("RID2C anomaly_process_frame");
     bool use_raw_overlay_draw =
@@ -1983,6 +1980,13 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                                uint8_t *rgba,
                                int rgba_stride,
                                int64_t source_ts_us) {
+    anomaly_config_t cfg_snapshot;
+    if (cfg_override == NULL) {
+        pthread_mutex_lock(&g_lock);
+        cfg_snapshot = session->anomaly_cfg;
+        pthread_mutex_unlock(&g_lock);
+        cfg_override = &cfg_snapshot;
+    }
     if (session->anomaly_lock_ready) {
         pthread_mutex_lock(&session->anomaly_lock);
     }
@@ -2215,6 +2219,20 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
     if (session == NULL || session_stopping(session) || !frame_looks_scalable(decoded)) return NULL;
     if (!anomaly_processing_enabled(session)) return NULL;
 
+    // Snapshot global configuration before taking anomaly_lock.  The global lock is
+    // the outermost FFmpeg session lock; acquiring it while holding a per-session
+    // lock can deadlock surface/control operations that use the opposite order.
+    anomaly_config_t cfg_override;
+    pthread_mutex_lock(&g_lock);
+    cfg_override = session->anomaly_cfg;
+    pthread_mutex_unlock(&g_lock);
+    if (frame_stride_override > 0) {
+        cfg_override.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
+        cfg_override.frame_stride = frame_stride_override;
+        cfg_override.adaptive_min_stride_frames = frame_stride_override;
+        cfg_override.adaptive_max_stride_frames = frame_stride_override;
+    }
+
     // The AD worker and render thread share these conversion resources. Keep
     // reconfiguration, RGBA analysis, and overlay cloning in one critical section.
     bool locked = session->anomaly_lock_ready;
@@ -2224,13 +2242,6 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
     ensure_anomaly_rgba_resources(session, decoded->width, decoded->height, decoded->format);
     if (session->anomaly_sws == NULL || session->anomaly_rgba_frame == NULL ||
         session->anomaly_rgba_frame->data[0] == NULL || session->anomaly_rgba_frame->linesize[0] == 0) {
-        if (locked) {
-            pthread_mutex_unlock(&session->anomaly_lock);
-        }
-        return NULL;
-    }
-
-    if (session_stopping(session)) {
         if (locked) {
             pthread_mutex_unlock(&session->anomaly_lock);
         }
@@ -2248,22 +2259,9 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
             session->anomaly_rgba_frame->linesize);
     trace_end_section();
 
-    anomaly_config_t cfg_override;
-    anomaly_config_t *cfg_override_ptr = NULL;
-    if (frame_stride_override > 0) {
-        pthread_mutex_lock(&g_lock);
-        cfg_override = session->anomaly_cfg;
-        pthread_mutex_unlock(&g_lock);
-        cfg_override.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
-        cfg_override.frame_stride = frame_stride_override;
-        cfg_override.adaptive_min_stride_frames = frame_stride_override;
-        cfg_override.adaptive_max_stride_frames = frame_stride_override;
-        cfg_override_ptr = &cfg_override;
-    }
-
     bool frame_annotated = analyze_rgba_frame_locked(
             session,
-            cfg_override_ptr,
+            &cfg_override,
             decoded->width,
             decoded->height,
             session->anomaly_rgba_frame->data[0],
@@ -2320,7 +2318,7 @@ static bool apply_overlay_to_decoded_frame(ffmpeg_session_t *session,
         }
         return false;
     }
-    if (session_stopping(session) || !frame_looks_scalable(decoded)) {
+    if (!frame_looks_scalable(decoded)) {
         if (locked) {
             pthread_mutex_unlock(&session->anomaly_lock);
         }
@@ -2336,7 +2334,7 @@ static bool apply_overlay_to_decoded_frame(ffmpeg_session_t *session,
         }
         return false;
     }
-    if (session_stopping(session) || !frame_looks_scalable(decoded)) {
+    if (!frame_looks_scalable(decoded)) {
         if (locked) {
             pthread_mutex_unlock(&session->anomaly_lock);
         }
@@ -4076,7 +4074,9 @@ static int render_queue_tail_index(const ffmpeg_session_t *session) {
 static bool enqueue_render_packet_locked(ffmpeg_session_t *session,
                                          render_queue_slot_t *packet) {
     if (session == NULL || packet == NULL || packet->frame == NULL) return false;
-    if (session->render_thread_stop || session_stopping(session)) return false;
+    // render_thread_stop is protected by render_lock.  Calling
+    // session_stopping() here would acquire g_lock in the reverse order.
+    if (session->render_thread_stop) return false;
     if (!ensure_render_queue_capacity(session, session->render_queue_depth + 1)) return false;
     int tail_idx = render_queue_tail_index(session);
     session->render_queue[tail_idx] = *packet;
@@ -4110,7 +4110,7 @@ static bool enqueue_render_frame(ffmpeg_session_t *session,
                                  int64_t generation_id,
                                  int64_t source_ts_us,
                                  int64_t enqueued_at_ms) {
-    if (session == NULL || session_stopping(session) || !frame_looks_queueable(decoded)) {
+    if (session == NULL || session->render_thread_stop || !frame_looks_queueable(decoded)) {
         if (session != NULL && session->anomaly_troubleshooting_debug) {
             ct_warn(TAG,
                     "enqueue_render_frame dropped during shutdown/invalid frame id=%lld designator=%s decoded=%p w=%d h=%d fmt=%d data0=%p",
@@ -4249,7 +4249,9 @@ static bool enqueue_ad_input_frame_locked(ffmpeg_session_t *session,
                                           int64_t generation_id,
                                           int64_t source_ts_us,
                                           int64_t enqueued_at_ms) {
-    if (session == NULL || session->ad_thread_stop || session_stopping(session) ||
+    // ad_thread_stop is protected by ad_lock.  Do not call session_stopping()
+    // here: it takes g_lock and would invert the global -> per-session hierarchy.
+    if (session == NULL || session->ad_thread_stop ||
         !frame_looks_queueable(decoded)) {
         return false;
     }
@@ -4517,8 +4519,7 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
     bool local_ad_sync_ready = false;
     bool local_playback_paused = false;
     bool target_color_selected = false;
-    if (local_file_source) {
-        pthread_mutex_lock(&g_lock);
+    if (local_file_source && pthread_mutex_trylock(&g_lock) == 0) {
         local_ad_enabled = anomaly_processing_enabled_locked(session);
         local_ad_thread_started = session->ad_thread_started;
         local_ad_sync_ready = session->ad_sync_ready;
@@ -4821,12 +4822,15 @@ static void *ad_thread_main(void *arg) {
         int queue_depth_before_dequeue = 0;
 
         pthread_mutex_lock(&session->ad_lock);
-        while (session_running(session) &&
-               !session->ad_thread_stop &&
+        // The stop flag is protected by ad_lock and is signalled by nativeStop.
+        // Never call session_running() while holding ad_lock: surface detach holds
+        // g_lock before clearing this queue, so that reverse order deadlocks both
+        // workers and eventually the Android main thread.
+        while (!session->ad_thread_stop &&
                session->ad_input_queue_depth <= 0) {
             render_cond_timed_wait_ms(&session->ad_cond, &session->ad_lock, 20);
         }
-        if (!session_running(session) || session->ad_thread_stop) {
+        if (session->ad_thread_stop) {
             pthread_mutex_unlock(&session->ad_lock);
             break;
         }
@@ -7532,12 +7536,6 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStop(
     }
 
     session->running = false;
-    if (session->is_render) {
-#if HAVE_FFMPEG && HAVE_SWSCALE
-        session->ad_thread_stop = true;
-        session->render_thread_stop = true;
-#endif
-    }
     pthread_t thread = session->thread;
     pthread_mutex_unlock(&g_lock);
 
@@ -7549,11 +7547,13 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStop(
 #if HAVE_FFMPEG && HAVE_SWSCALE
     if (session->is_render && session->ad_sync_ready) {
         pthread_mutex_lock(&session->ad_lock);
+        session->ad_thread_stop = true;
         pthread_cond_signal(&session->ad_cond);
         pthread_mutex_unlock(&session->ad_lock);
     }
     if (session->is_render && session->render_sync_ready) {
         pthread_mutex_lock(&session->render_lock);
+        session->render_thread_stop = true;
         pthread_cond_signal(&session->render_cond);
         pthread_mutex_unlock(&session->render_lock);
     }

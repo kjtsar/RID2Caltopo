@@ -23,7 +23,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 16
+    const val SCHEMA_VERSION = 17
 
     internal data class LandRestrictionDefaults(
         val enabled: Boolean,
@@ -320,6 +320,9 @@ object AppConfigStore {
             config.caltopoCredentials.credentialId,
             config.caltopoCredentials.credentialSecret
         )
+        state.caltopoCredentialOrigin = config.caltopoCredentialOrigin.ifBlank {
+            CaltopoClient.CALTOPO_CREDENTIAL_ORIGIN_UNKNOWN
+        }
         state.newTrackDelayInSeconds = if (config.newTrackDelaySeconds > 0) config.newTrackDelaySeconds else 30
         state.maxFlatlineToneDurationInSeconds = when {
             config.schemaVersion < 10 &&
@@ -508,6 +511,11 @@ object AppConfigStore {
                     .setCredentialId(activeProfile.credentials.credentialId ?: "")
                     .setCredentialSecret(activeProfile.credentials.credentialSecret ?: "")
                     .build()
+            )
+            .setCaltopoCredentialOrigin(
+                state.caltopoCredentialOrigin?.ifBlank {
+                    CaltopoClient.CALTOPO_CREDENTIAL_ORIGIN_UNKNOWN
+                } ?: CaltopoClient.CALTOPO_CREDENTIAL_ORIGIN_UNKNOWN
             )
             .setActiveCaltopoProfileId(activeProfile.profileId)
 

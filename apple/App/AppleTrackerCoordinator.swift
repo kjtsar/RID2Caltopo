@@ -1248,13 +1248,6 @@ final class AppleTrackerCoordinator: ObservableObject {
         let approvedSessionIDs = Set(approvedVideoStreamRequests.values.map {
             $0.request.streamSessionId
         })
-        for sessionID in approvedSessionIDs {
-            if liveSessionIDs.contains(sessionID) {
-                sourceEndGraceTasks.removeValue(forKey: sessionID)?.cancel()
-            } else {
-                scheduleSourceEndAfterRecoveryGrace(sessionID: sessionID)
-            }
-        }
         var currentSources: [String: AppleVideoFrameSource] = [:]
         managedVideoIncidentName = incidentName.trimmingCharacters(
             in: .whitespacesAndNewlines
@@ -1340,6 +1333,19 @@ final class AppleTrackerCoordinator: ObservableObject {
         managedVideoRecordingsBySessionID = Dictionary(
             uniqueKeysWithValues: recordings.map { ($0.sessionId, $0) }
         )
+        let unavailableApprovedSessionIDs = ManagedVideoPresencePolicy
+            .unavailableApprovedSessionIDs(
+                approvedSessionIDs: approvedSessionIDs,
+                liveSessionIDs: liveSessionIDs,
+                recordingSessionIDs: Set(managedVideoRecordingsBySessionID.keys)
+            )
+        for sessionID in approvedSessionIDs {
+            if unavailableApprovedSessionIDs.contains(sessionID) {
+                scheduleSourceEndAfterRecoveryGrace(sessionID: sessionID)
+            } else {
+                sourceEndGraceTasks.removeValue(forKey: sessionID)?.cancel()
+            }
+        }
         updatedStreams += recordings.map { recording in
             let previous = managedVideoStreams.first {
                 $0.sessionId == recording.sessionId
@@ -2301,10 +2307,28 @@ final class AppleTrackerCoordinator: ObservableObject {
                 tabletName: AppleDeviceIdentity.displayName,
                 streamSessionID: stream.sessionId
             )
+        let cameraTelemetry = managedVideoSourcesBySessionID[stream.sessionId]?
+            .freshDJICameraTelemetry()
         return CaltopoCameraMetadata(
             externalURL: tabletURL,
-            thumbnailURL: thumbnailURL
+            thumbnailURL: thumbnailURL,
+            azimuthDegrees: cameraTelemetry?.cameraAzimuthDegrees,
+            tiltDegrees: cameraTelemetry?.tiltDegrees,
+            horizontalFovDegrees: cameraTelemetry?.horizontalFovDegrees,
+            verticalFovDegrees: cameraTelemetry?.verticalFovDegrees
         )
+    }
+
+    func djiCameraTelemetry(droneDesignator: String) -> AppleDJICameraTelemetry? {
+        let normalized = droneDesignator.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              let stream = managedVideoStreams.first(where: {
+                  $0.mediaKind == "live" &&
+                  $0.droneDesignator.trimmingCharacters(in: .whitespacesAndNewlines)
+                      .localizedCaseInsensitiveCompare(normalized) == .orderedSame
+              })
+        else { return nil }
+        return managedVideoSourcesBySessionID[stream.sessionId]?.freshDJICameraTelemetry()
     }
 
     func capturedVideoURL(

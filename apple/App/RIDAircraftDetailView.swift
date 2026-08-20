@@ -253,8 +253,8 @@ final class AppleDroneConfirmationStore: ObservableObject {
                 return (remoteID, identity)
             })
         }
-        // Ignore is scoped to the current active flight, matching Android. Older Apple
-        // builds persisted this set and could therefore suppress confirmation forever.
+        // Save and Ignore are scoped to this app session. They intentionally survive a
+        // temporary RID track timeout, but are not persisted across app launches.
         defaults.removeObject(forKey: Self.ignoredRemoteIDsDefaultsKey)
     }
 
@@ -266,16 +266,14 @@ final class AppleDroneConfirmationStore: ObservableObject {
         sessionIdentities[remoteID] != nil || peerIdentities[remoteID] != nil
     }
 
-    /// Matches Android's current-flight confirmation lifecycle: prompt once for
-    /// every newly active flight, including known aircraft, and forget that
-    /// flight's session state after the aircraft becomes inactive.
+    /// Prompt once per aircraft until the operator Saves or Ignores it. A temporary RID
+    /// outage may remove an active track while matching video/SEI remains live, so an
+    /// inactive transition must not erase either operator decision.
     func reconcileActiveFlights(_ orderedRemoteIDs: [String]) -> String? {
         let currentRemoteIDs = Set(orderedRemoteIDs.filter { !$0.isEmpty })
         let endedRemoteIDs = activeRemoteIDs.subtracting(currentRemoteIDs)
         for remoteID in endedRemoteIDs {
-            sessionIdentities.removeValue(forKey: remoteID)
             promptedRemoteIDs.remove(remoteID)
-            ignoredRemoteIDs.remove(remoteID)
         }
         activeRemoteIDs = currentRemoteIDs
 
@@ -301,7 +299,7 @@ final class AppleDroneConfirmationStore: ObservableObject {
         peerIdentities.removeValue(forKey: remoteID)
         AppleLog.info(
             "DroneConfirmation",
-            "Ignored remoteId=\(remoteID) currentFlightOnly=true caltopoSuppressed=true"
+            "Ignored remoteId=\(remoteID) sessionRetained=true caltopoSuppressed=true"
         )
     }
 
@@ -454,7 +452,7 @@ struct DroneConfirmationView: View {
                     }
                 }
                 Section {
-                    Text("Matching Android, all three fields are required. Save keeps the local identity for this session and broadcasts it when tracker coordination is configured. Ignore suppresses this Remote ID and its CalTopo track for the current active flight; a later flight will ask again.")
+                    Text("Matching Android, all three fields are required. Save keeps the local identity for this session and broadcasts it when tracker coordination is configured. Ignore suppresses this Remote ID and its CalTopo track for this session. You can still reopen the aircraft details to change either decision.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

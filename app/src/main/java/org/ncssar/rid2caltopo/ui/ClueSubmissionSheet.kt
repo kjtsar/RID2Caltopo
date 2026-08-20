@@ -214,11 +214,12 @@ fun ClueSheetContent (
             Text(
                 text = String.format(
                     Locale.US,
-                    "Drone location (%s): %s, alt %.0f ft",
+                    "Drone location (%s): %s, alt %.0f ft (%s)",
                     coordinateDisplayFormat.label,
                     CoordinateFormatter.format(clue.droneLat, clue.droneLng, coordinateDisplayFormat)
                         .removePrefix("loc:"),
-                    clue.droneAlt * 3.28084
+                    clue.droneAlt * 3.28084,
+                    clue.aircraftPositionSourceLabel,
                 ),
                 style = MaterialTheme.typography.bodySmall
             )
@@ -241,6 +242,11 @@ fun ClueSheetContent (
                             String.format(Locale.US, "AGL %.0f ft", it * 3.28084)
                         } ?: "AGL unavailable"
                     )
+                    clue.aglSourceLabel?.let {
+                        append(" (")
+                        append(it)
+                        append(")")
+                    }
                 },
                 style = MaterialTheme.typography.bodySmall
             )
@@ -267,12 +273,12 @@ fun ClueSheetContent (
                 Slider(
                     value = clue.gimbalAngleDeg.toFloat(),
                     onValueChange = { onGimbalAngleChange(it.toDouble()) },
-                    valueRange = -90f..0f,
+                    valueRange = -90f..90f,
                     steps = 89,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "-90° = straight down. 0° = horizon.",
+                    text = "-90° = straight down. 0° = horizon. Positive angles look upward.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }

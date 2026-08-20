@@ -342,11 +342,17 @@ fun StreamTile(
 
     fun requestClueCapture(reason: String) {
         if (!tileInteractionsEnabled || isLocalPlayback) return
+        CTDebug(
+            tag,
+            "Clue capture requested designator=$streamDesignator reason=$reason " +
+                "focused=$currentIsFocused state=$streamState renderedFrames=$renderedFrameCount"
+        )
         if (!currentIsFocused) {
             viewModel.ensureFocus(streamDesignator)
         }
         if (!viewModel.hasPairedTelemetry(streamDesignator)) {
-            CaltopoClient.ShowToast("Long-press to pair with a drone before submitting clue.")
+            CTDebug(tag, "Clue capture unavailable for $streamDesignator: no active paired telemetry.")
+            CaltopoClient.ShowToast("Clue unavailable: no current paired drone location.")
             return
         }
         if (captureClueSnapshot(reason)) {

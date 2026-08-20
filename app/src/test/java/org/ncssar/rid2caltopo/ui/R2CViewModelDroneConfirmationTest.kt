@@ -94,7 +94,7 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
-    fun trackerConfirmationDoesNotSuppressAfterTrackerLifecycleEnds() {
+    fun trackerConfirmationRemainsSuppressedAfterBriefTrackerLifecycleGap() {
         val remoteId = "DRONEREUSE"
         val drone = activeDrone(remoteId, waypointTimestampMsec = 5678L)
 
@@ -117,7 +117,7 @@ class R2CViewModelDroneConfirmationTest {
         viewModel.onDroneSpecsChanged(emptyList())
         viewModel.onDroneSpecsChanged(listOf(drone))
 
-        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        assertNull(viewModel.pendingDroneConfirmation.value)
     }
 
     @Test
@@ -254,7 +254,7 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
-    fun localTrackPointPublishesDroneToMainScreenList() {
+    fun savedSessionIdentitySuppressesPanelWhenTrackPointPublishesDrone() {
         val remoteId = "DRONESCREEN"
         CaltopoClient.SaveDroneSpecConfirmation(
             remoteId,
@@ -285,7 +285,7 @@ class R2CViewModelDroneConfirmationTest {
         )
 
         assertEquals(remoteId, viewModel.drones.value.single().remoteId)
-        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        assertNull(viewModel.pendingDroneConfirmation.value)
     }
 
     @Test
@@ -338,7 +338,7 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
-    fun localStandaloneSaveStaysSuppressedUntilTrackFinished() {
+    fun localStandaloneSaveStaysSuppressedAfterRidTrackTimeout() {
         val remoteId = "DRONESTANDALONE"
         val drone = activeDrone(remoteId, waypointTimestampMsec = 91011L)
         val viewModel = R2CViewModel(SimpleTimer())
@@ -364,11 +364,18 @@ class R2CViewModelDroneConfirmationTest {
         CaltopoLiveTrack.NotifyLocalTrackFinished(drone, "test track finished")
         viewModel.onDroneSpecsChanged(listOf(drone))
 
-        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        assertNull(viewModel.pendingDroneConfirmation.value)
+
+        CaltopoClient.ClearCurrentPeerDroneConfirmation(remoteId)
+        val recreatedViewModel = R2CViewModel(SimpleTimer())
+        recreatedViewModel.onDroneConfirmationCandidate(CtDroneSpec(remoteId))
+
+        assertTrue(CaltopoClient.IsSessionDroneConfirmed(remoteId))
+        assertNull(recreatedViewModel.pendingDroneConfirmation.value)
     }
 
     @Test
-    fun localTrackFinishedClearsPromptLatchEvenBeforeDroneListGoesEmpty() {
+    fun localTrackFinishedRetainsSavedDecisionWhenRidReturns() {
         val remoteId = "DRONETRACKDONE"
         val drone = activeDrone(remoteId, waypointTimestampMsec = 121314L)
         val viewModel = R2CViewModel(SimpleTimer())
@@ -386,8 +393,25 @@ class R2CViewModelDroneConfirmationTest {
         CaltopoLiveTrack.NotifyLocalTrackFinished(drone, "test track finished")
         viewModel.onDroneSpecsChanged(listOf(drone))
 
+        assertNull(viewModel.pendingDroneConfirmation.value)
+    }
+
+    @Test
+    fun localTrackFinishedRetainsIgnoreDecisionWhenRidReturns() {
+        val remoteId = "DRONEIGNOREDTIMEOUT"
+        val drone = activeDrone(remoteId, waypointTimestampMsec = 131415L)
+        val viewModel = R2CViewModel(SimpleTimer())
+
+        viewModel.onDroneSpecsChanged(listOf(drone))
         assertNotNull(viewModel.pendingDroneConfirmation.value)
-        assertEquals(remoteId, viewModel.pendingDroneConfirmation.value?.remoteId)
+        viewModel.markPendingDroneConfirmationUnknown()
+        assertNull(viewModel.pendingDroneConfirmation.value)
+
+        CaltopoLiveTrack.NotifyLocalTrackFinished(drone, "test track finished")
+        viewModel.onDroneSpecsChanged(emptyList())
+        viewModel.onDroneSpecsChanged(listOf(drone))
+
+        assertNull(viewModel.pendingDroneConfirmation.value)
     }
 
     @Test

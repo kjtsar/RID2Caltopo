@@ -28,11 +28,45 @@ class LocalMapMarkerTest {
         assertEquals(listOf("one"), markers.map { it.id })
     }
 
-    private fun localMarker(id: String, title: String): LocalMapMarker =
+    @Test
+    fun localMapMarkerForArtifact_matchesTheOverlappingCopyByTitleAndPosition() {
+        val markers = listOf(
+            localMarker(id = "near", title = "West", lat = 39.1527405, lng = -121.1332937),
+            localMarker(id = "far", title = "west", lat = 39.1535000, lng = -121.1340000),
+        )
+
+        val match = localMapMarkerForArtifact(
+            markers = markers,
+            artifactTitle = " west ",
+            artifactLat = 39.1527406,
+            artifactLng = -121.1332936,
+        )
+
+        assertEquals("near", match?.id)
+    }
+
+    @Test
+    fun localMapMarkerForArtifact_rejectsANameOnlyMatchAtAnotherLocation() {
+        val match = localMapMarkerForArtifact(
+            markers = listOf(localMarker(id = "far", title = "West")),
+            artifactTitle = "West",
+            artifactLat = 40.0,
+            artifactLng = -122.0,
+        )
+
+        assertEquals(null, match)
+    }
+
+    private fun localMarker(
+        id: String,
+        title: String,
+        lat: Double = 39.153,
+        lng: Double = -121.132,
+    ): LocalMapMarker =
         LocalMapMarker(
             id = id,
-            lat = 39.153,
-            lng = -121.132,
+            lat = lat,
+            lng = lng,
             alt = 102.0,
             title = title,
             description = "",

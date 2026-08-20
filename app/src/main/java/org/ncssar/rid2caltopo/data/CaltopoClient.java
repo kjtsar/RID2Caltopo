@@ -464,6 +464,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static boolean PendingDroneSpecUpdate = false;
     private static boolean NotifySettingsChangedFlag;
     private static final Set<String> SessionUnknownDroneRemoteIds = new HashSet<>();
+    private static final Set<String> SessionConfirmedDroneRemoteIds = new HashSet<>();
     private static final Set<String> CurrentPeerConfirmedDroneRemoteIds = new HashSet<>();
 
     @NonNull
@@ -2660,6 +2661,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void ResetPersistedClientState() {
         Ccstate = new ClientClassState();
         SessionUnknownDroneRemoteIds.clear();
+        SessionConfirmedDroneRemoteIds.clear();
         CurrentPeerConfirmedDroneRemoteIds.clear();
         DebugLevel = DebugLevelDebug;
         ClearDebugTagFilter();
@@ -2678,6 +2680,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     ) {
         ClientClassState ccs = GetState();
         if (RejectNonCanonicalRemoteId("SaveDroneSpecConfirmation()", remoteId)) return;
+        SessionConfirmedDroneRemoteIds.add(remoteId);
         CurrentPeerConfirmedDroneRemoteIds.add(remoteId);
         String trimmedOrg = org.trim();
         String trimmedModel = model.trim();
@@ -2724,6 +2727,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     ) {
         ClientClassState ccs = GetState();
         if (RejectNonCanonicalRemoteId("ApplyPeerDroneSpecConfirmation()", remoteId)) return;
+        SessionConfirmedDroneRemoteIds.add(remoteId);
         CurrentPeerConfirmedDroneRemoteIds.add(remoteId);
 
         String trimmedOrg = org.trim();
@@ -2825,6 +2829,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static boolean IsSessionUnknownDrone(@NonNull String remoteId) {
         if (RejectNonCanonicalRemoteId("IsSessionUnknownDrone()", remoteId)) return false;
         return SessionUnknownDroneRemoteIds.contains(remoteId);
+    }
+
+    public static boolean IsSessionDroneConfirmed(@NonNull String remoteId) {
+        if (RejectNonCanonicalRemoteId("IsSessionDroneConfirmed()", remoteId)) return false;
+        return SessionConfirmedDroneRemoteIds.contains(remoteId);
     }
 
     public static boolean IsCurrentPeerDroneConfirmed(@NonNull String remoteId) {

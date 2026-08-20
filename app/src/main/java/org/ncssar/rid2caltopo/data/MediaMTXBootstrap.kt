@@ -31,8 +31,12 @@ object MediaMTXBootstrap {
                     StreamRegistry.onStreamError(event.path, event.reason, event.publisherConnId)
 
                 is MediaMTXEvent.RtmpSessionClosed -> {}
-                is MediaMTXEvent.RtmpPublishDiagnostic ->
+                is MediaMTXEvent.RtmpPublishDiagnostic -> {
                     logRtmpPublishDiagnostic(event)
+                    if (shouldStopStreamForRtmpDiagnostic(event)) {
+                        StreamRegistry.onStreamStopped(event.path, event.publisherConnId)
+                    }
+                }
 
                 is MediaMTXEvent.ServerStarted ->
                     MediaMTXStatus.onServerStarted(event.version)
@@ -50,8 +54,12 @@ object MediaMTXBootstrap {
                 is MediaMTXEvent.StreamStopped ->
                     StreamRegistry.onStreamStopped(event.path, event.publisherConnId)
 
-                is MediaMTXEvent.RtmpPublishDiagnostic ->
+                is MediaMTXEvent.RtmpPublishDiagnostic -> {
                     logRtmpPublishDiagnostic(event)
+                    if (shouldStopStreamForRtmpDiagnostic(event)) {
+                        StreamRegistry.onStreamStopped(event.path, event.publisherConnId)
+                    }
+                }
 
                 else -> {}
             }
@@ -75,3 +83,6 @@ internal fun shouldApplyStructuredStreamLifecycleEvent(event: MediaMTXEvent): Bo
         is MediaMTXEvent.StreamStopped -> !event.publisherConnId.isNullOrBlank()
         else -> true
     }
+
+internal fun shouldStopStreamForRtmpDiagnostic(event: MediaMTXEvent.RtmpPublishDiagnostic): Boolean =
+    event.phase == "publisher_inactive" && !event.publisherConnId.isNullOrBlank()

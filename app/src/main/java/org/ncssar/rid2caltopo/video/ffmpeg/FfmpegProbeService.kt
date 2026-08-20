@@ -29,6 +29,12 @@ data class StreamTelemetrySnapshot(
     val gimbalPitchDeg: Double? = null,
     val cameraYawDeg: Double? = null,
     val headingDeg: Double? = null,
+    val horizontalFovDeg: Double? = null,
+    val verticalFovDeg: Double? = null,
+    val djiAttitudeAnglesDeg: List<Double> = emptyList(),
+    val djiRelativeNorthMmRaw: Int? = null,
+    val djiRelativeEastMmRaw: Int? = null,
+    val djiRelativeDownMmRaw: Int? = null,
     val latestRemoteId: String? = null,
     val remoteIdCandidates: List<String> = emptyList(),
 )
@@ -98,6 +104,13 @@ object FfmpegTelemetryReducer {
             gimbalPitchDeg = incoming.gimbalPitchDeg ?: existing?.gimbalPitchDeg,
             cameraYawDeg = incoming.cameraYawDeg ?: existing?.cameraYawDeg,
             headingDeg = incoming.headingDeg ?: existing?.headingDeg,
+            horizontalFovDeg = incoming.horizontalFovDeg ?: existing?.horizontalFovDeg,
+            verticalFovDeg = incoming.verticalFovDeg ?: existing?.verticalFovDeg,
+            djiAttitudeAnglesDeg = incoming.djiAttitudeAnglesDeg.takeIf { it.size == 9 }
+                ?: existing?.djiAttitudeAnglesDeg.orEmpty(),
+            djiRelativeNorthMmRaw = incoming.djiRelativeNorthMmRaw ?: existing?.djiRelativeNorthMmRaw,
+            djiRelativeEastMmRaw = incoming.djiRelativeEastMmRaw ?: existing?.djiRelativeEastMmRaw,
+            djiRelativeDownMmRaw = incoming.djiRelativeDownMmRaw ?: existing?.djiRelativeDownMmRaw,
         )
         val candidates = LinkedHashSet(existingCandidates)
         val addedRemoteId = incoming.remoteId?.takeIf { candidates.add(it) }
@@ -210,6 +223,7 @@ private data class RuntimeSnapshotSeed(
 class FfmpegProbeService(
     private val onLocalPlaybackEnded: (String) -> Unit = {},
     private val onLocalPlaybackEof: (String) -> Unit = {},
+    private val onLiveFrame: (String, Long) -> Unit = { _, _ -> },
 ) {
     private val tag = "FfmpegProbeService"
     private val recentReaderWaitPenaltyMs = 5_000L
@@ -224,9 +238,13 @@ class FfmpegProbeService(
     private val renderSessions = mutableMapOf<String, Long>()
     private val suspendedRenderSessions = mutableMapOf<String, Long>()
     private val lastFrameAtMs = mutableMapOf<String, Long>()
+    private val lastLiveFrameCallbackAtMs = mutableMapOf<String, Long>()
+    private val lastTelemetryLogAtMs = mutableMapOf<String, Long>()
     private val sourcePathByDesignator = mutableMapOf<String, String>()
     private val renderEnabledDesignators = mutableSetOf<String>()
     private val startingRenderDesignators = mutableSetOf<String>()
+    private val telemetryProbeSessions = mutableMapOf<String, Long>()
+    private val startingTelemetryProbeDesignators = mutableSetOf<String>()
     private val auxiliaryRenderSessions = AuxiliaryRenderSessionTracker()
     private val activeRenderSurfaceByDesignator = mutableMapOf<String, Surface>()
     private val renderSurfaceCandidatesByDesignator = mutableMapOf<String, MutableList<Surface>>()
@@ -356,6 +374,18 @@ class FfmpegProbeService(
             }
         }
         if (eventType == "frame_rendered") {
+            val shouldNotifyLiveFrame = synchronized(stateLock) {
+                val previous = lastLiveFrameCallbackAtMs[designator] ?: 0L
+                if (now - previous >= 1_000L) {
+                    lastLiveFrameCallbackAtMs[designator] = now
+                    true
+                } else {
+                    false
+                }
+            }
+            if (shouldNotifyLiveFrame) {
+                onLiveFrame(designator, now)
+            }
             synchronized(stateLock) {
                 handleRenderedFrameEventLocked(
                     designator = designator,
@@ -368,7 +398,18 @@ class FfmpegProbeService(
         }
         when {
             eventType == "telemetry" -> {
-                CTDebug(tag, "FFmpeg telemetry designator=$designator telemetry=$telemetry")
+                val shouldLog = synchronized(stateLock) {
+                    val previous = lastTelemetryLogAtMs[designator] ?: 0L
+                    if (now - previous >= 1_000L) {
+                        lastTelemetryLogAtMs[designator] = now
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (shouldLog) {
+                    CTDebug(tag, "FFmpeg telemetry designator=$designator telemetry=$telemetry")
+                }
             }
 
             eventType == "render_lock_failed" -> {
@@ -417,6 +458,49 @@ class FfmpegProbeService(
         if (isRenderEnabled(designator) && hasBoundRenderSurface(designator)) {
             ensureRenderSession(designator)
         }
+    }
+
+    /**
+     * Keep a packet-only reader attached while an upstream publisher is live.
+     * This makes DJI SEI telemetry independent of whether Streams UI or a
+     * render surface is currently visible.
+     */
+    fun ensureTelemetryProbeSession(designator: String) {
+        val alreadyActiveOrStarting = synchronized(stateLock) {
+            telemetryProbeSessions.containsKey(designator) ||
+                startingTelemetryProbeDesignators.contains(designator)
+        }
+        if (alreadyActiveOrStarting) return
+        sessionExecutionLanes.executeControl {
+            ensureTelemetryProbeSessionOnControlLane(designator)
+        }
+    }
+
+    private fun ensureTelemetryProbeSessionOnControlLane(designator: String): Long? {
+        synchronized(stateLock) {
+            telemetryProbeSessions[designator]?.let { return it }
+            if (!startingTelemetryProbeDesignators.add(designator)) return null
+        }
+        val streamPath = synchronized(stateLock) { sourcePathByDesignator[designator] } ?: designator
+        val inputUrl = if (streamPath.contains("://")) {
+            streamPath
+        } else {
+            "rtsp://127.0.0.1:8554/$streamPath"
+        }
+        CTDebug(tag, "Starting packet-only telemetry probe for $designator url=$inputUrl")
+        val sessionId = FfmpegBridge.startProbe(designator, inputUrl)
+        synchronized(stateLock) {
+            startingTelemetryProbeDesignators.remove(designator)
+            if (sessionId > 0L) {
+                telemetryProbeSessions[designator] = sessionId
+            }
+        }
+        if (sessionId <= 0L) {
+            CTWarn(tag, "Unable to start packet-only telemetry probe for $designator")
+            return null
+        }
+        CTDebug(tag, "Started packet-only telemetry probe for $designator sessionId=$sessionId")
+        return sessionId
     }
 
     private fun latestUpstreamBoundary(designator: String): UpstreamBoundaryMarker? {
@@ -600,13 +684,17 @@ class FfmpegProbeService(
 
     fun onStreamStopped(designator: String) {
         CTDebug(tag, "Stream stopped for $designator; tearing down FFmpeg sessions")
+        StreamCameraTelemetryRegistry.clear(designator)
         val sessionIds: List<Long>
         synchronized(stateLock) {
             sessionIds = sessionIdsForDesignatorLocked(designator)
             startingRenderDesignators.remove(designator)
+            startingTelemetryProbeDesignators.remove(designator)
             localPlaybackEofByDesignator.remove(designator)
             localPlaybackPausedByDesignator.remove(designator)
             lastFrameAtMs.remove(designator)
+            lastLiveFrameCallbackAtMs.remove(designator)
+            lastTelemetryLogAtMs.remove(designator)
             sourcePathByDesignator.remove(designator)
             renderEnabledDesignators.remove(designator)
             activeRenderSurfaceByDesignator.remove(designator)
@@ -617,6 +705,7 @@ class FfmpegProbeService(
             pendingRepublishByDesignator.remove(designator)
             renderSessions.remove(designator)
             suspendedRenderSessions.remove(designator)
+            telemetryProbeSessions.remove(designator)
         }
         sessionIds.forEach { sessionId ->
             stopSessionAsync(sessionId, "Stopped FFmpeg render for $designator sessionId=$sessionId")
@@ -743,10 +832,11 @@ class FfmpegProbeService(
 
     private fun sessionIdsForDesignatorLocked(designator: String): List<Long> {
         val activeSessionId = renderSessions[designator]
+        val telemetrySessionId = telemetryProbeSessions[designator]
         val managedSessionIds = managedRenderSessions
             .filterValues { it.designator == designator }
             .keys
-        return listOfNotNull(activeSessionId)
+        return listOfNotNull(activeSessionId, telemetrySessionId)
             .plus(managedSessionIds)
             .distinct()
     }
@@ -757,11 +847,15 @@ class FfmpegProbeService(
                 .plus(suspendedRenderSessions.values)
                 .plus(managedRenderSessions.keys)
                 .plus(auxiliaryRenderSessions.sessionIds())
+                .plus(telemetryProbeSessions.values)
                 .distinct()
             renderSessions.clear()
             suspendedRenderSessions.clear()
             startingRenderDesignators.clear()
+            telemetryProbeSessions.clear()
+            startingTelemetryProbeDesignators.clear()
             lastFrameAtMs.clear()
+            lastTelemetryLogAtMs.clear()
             sourcePathByDesignator.clear()
             renderEnabledDesignators.clear()
             activeRenderSurfaceByDesignator.clear()
@@ -906,6 +1000,8 @@ class FfmpegProbeService(
             if (managed != null && managed.designator == designator) return@synchronized null
             if (auxiliaryRenderSessions.isTracked(designator, sessionId)) return@synchronized null
             if (startingRenderDesignators.contains(designator)) return@synchronized null
+            if (telemetryProbeSessions[designator] == sessionId) return@synchronized null
+            if (startingTelemetryProbeDesignators.contains(designator)) return@synchronized null
             "untracked"
         }
     }
@@ -1011,6 +1107,12 @@ class FfmpegProbeService(
             gimbalPitchDeg = merged.gimbalPitchDeg,
             cameraYawDeg = merged.cameraYawDeg,
             headingDeg = merged.headingDeg,
+            horizontalFovDeg = merged.horizontalFovDeg,
+            verticalFovDeg = merged.verticalFovDeg,
+            djiAttitudeAnglesDeg = merged.djiAttitudeAnglesDeg,
+            djiRelativeNorthMmRaw = merged.djiRelativeNorthMmRaw,
+            djiRelativeEastMmRaw = merged.djiRelativeEastMmRaw,
+            djiRelativeDownMmRaw = merged.djiRelativeDownMmRaw,
             latestRemoteId = merged.remoteId,
             remoteIdCandidates = candidates,
         )
@@ -1542,6 +1644,9 @@ class FfmpegProbeService(
             }
             managedRenderSessions.remove(sessionId)
             auxiliaryRenderSessions.remove(sessionId)
+            if (telemetryProbeSessions[designator] == sessionId) {
+                telemetryProbeSessions.remove(designator)
+            }
             sourceInfoBySessionId.remove(sessionId)
             sourceInfoFetchPending.remove(sessionId)
             if (isLocalFile &&

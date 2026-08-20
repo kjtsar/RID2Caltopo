@@ -14,6 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../../../../native/R2CDJICameraTelemetry.h"
+
 #if !defined(HAVE_FFMPEG)
 #define HAVE_FFMPEG 0
 #endif
@@ -502,7 +504,10 @@ static void dispatch_probe_event_ex(const char *designator,
                                  double alt,
                                  double gimbal_pitch,
                                  double camera_yaw,
-                                 double heading) {
+                                 double heading,
+                                 double fov_width,
+                                 double fov_height,
+                                 const char *dji_attitude_angles) {
     bool did_attach = false;
     JNIEnv *env = get_env(&did_attach);
     if (env == NULL) return;
@@ -515,6 +520,9 @@ static void dispatch_probe_event_ex(const char *designator,
     jstring j_event_type = (*env)->NewStringUTF(env, event_type);
     jstring j_source_tag = (*env)->NewStringUTF(env, source_tag != NULL ? source_tag : "");
     jstring j_remote_id = (*env)->NewStringUTF(env, remote_id != NULL ? remote_id : "");
+    jstring j_dji_attitude_angles = (*env)->NewStringUTF(
+            env,
+            dji_attitude_angles != NULL ? dji_attitude_angles : "");
     (*env)->CallStaticVoidMethod(
             env,
             g_bridge_class,
@@ -532,7 +540,10 @@ static void dispatch_probe_event_ex(const char *designator,
             (jdouble) alt,
             (jdouble) gimbal_pitch,
             (jdouble) camera_yaw,
-            (jdouble) heading);
+            (jdouble) heading,
+            (jdouble) fov_width,
+            (jdouble) fov_height,
+            j_dji_attitude_angles);
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionDescribe(env);
         (*env)->ExceptionClear(env);
@@ -541,6 +552,7 @@ static void dispatch_probe_event_ex(const char *designator,
     (*env)->DeleteLocalRef(env, j_event_type);
     (*env)->DeleteLocalRef(env, j_source_tag);
     (*env)->DeleteLocalRef(env, j_remote_id);
+    (*env)->DeleteLocalRef(env, j_dji_attitude_angles);
 
     release_env(did_attach);
 }
@@ -569,7 +581,10 @@ static void dispatch_probe_event(const char *designator,
             alt,
             gimbal_pitch,
             camera_yaw,
-            heading);
+            heading,
+            NAN,
+            NAN,
+            "");
 }
 
 static void dispatch_probe_event_with_latency(const char *designator,
@@ -597,7 +612,10 @@ static void dispatch_probe_event_with_latency(const char *designator,
             alt,
             gimbal_pitch,
             camera_yaw,
-            heading);
+            heading,
+            NAN,
+            NAN,
+            "");
 }
 
 #if HAVE_FFMPEG && HAVE_SWSCALE
@@ -5101,6 +5119,8 @@ typedef struct {
     double gimbal_pitch;
     double camera_yaw;
     double heading;
+    double fov_width;
+    double fov_height;
 } telemetry_values_t;
 
 static telemetry_values_t telemetry_values_init(void) {
@@ -5115,6 +5135,8 @@ static telemetry_values_t telemetry_values_init(void) {
     out.gimbal_pitch = NAN;
     out.camera_yaw = NAN;
     out.heading = NAN;
+    out.fov_width = NAN;
+    out.fov_height = NAN;
     return out;
 }
 
@@ -5204,6 +5226,16 @@ static void map_telemetry_key_value(telemetry_values_t *tv, const char *key, con
         tv->has_any = true;
         return;
     }
+    if (key_contains(k, "fov") && key_contains(k, "width") && parse_double_value(val, &d)) {
+        tv->fov_width = d;
+        tv->has_any = true;
+        return;
+    }
+    if (key_contains(k, "fov") && key_contains(k, "height") && parse_double_value(val, &d)) {
+        tv->fov_height = d;
+        tv->has_any = true;
+        return;
+    }
     if ((key_contains(k, "timestamp") || key_contains(k, "time_us") || key_contains(k, "pts")) &&
         parse_int64_value(val, &i64)) {
         tv->ts_us = i64;
@@ -5250,7 +5282,60 @@ static void emit_telemetry_values(ffmpeg_session_t *session,
             tv->alt,
             tv->gimbal_pitch,
             tv->camera_yaw,
-            tv->heading);
+            tv->heading,
+            tv->fov_width,
+            tv->fov_height,
+            "");
+}
+
+static void emit_dji_camera_telemetry(
+        ffmpeg_session_t *session,
+        const AVPacket *packet) {
+    if (session == NULL || packet == NULL || packet->data == NULL || packet->size <= 0) return;
+    int64_t packet_ts_us = pts_to_us(packet->pts, session->video_time_base);
+    R2CDJICameraTelemetry camera = {0};
+    if (!R2CDJIDecodeH264Packet(
+            packet->data,
+            (size_t) packet->size,
+            4,
+            &camera)) {
+        return;
+    }
+    char attitude_angles_csv[256];
+    snprintf(
+            attitude_angles_csv,
+            sizeof(attitude_angles_csv),
+            "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d",
+            camera.attitudeAnglesDegrees[0],
+            camera.attitudeAnglesDegrees[1],
+            camera.attitudeAnglesDegrees[2],
+            camera.attitudeAnglesDegrees[3],
+            camera.attitudeAnglesDegrees[4],
+            camera.attitudeAnglesDegrees[5],
+            camera.attitudeAnglesDegrees[6],
+            camera.attitudeAnglesDegrees[7],
+            camera.attitudeAnglesDegrees[8],
+            (int) camera.relativeNorthMillimetersRaw,
+            (int) camera.relativeEastMillimetersRaw,
+            (int) camera.relativeDownMillimetersRaw);
+    dispatch_probe_event_ex(
+            session->designator,
+            "telemetry",
+            session->session_id,
+            "dji-sei-245",
+            0.95,
+            "",
+            packet_ts_us,
+            0,
+            camera.positionValid ? camera.latitudeDegrees : NAN,
+            camera.positionValid ? camera.longitudeDegrees : NAN,
+            camera.positionValid ? camera.altitudeMeters : NAN,
+            camera.tiltDegrees,
+            camera.azimuthDegrees,
+            NAN,
+            camera.horizontalFovDegrees,
+            camera.verticalFovDegrees,
+            attitude_angles_csv);
 }
 
 static void log_dict_keys_once(ffmpeg_session_t *session,
@@ -5865,6 +5950,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                      (long long) pkt->dts);
         }
 
+        emit_dji_camera_telemetry(session, pkt);
 #if FFMPEG_TELEMETRY_ENABLED
         telemetry_values_t packet_tv = telemetry_values_init();
 #if defined(AV_PKT_DATA_STRINGS_METADATA)
@@ -5886,6 +5972,14 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         }
 #endif  // AV_PKT_DATA_STRINGS_METADATA
 #endif  // FFMPEG_TELEMETRY_ENABLED
+
+        // Probe sessions exist to inspect packet-carried metadata such as DJI
+        // SEI. Keep the RTSP reader current without paying to decode video
+        // frames when there is no visual consumer.
+        if (!session->is_render) {
+            av_packet_unref(pkt);
+            continue;
+        }
 
         // Manual render stride (optional, set via nativeSetRenderStride):
         // When render_stride > 1, every N-1 out of N non-keyframe packets are
@@ -6697,7 +6791,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeInitBridge(
             env,
             g_bridge_class,
             "dispatchNativeProbeEvent",
-        "(Ljava/lang/String;Ljava/lang/String;JLjava/lang/String;DLjava/lang/String;JJDDDDDD)V");
+        "(Ljava/lang/String;Ljava/lang/String;JLjava/lang/String;DLjava/lang/String;JJDDDDDDDDLjava/lang/String;)V");
     g_dispatch_remote_video_frame_mid = (*env)->GetStaticMethodID(
             env,
             g_bridge_class,

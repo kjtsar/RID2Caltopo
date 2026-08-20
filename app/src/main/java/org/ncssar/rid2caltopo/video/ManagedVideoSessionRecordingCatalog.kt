@@ -57,7 +57,12 @@ object ManagedVideoSessionRecordingCatalog {
             .substringAfterLast('/')
             .replace(Regex("[^A-Za-z0-9._-]"), "_")
             .ifBlank { "recording" }
-        val destination = File(activeRoot(context), "${safePath}__${mergedFile.name}")
+        val sessionId = ManagedVideoStreamPresence.latestSessionId(
+            streamPath,
+            streamPath.substringAfterLast('/'),
+        )
+            ?: sessionIdForPath("$safePath/${mergedFile.name}")
+        val destination = File(activeRoot(context), "${safePath}__${sessionId}__${mergedFile.name}")
         val temporary = File(destination.parentFile, ".${destination.name}.tmp")
         return try {
             mergedFile.copyTo(temporary, overwrite = true)
@@ -194,9 +199,12 @@ object ManagedVideoSessionRecordingCatalog {
                 ?.toDoubleOrNull()
                 ?.takeIf { it.isFinite() && it > 0.0 }
                 ?: 0.0
-            val designator = file.name.substringBefore("__").ifBlank { "Recording" }
+            val nameParts = file.name.split("__", limit = 3)
+            val designator = nameParts.firstOrNull().orEmpty().ifBlank { "Recording" }
+            val embeddedSessionId = nameParts.getOrNull(1)
+                ?.takeIf { runCatching { UUID.fromString(it) }.isSuccess }
             ManagedVideoSessionRecording(
-                sessionId = sessionIdForPath(file.absolutePath),
+                sessionId = embeddedSessionId ?: sessionIdForPath(file.absolutePath),
                 droneDesignator = designator,
                 file = file,
                 recordedAt = Instant.ofEpochMilli(file.lastModified()),

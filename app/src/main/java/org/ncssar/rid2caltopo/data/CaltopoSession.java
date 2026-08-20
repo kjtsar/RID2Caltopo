@@ -861,6 +861,10 @@ public class CaltopoSession {
             if (cameraMetadata != null) {
                 putString(parameters, "camera:external_url", cameraMetadata.externalUrl);
                 putString(parameters, "camera:thumbnail_url", cameraMetadata.thumbnailUrl);
+                putFinite(parameters, "camera:azimuth", cameraMetadata.azimuthDegrees);
+                putFinite(parameters, "camera:tilt", cameraMetadata.tiltDegrees);
+                putFinite(parameters, "camera:fov_width", cameraMetadata.horizontalFovDegrees);
+                putFinite(parameters, "camera:fov_height", cameraMetadata.verticalFovDegrees);
             }
         } catch (Exception e) {
 			CTError(TAG, "buildPositionQueryParameters() JSON put raised", e);

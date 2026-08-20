@@ -98,7 +98,7 @@ for library in \
     "$ffmpeg_root/simulator/libR2CFFmpegMobile.a"; do
     lipo -info "$library" | grep -q 'architecture: arm64'
 done
-for symbol in R2CFFmpegSessionCreate R2CFFmpegSessionDestroy R2CFFmpegSessionCopyLatestFrame R2CFFmpegSessionGetStatus; do
+for symbol in R2CFFmpegSessionCreate R2CFFmpegSessionCreatePlayback R2CFFmpegSessionDestroy R2CFFmpegSessionCopyLatestFrame R2CFFmpegSessionGetStatus R2CFFmpegSessionCopyLatestDJICameraTelemetry; do
     nm -gU "$ffmpeg_root/device/libR2CFFmpegMobile.a" | grep "_$symbol$" >/dev/null
     nm -gU "$ffmpeg_root/simulator/libR2CFFmpegMobile.a" | grep "_$symbol$" >/dev/null
 done
@@ -110,6 +110,14 @@ for symbol in R2CAnomalyCreate R2CAnomalyDestroy R2CAnomalyApplyConfiguration R2
     nm -gU "$anomaly_root/device/libR2CAnomalyApple.a" | grep "_$symbol$" >/dev/null
     nm -gU "$anomaly_root/simulator/libR2CAnomalyApple.a" | grep "_$symbol$" >/dev/null
 done
+xcrun clang -std=c11 -Wall -Wextra -Werror \
+    "$script_dir/Native/FFmpeg/tests/R2CH264PacketTests.c" \
+    -o "$work_dir/R2CH264PacketTests"
+"$work_dir/R2CH264PacketTests"
+xcrun clang -std=c11 -Wall -Wextra -Werror \
+    "$repo_root/native/tests/R2CDJICameraTelemetryTests.c" \
+    -o "$work_dir/R2CDJICameraTelemetryTests"
+"$work_dir/R2CDJICameraTelemetryTests"
 
 echo "[4/10] Portable anomaly regression suite"
 cmake -S "$repo_root/tools/anomaly_test" -B "$work_dir/anomaly-test" -DCMAKE_BUILD_TYPE=Release

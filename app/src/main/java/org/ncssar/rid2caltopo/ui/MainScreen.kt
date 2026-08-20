@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -97,6 +98,7 @@ import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionPanel
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionStatusChip
 import org.ncssar.rid2caltopo.video.ComplianceAlertBell
 import org.ncssar.rid2caltopo.video.ComplianceAlertDialog
+import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -425,6 +427,20 @@ fun MainScreen(
     val landRestrictionUiState by LandRestrictionCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by streamsViewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
+    val bridgeSignal by DroneScoutBridgeMonitor.signal.collectAsStateWithLifecycle()
+    var bridgeSignalClockMs by remember {
+        mutableLongStateOf(System.nanoTime() / 1_000_000L)
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            bridgeSignalClockMs = System.nanoTime() / 1_000_000L
+            delay(1_000L)
+        }
+    }
+    val bridgeRssi = DroneScoutBridgeMonitor.currentRssi(
+        signal = bridgeSignal,
+        nowMonotonicMs = bridgeSignalClockMs,
+    )
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
     val appUpdateAdvisory by AppUpdateAdvisory.state.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
@@ -1316,6 +1332,7 @@ fun MainScreen(
                         onClick = { showSignalLossPanel = true }
                     )
                     ResumeProximityAlertButton()
+                    MainBridgeSignalIndicator(rssi = bridgeRssi)
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More options")
                     }
@@ -2107,4 +2124,24 @@ fun MainScreen(
             }
         )
     }
+}
+
+@Composable
+private fun MainBridgeSignalIndicator(rssi: Int?) {
+    AssistChip(
+        onClick = DroneScoutBridgeMonitor::toggleAudioMuted,
+        label = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Text("Bridge ${rssi ?: "—"}", maxLines = 1)
+                SignalStrengthBars(
+                    rssi = rssi ?: 0,
+                    modifier = Modifier.width(26.dp).height(22.dp),
+                    colorByStrength = true,
+                )
+            }
+        },
+    )
 }

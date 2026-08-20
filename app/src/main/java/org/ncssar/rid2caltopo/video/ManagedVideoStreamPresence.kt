@@ -7,6 +7,8 @@ import android.util.Base64
 object ManagedVideoStreamPresence {
     private val sessionIdBySourcePath = linkedMapOf<String, String>()
     private var currentLiveDesignators = emptySet<String>()
+    private var currentLiveSessionIdByDesignator = emptyMap<String, String>()
+    private val latestSessionIdByDesignator = linkedMapOf<String, String>()
 
     @Synchronized
     fun snapshot(
@@ -28,10 +30,6 @@ object ManagedVideoStreamPresence {
             .sortedBy { it.designator.lowercase() }
             .take(4)
         val livePaths = live.mapTo(linkedSetOf()) { it.sourcePath }
-        currentLiveDesignators = live
-            .map { it.designator.trim().lowercase() }
-            .filter { it.isNotEmpty() }
-            .toSet()
         sessionIdBySourcePath.keys.retainAll(livePaths)
         val liveAdvertisements = live.map { stream ->
             // Inventory follows publisher state, not decoder/UI readiness. Only
@@ -57,6 +55,14 @@ object ManagedVideoStreamPresence {
                 thumbnail?.jpegBytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
             )
         }
+        currentLiveDesignators = liveAdvertisements
+            .map { it.droneDesignator.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        currentLiveSessionIdByDesignator = liveAdvertisements.associate {
+            it.droneDesignator.trim().lowercase() to it.sessionId
+        }
+        latestSessionIdByDesignator.putAll(currentLiveSessionIdByDesignator)
         return liveAdvertisements + recordings.map { recording ->
             ManagedVideoSessionRecordingCatalog.advertisement(
                 recording,
@@ -69,6 +75,8 @@ object ManagedVideoStreamPresence {
     internal fun resetForTests() {
         sessionIdBySourcePath.clear()
         currentLiveDesignators = emptySet()
+        currentLiveSessionIdByDesignator = emptyMap()
+        latestSessionIdByDesignator.clear()
     }
 
     @JvmStatic
@@ -84,6 +92,24 @@ object ManagedVideoStreamPresence {
         .firstOrNull {
             it.isNotEmpty() && it.lowercase() in currentLiveDesignators
         }
+
+    @JvmStatic
+    @Synchronized
+    fun matchingLiveSessionId(vararg candidates: String): String? = candidates
+        .asSequence()
+        .map { it.trim().lowercase() }
+        .filter { it.isNotEmpty() }
+        .mapNotNull(currentLiveSessionIdByDesignator::get)
+        .firstOrNull()
+
+    @JvmStatic
+    @Synchronized
+    fun latestSessionId(vararg candidates: String): String? = candidates
+        .asSequence()
+        .map { it.trim().lowercase() }
+        .filter { it.isNotEmpty() }
+        .mapNotNull(latestSessionIdByDesignator::get)
+        .firstOrNull()
 }
 
 /**

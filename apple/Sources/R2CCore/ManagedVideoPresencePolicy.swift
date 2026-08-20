@@ -11,4 +11,12 @@ public enum ManagedVideoPresencePolicy {
         guard frameCount > 0, let decodedFrameAge else { return false }
         return decodedFrameAge >= 0 && decodedFrameAge <= maximumAge
     }
+
+    public static func unavailableApprovedSessionIDs(
+        approvedSessionIDs: Set<String>,
+        liveSessionIDs: Set<String>,
+        recordingSessionIDs: Set<String>
+    ) -> Set<String> {
+        approvedSessionIDs.subtracting(liveSessionIDs.union(recordingSessionIDs))
+    }
 }

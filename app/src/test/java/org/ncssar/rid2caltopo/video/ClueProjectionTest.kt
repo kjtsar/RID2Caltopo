@@ -60,6 +60,22 @@ class ClueProjectionTest {
     }
 
     @Test
+    fun projectClueLocation_keepsPointAtDroneWhenCameraLooksAboveHorizon() {
+        val projection = projectClueLocation(
+            droneLat = 37.0,
+            droneLng = -122.0,
+            droneAlt = 150.0,
+            headingDeg = 90.0,
+            aglMeters = 40.0,
+            gimbalAngleDeg = 35.0,
+        )
+
+        assertEquals(37.0, projection.lat, 1e-9)
+        assertEquals(-122.0, projection.lng, 1e-9)
+        assertEquals(110.0, projection.alt, 1e-9)
+    }
+
+    @Test
     fun inferDemScaleToMeters_prefersFootScaleWhenRawDemMatchesFeet() {
         val scale = inferDemScaleToMeters(
             droneAltMeters = 548.0,

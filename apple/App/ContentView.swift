@@ -199,7 +199,18 @@ struct ContentView: View {
                     }
                     .accessibilityLabel("Selected Teams credentials: \(profileLifecycle.activeCredentialLabel)")
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        bridgeAlerts.toggleAudioMuted()
+                    } label: {
+                        BridgeSignalIndicator(rssi: bluetoothScanner.bridgeSignalStrengthDbm)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint(
+                        bridgeAlerts.audioMuted
+                            ? "Double tap to enable bridge warnings"
+                            : "Double tap to mute bridge warnings"
+                    )
                     Menu {
                         Button("Live View", systemImage: "video") { showTrackMap = true }
                         Button("Send app log to Ken…", systemImage: "square.and.arrow.up") {
@@ -1125,7 +1136,6 @@ struct ContentView: View {
             androidOpPeriodCell
             androidHeaderCell("Coordinator", androidCoordinatorStatus, width: 150)
             androidHeaderCell("Team Drones", "\(droneConfirmations.importedMappingCount)", width: 110)
-            androidBridgeHeaderCell
             androidHeaderCell("", deviceVersionText, width: 190)
             androidHeaderCell("Up Time", appUptimeText, width: 100)
             androidHeaderCell("Caltopo msg rtt", caltopoRTTText, width: 145)
@@ -1386,38 +1396,6 @@ struct ContentView: View {
                     .frame(width: 4, height: CGFloat(5 + index * 4))
             }
         }
-    }
-
-    private var androidBridgeHeaderCell: some View {
-        Button {
-            bridgeAlerts.toggleAudioMuted()
-        } label: {
-            VStack(spacing: 4) {
-                HStack(spacing: 4) {
-                    Text("Bridge:")
-                        .font(.caption)
-                    Image(systemName: bridgeAlerts.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.caption2)
-                }
-                androidSignalBars(
-                    rssi: bluetoothScanner.bridgeSignalStrengthDbm,
-                    colorByStrength: true
-                )
-                .frame(width: 28, height: 22)
-            }
-            .frame(width: 90, height: 58)
-            .background(Color(uiColor: .secondarySystemBackground))
-        }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Bridge signal strength")
-        .accessibilityValue(
-            [
-                bluetoothScanner.bridgeSignalStrengthDbm.map { "\($0) decibels milliwatt" }
-                    ?? "not detected",
-                bridgeAlerts.audioMuted ? "warning muted" : "warning enabled",
-            ].joined(separator: ", ")
-        )
     }
 
     private func androidHeaderCell(_ title: String, _ value: String, width: CGFloat) -> some View {
@@ -1762,6 +1740,7 @@ struct ContentView: View {
             streamURL: streamRegistry.focusedPlaybackURL,
             ingestAddress: controllerRTMPURL,
             networkSSID: controllerWiFiSSID,
+            bridgeSignalStrengthDbm: bluetoothScanner.bridgeSignalStrengthDbm,
             onMapStatusTap: openCaltopoMapActions,
             onSwitchMap: { showTeamMaps = true },
             onDisconnectMap: {

@@ -57,6 +57,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -108,9 +109,11 @@ import org.ncssar.rid2caltopo.ui.CaltopoConnectionState
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
 import org.ncssar.rid2caltopo.ui.DroneSignalLossAlertCenter
 import org.ncssar.rid2caltopo.ui.ResumeProximityAlertButton
+import org.ncssar.rid2caltopo.ui.SignalStrengthBars
 import org.ncssar.rid2caltopo.ui.SignalLossAlertButton
 import org.ncssar.rid2caltopo.ui.SignalLossAlertDialog
 import org.opendroneid.android.bluetooth.WiFiScanner
+import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
 import androidx.documentfile.provider.DocumentFile
 
 private const val EMPTY_STREAMS_SETTINGS_DESIGNATOR = "__empty_streams_defaults__"
@@ -335,6 +338,20 @@ fun StreamsScreen(
     val landRestrictionUiState by LandRestrictionCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by viewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
+    val bridgeSignal by DroneScoutBridgeMonitor.signal.collectAsStateWithLifecycle()
+    var bridgeSignalClockMs by remember {
+        mutableLongStateOf(System.nanoTime() / 1_000_000L)
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            bridgeSignalClockMs = System.nanoTime() / 1_000_000L
+            delay(1_000L)
+        }
+    }
+    val bridgeRssi = DroneScoutBridgeMonitor.currentRssi(
+        signal = bridgeSignal,
+        nowMonotonicMs = bridgeSignalClockMs,
+    )
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
     var confirmRemoteVideoTermination by remember { mutableStateOf(false) }
     LaunchedEffect(remoteVideoActive) {
@@ -470,7 +487,9 @@ fun StreamsScreen(
                                         }
                                     }
                                 )
+                                Spacer(Modifier.width(6.dp))
                             }
+                            BridgeSignalIndicator(rssi = bridgeRssi)
                         }
                     }
                 )
@@ -654,6 +673,18 @@ fun StreamsScreen(
                 }
 
                 if (fullScreenChrome.showExitChip) {
+                    val exitLayout = fullScreenExitChipLayout()
+                    BridgeSignalIndicator(
+                        rssi = bridgeRssi,
+                        overlay = true,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(
+                                top = 16.dp,
+                                end = (exitLayout.endPaddingDp + exitLayout.minWidthDp + 8f).dp,
+                            )
+                            .zIndex(10f),
+                    )
                     FullScreenExitChip(
                         onClick = { streamsFullScreen = false },
                         modifier = Modifier
@@ -746,6 +777,38 @@ private fun ApplyStreamsFullScreenSystemBars(active: Boolean) {
         }
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+}
+
+@Composable
+private fun BridgeSignalIndicator(
+    rssi: Int?,
+    modifier: Modifier = Modifier,
+    overlay: Boolean = false,
+) {
+    Surface(
+        modifier = modifier.heightIn(min = 32.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = if (overlay) Color.Black.copy(alpha = 0.68f)
+        else MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = if (overlay) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Text(
+                text = "Bridge ${rssi ?: "—"}",
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+            )
+            SignalStrengthBars(
+                rssi = rssi ?: 0,
+                modifier = Modifier.width(26.dp).height(22.dp),
+                colorByStrength = true,
+            )
         }
     }
 }

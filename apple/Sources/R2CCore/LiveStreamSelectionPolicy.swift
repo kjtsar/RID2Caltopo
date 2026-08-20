@@ -39,3 +39,30 @@ public enum LiveStreamSelectionPolicy {
         value.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
     }
 }
+
+/// Keeps the reusable primary decoder bound to the publisher that owns it.
+/// A terminal publisher removal must release that decoder before a different
+/// stream can inherit it, while a same-path republish can use normal recovery.
+public enum LiveStreamDecoderLifecyclePolicy {
+    public static func shouldResetAfterPublisherStopped(
+        sessionPath: String,
+        decoderPath: String?
+    ) -> Bool {
+        guard let decoderPath else { return false }
+        return normalize(sessionPath) == normalize(decoderPath)
+    }
+
+    public static func shouldStartDecoder(
+        publisherPath: String,
+        decoderPath: String?,
+        decoderIsIdle: Bool
+    ) -> Bool {
+        if decoderIsIdle { return true }
+        guard let decoderPath else { return true }
+        return normalize(publisherPath) != normalize(decoderPath)
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+    }
+}

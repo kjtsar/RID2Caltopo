@@ -15,8 +15,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -41,8 +39,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
-import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
-import kotlinx.coroutines.delay
 
 import java.util.Locale
 
@@ -82,16 +78,6 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
         .background(MaterialTheme.colorScheme.surface)
         .height(IntrinsicSize.Min)
     var showRidmapEntries by remember { mutableStateOf(false) }
-    val bridgeSignal by DroneScoutBridgeMonitor.signal.collectAsState()
-    val bridgeAudioMuted by DroneScoutBridgeMonitor.audioMuted.collectAsState()
-    var nowMonotonicMs by remember { mutableLongStateOf(System.nanoTime() / 1_000_000L) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowMonotonicMs = System.nanoTime() / 1_000_000L
-            delay(1_000L)
-        }
-    }
-    val bridgeRssi = DroneScoutBridgeMonitor.currentRssi(bridgeSignal, nowMonotonicMs)
     if (showRidmapEntries) {
         RidmapEntriesDialog(
             entries = CaltopoClient.GetRidmapEntriesSnapshot(),
@@ -134,40 +120,6 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
                 modifier = textMod.clickable { showRidmapEntries = true },
                 style = MaterialTheme.typography.titleSmall,
                 textAlign = TextAlign.Center
-            )
-        }
-        Column(
-            modifier = colModifier
-                .width(105.dp)
-                .clickable { DroneScoutBridgeMonitor.toggleAudioMuted() }
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(text = "Bridge:", style = MaterialTheme.typography.titleSmall)
-                Icon(
-                    imageVector = if (bridgeAudioMuted) {
-                        Icons.AutoMirrored.Filled.VolumeOff
-                    } else {
-                        Icons.AutoMirrored.Filled.VolumeUp
-                    },
-                    contentDescription = if (bridgeAudioMuted) {
-                        "Bridge warning muted; tap to unmute"
-                    } else {
-                        "Bridge warning enabled; tap to mute"
-                    },
-                    modifier = Modifier.padding(start = 4.dp).size(16.dp),
-                )
-            }
-            SignalStrengthBars(
-                rssi = bridgeRssi ?: 0,
-                modifier = Modifier
-                    .height(28.dp)
-                    .padding(top = 3.dp)
-                    .align(Alignment.CenterHorizontally),
-                colorByStrength = true,
             )
         }
         Column(modifier = colModifier) {

@@ -1,4 +1,5 @@
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertSame
 import org.junit.Test
@@ -6,6 +7,13 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
 
 class ClueCaptureSummaryTest {
+    @Test
+    fun videoMslAgl_prefersPlausibleAltitudeDifference() {
+        assertEquals(64.595, videoMslAglMeters(574.595, 510.0) ?: 0.0, 0.000001)
+        assertNull(videoMslAglMeters(500.0, 600.0))
+        assertNull(videoMslAglMeters(null, 500.0))
+    }
+
     @Test
     fun buildClueCaptureSummary_usesPreferredUsngAndRetainsDecimal() {
         val summary = buildClueCaptureSummary(
@@ -51,6 +59,7 @@ class ClueCaptureSummaryTest {
     @Test
     fun clueHeading_prefersMostRecentDerivedDroneHeading() {
         val selection = selectClueHeading(
+            djiVideoCourseDeg = null,
             telemetry = null,
             derivedHeadingDeg = 274.0,
             ridTrackDeg = 90.0,
@@ -58,6 +67,46 @@ class ClueCaptureSummaryTest {
 
         assertEquals(274.0, selection.headingDeg!!, 0.0)
         assertEquals("Derived drone heading", selection.sourceLabel)
+    }
+
+    @Test
+    fun clueHeading_prefersFreshDjiVideoCourseOverRidDerivedCourse() {
+        val selection = selectClueHeading(
+            djiVideoCourseDeg = 111.46,
+            telemetry = null,
+            derivedHeadingDeg = 274.0,
+            ridTrackDeg = 90.0,
+        )
+
+        assertEquals(111.46, selection.headingDeg!!, 1e-9)
+        assertEquals("DJI video-derived course", selection.sourceLabel)
+    }
+
+    @Test
+    fun clueHeading_prefersFreshDjiCameraAzimuthOverVideoCourse() {
+        val selection = selectClueHeading(
+            djiCameraAzimuthDeg = 346.6,
+            djiVideoCourseDeg = 153.5,
+            telemetry = null,
+            derivedHeadingDeg = 274.0,
+            ridTrackDeg = 90.0,
+        )
+
+        assertEquals(346.6, selection.headingDeg!!, 1e-9)
+        assertEquals("DJI camera azimuth", selection.sourceLabel)
+    }
+
+    @Test
+    fun clueHeading_hasNoHeadingWithoutAnyFreshSource() {
+        val selection = selectClueHeading(
+            djiVideoCourseDeg = null,
+            telemetry = null,
+            derivedHeadingDeg = null,
+            ridTrackDeg = null,
+        )
+
+        assertNull(selection.headingDeg)
+        assertNull(selection.sourceLabel)
     }
 
     @Test

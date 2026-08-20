@@ -21,7 +21,7 @@ enum class SpokenWarningKind(val phrase: String) {
     DroneTelemetry("Drone Telemetry"),
     Altitude("Altitude"),
     Proximity("Proximity"),
-    ControllerSignalStrength("Controller Signal Strength"),
+    ControllerSignalStrength("Stream Wi-Fi Signal Strength"),
     BridgeNotDetected("Bridge Not Detected"),
     VideoStreamRequest("Video Stream Request"),
 }

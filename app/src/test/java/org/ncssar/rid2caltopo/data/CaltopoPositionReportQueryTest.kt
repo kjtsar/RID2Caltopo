@@ -18,6 +18,10 @@ class CaltopoPositionReportQueryTest {
             CaltopoCameraMetadata(
                 "https://r2c-tracker.com/t/Bz2DZg",
                 "https://r2c-tracker.com/ncssar/api/v1/video/thumbnail/session-1",
+                111.46,
+                -37.0,
+                37.703125,
+                21.207031,
             ),
         )
 
@@ -29,6 +33,10 @@ class CaltopoPositionReportQueryTest {
             parameters.getString("camera:external_url"),
         )
         assertTrue(parameters.has("camera:thumbnail_url"))
+        assertEquals(111.46, parameters.getDouble("camera:azimuth"), 0.0)
+        assertEquals(-37.0, parameters.getDouble("camera:tilt"), 0.0)
+        assertEquals(37.703125, parameters.getDouble("camera:fov_width"), 0.0)
+        assertEquals(21.207031, parameters.getDouble("camera:fov_height"), 0.0)
         assertFalse(parameters.has("aircraft"))
         assertFalse(parameters.has("camera"))
     }

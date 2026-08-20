@@ -23,6 +23,11 @@ typedef enum R2CFFmpegStatus {
 // when the session cannot be allocated or its worker cannot be started.
 R2CFFmpegSession *R2CFFmpegSessionCreate(const char *url);
 
+// Starts real-time, single-pass playback of a local H.264 recording. The
+// decoder inspects non-picture packets for metadata but does not
+// submit standalone SEI samples to VideoToolbox.
+R2CFFmpegSession *R2CFFmpegSessionCreatePlayback(const char *url);
+
 // Interrupts network I/O, joins the worker, and releases all retained frames.
 void R2CFFmpegSessionDestroy(R2CFFmpegSession *session);
 
@@ -55,6 +60,20 @@ bool R2CFFmpegSessionCopyLatestCameraYawDegrees(
 bool R2CFFmpegSessionCopyLatestHeadingDegrees(
     R2CFFmpegSession *session,
     double *headingDegrees
+);
+bool R2CFFmpegSessionCopyLatestDJICameraTelemetry(
+    R2CFFmpegSession *session,
+    double *azimuthDegrees,
+    double *tiltDegrees,
+    double *horizontalFovDegrees,
+    double *verticalFovDegrees,
+    double *attitudeAnglesDegrees,
+    int attitudeAngleCapacity,
+    // aircraft lat/lon, relative-up, reference lat/lon/alt, motion course
+    double *positionValues,
+    int positionValueCapacity,
+    int64_t *sourceTimestampMicroseconds,
+    uint64_t *sequence
 );
 
 const char *R2CFFmpegVersion(void);

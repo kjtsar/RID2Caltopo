@@ -4,10 +4,25 @@ import Foundation
 public struct CaltopoCameraMetadata: Equatable, Sendable {
     public let externalURL: URL
     public let thumbnailURL: URL?
+    public let azimuthDegrees: Double?
+    public let tiltDegrees: Double?
+    public let horizontalFovDegrees: Double?
+    public let verticalFovDegrees: Double?
 
-    public init(externalURL: URL, thumbnailURL: URL? = nil) {
+    public init(
+        externalURL: URL,
+        thumbnailURL: URL? = nil,
+        azimuthDegrees: Double? = nil,
+        tiltDegrees: Double? = nil,
+        horizontalFovDegrees: Double? = nil,
+        verticalFovDegrees: Double? = nil
+    ) {
         self.externalURL = externalURL
         self.thumbnailURL = thumbnailURL
+        self.azimuthDegrees = azimuthDegrees
+        self.tiltDegrees = tiltDegrees
+        self.horizontalFovDegrees = horizontalFovDegrees
+        self.verticalFovDegrees = verticalFovDegrees
     }
 }
 
@@ -607,6 +622,18 @@ public actor CaltopoLiveClient {
                     name: "camera:thumbnail_url",
                     value: thumbnailURL.absoluteString
                 ))
+            }
+            if let azimuth = cameraMetadata.azimuthDegrees, azimuth.isFinite {
+                queryItems.append(URLQueryItem(name: "camera:azimuth", value: String(azimuth)))
+            }
+            if let tilt = cameraMetadata.tiltDegrees, tilt.isFinite {
+                queryItems.append(URLQueryItem(name: "camera:tilt", value: String(tilt)))
+            }
+            if let width = cameraMetadata.horizontalFovDegrees, width.isFinite {
+                queryItems.append(URLQueryItem(name: "camera:fov_width", value: String(width)))
+            }
+            if let height = cameraMetadata.verticalFovDegrees, height.isFinite {
+                queryItems.append(URLQueryItem(name: "camera:fov_height", value: String(height)))
             }
         }
         components.queryItems = queryItems

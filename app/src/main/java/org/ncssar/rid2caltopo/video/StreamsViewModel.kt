@@ -73,6 +73,9 @@ import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
 import org.ncssar.rid2caltopo.video.anomaly.PersonRelevanceMode
 import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
+import org.ncssar.rid2caltopo.video.ffmpeg.DjiCameraOrientation
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetryRegistry
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetrySample
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
@@ -127,7 +130,9 @@ data class PendingClue(
     val preview: Bitmap?,
     val title: String,
     val description: String,
-    val streamTelemetrySummary: String? = null
+    val streamTelemetrySummary: String? = null,
+    val aircraftPositionSourceLabel: String = "RID",
+    val aglSourceLabel: String? = null,
 )
 
 data class LocalMapMarker(
@@ -164,6 +169,29 @@ fun removeLocalMapMarkerById(markers: MutableList<LocalMapMarker>, markerId: Str
     if (index < 0) return false
     markers.removeAt(index)
     return true
+}
+
+fun localMapMarkerForArtifact(
+    markers: List<LocalMapMarker>,
+    artifactTitle: String,
+    artifactLat: Double,
+    artifactLng: Double,
+    maxDistanceMeters: Double = 10.0,
+): LocalMapMarker? {
+    val normalizedTitle = artifactTitle.trim()
+    if (normalizedTitle.isEmpty() || !artifactLat.isFinite() || !artifactLng.isFinite()) return null
+    return markers
+        .asSequence()
+        .filter { it.title.trim().equals(normalizedTitle, ignoreCase = true) }
+        .map { marker ->
+            val meanLatitudeRadians = Math.toRadians((marker.lat + artifactLat) / 2.0)
+            val northMeters = (marker.lat - artifactLat) * 111_320.0
+            val eastMeters = (marker.lng - artifactLng) * 111_320.0 * cos(meanLatitudeRadians)
+            marker to sqrt(northMeters * northMeters + eastMeters * eastMeters)
+        }
+        .filter { (_, distanceMeters) -> distanceMeters <= maxDistanceMeters }
+        .minByOrNull { (_, distanceMeters) -> distanceMeters }
+        ?.first
 }
 
 fun registerClueSnapshotByTitle(
@@ -391,6 +419,8 @@ internal fun buildClueCaptureSummary(
     lines += clue.aglMeters?.let {
         String.format(Locale.US, "  AGL: %.0f'", it * METERS_TO_FEET)
     } ?: "  AGL: N/A"
+    clue.aglSourceLabel?.let { lines += "  AGL source: $it" }
+    lines += "  Aircraft position source: ${clue.aircraftPositionSourceLabel}"
     lines += clue.atoMeters?.let {
         String.format(Locale.US, "  ATO: %.0f'", it * METERS_TO_FEET)
     } ?: "  ATO: N/A"
@@ -426,17 +456,37 @@ internal fun formatClueHeading(value: Double?): String? {
     return String.format(Locale.US, "%.1f", roundedTenths / 10.0)
 }
 
+internal fun videoMslAglMeters(mslAltitudeMeters: Double?, groundElevationMeters: Double?): Double? {
+    val msl = mslAltitudeMeters?.takeIf { it.isFinite() } ?: return null
+    val ground = groundElevationMeters?.takeIf { it.isFinite() } ?: return null
+    return (msl - ground).takeIf { it.isFinite() && it in 0.0..10_000.0 }
+}
+
 internal fun selectClueHeading(
+    djiCameraAzimuthDeg: Double? = null,
+    djiVideoCourseDeg: Double?,
     telemetry: StreamTelemetrySnapshot?,
     derivedHeadingDeg: Double?,
     ridTrackDeg: Double?,
 ): HeadingSelection {
+    val djiCameraAzimuth = normalizeClueHeading(djiCameraAzimuthDeg)
+    if (djiCameraAzimuth != null) {
+        return HeadingSelection(djiCameraAzimuth, "DJI camera azimuth")
+    }
+
+    val djiVideoCourse = normalizeClueHeading(djiVideoCourseDeg)
+    if (djiVideoCourse != null) {
+        return HeadingSelection(djiVideoCourse, "DJI video-derived course")
+    }
+
     val derivedHeading = normalizeClueHeading(derivedHeadingDeg)
     if (derivedHeading != null) {
         return HeadingSelection(derivedHeading, "Derived drone heading")
     }
 
-    val cameraYaw = normalizeClueHeading(telemetry?.cameraYawDeg)
+    val cameraYaw = normalizeClueHeading(
+        telemetry?.takeUnless { it.sourceTag == "dji-sei-245" }?.cameraYawDeg
+    )
     if (cameraYaw != null) return HeadingSelection(cameraYaw, "Camera yaw")
 
     val streamHeading = normalizeClueHeading(telemetry?.headingDeg)
@@ -469,8 +519,11 @@ internal fun projectClueLocation(
 
     val clampedAngle = gimbalAngleDeg
         .takeIf { it.isFinite() }
-        ?.coerceIn(-90.0, 0.0)
+        ?.coerceIn(-90.0, 90.0)
         ?: DEFAULT_CLUE_GIMBAL_ANGLE_DEG
+    if (clampedAngle >= -0.1) {
+        return ClueProjection(droneLat, droneLng, projectedAlt)
+    }
     val tiltFromHorizonDeg = abs(clampedAngle).coerceIn(0.1, 90.0)
     val horizontalDistanceM = if (tiltFromHorizonDeg >= 89.9) {
         0.0
@@ -533,8 +586,9 @@ internal suspend fun projectClueLocationWithDemSamples(
     val validAgl = aglMeters?.takeIf { it.isFinite() && it > 0.0 } ?: return flatProjection
     val clampedAngle = gimbalAngleDeg
         .takeIf { it.isFinite() }
-        ?.coerceIn(-90.0, 0.0)
+        ?.coerceIn(-90.0, 90.0)
         ?: DEFAULT_CLUE_GIMBAL_ANGLE_DEG
+    if (clampedAngle >= -0.1) return flatProjection
     val tiltFromHorizonDeg = abs(clampedAngle).coerceIn(0.1, 90.0)
     if (tiltFromHorizonDeg >= 89.9) return flatProjection
 
@@ -781,6 +835,11 @@ class StreamsViewModel(
     private val processLoadLogIntervalMs = 5_000L
     private val ffmpegProbeService: FfmpegProbeService? = try {
         FfmpegProbeService(
+            onLiveFrame = { designator, observedAtMs ->
+                viewModelScope.launch(Dispatchers.Main.immediate) {
+                    notePairedLiveVideoFrame(designator, observedAtMs)
+                }
+            },
             onLocalPlaybackEof = { designator ->
                 viewModelScope.launch {
                     handleLocalPlaybackEof(designator)
@@ -1636,6 +1695,21 @@ class StreamsViewModel(
         return pairedDroneSpecStateFor(streamDesignator) != null
     }
 
+    private fun notePairedLiveVideoFrame(streamDesignator: String, observedAtMs: Long) {
+        val streamInfo = streamInfoByDesignator[streamDesignator] ?: return
+        if (streamInfo.isLocalPlayback || streamInfo.state != StreamState.LIVE) return
+        val remoteId = resolveStreamTelemetryBinding(
+            streamDesignator = streamDesignator,
+            telemetryStates = streamTelemetryStates(),
+            runtimeStreamBindings = runtimeStreamTelemetryBindings,
+            configuredStreamBindings = configuredStreamBindings,
+        ).telemetry?.remoteId ?: return
+        // A newly rendered frame from a stream that is paired to an active aircraft proves that
+        // the controller/drone session is still alive. Preserve the flight and its takeoff
+        // reference across a temporary RID receiver gap without making video a position update.
+        CaltopoClient.NoteActiveAircraftMessageReceived(remoteId, observedAtMs)
+    }
+
     fun streamPairingWarning(
         streamDesignator: String,
         remoteId: String,
@@ -1808,26 +1882,40 @@ class StreamsViewModel(
         val telemetryStartedAtMs = System.currentTimeMillis()
         val telemetry = ffmpegProbeService?.telemetrySnapshot(designator)
         logSnapshotIfSlow("telemetrySnapshot", System.currentTimeMillis() - telemetryStartedAtMs)
-        val clueLat = telemetry?.latitude ?: droneSpec.lastLat
-        val clueLng = telemetry?.longitude ?: droneSpec.lastLng
-        val clueAlt = telemetry?.altitudeMeters ?: droneSpec.lastAlt
-        val clueTimestamp = telemetry?.sourceTimestampUs?.let { it / 1000L } ?: droneSpec.mostRecentMsecTimestamp
+        val freshDjiCamera = StreamCameraTelemetryRegistry.fresh(
+            designator = designator,
+            nowMs = System.currentTimeMillis(),
+        )
+        val nonDjiTelemetry = telemetry?.takeUnless { it.sourceTag == "dji-sei-245" }
+        val clueLat = freshDjiCamera?.latitudeDeg ?: nonDjiTelemetry?.latitude ?: droneSpec.lastLat
+        val clueLng = freshDjiCamera?.longitudeDeg ?: nonDjiTelemetry?.longitude ?: droneSpec.lastLng
+        // DJI's fixed altitude uses an unknown datum. Anchor its continuous relative-up
+        // displacement to the same RID/barometric takeoff MSL value used elsewhere.
+        val seiBarometricAltitude = freshDjiCamera?.relativeUpMeters?.let { relativeUp ->
+            droneSpec.getImpliedTakeoffAltM()?.plus(relativeUp)
+        }
+        val clueAlt = seiBarometricAltitude ?: nonDjiTelemetry?.altitudeMeters ?: droneSpec.lastAlt
+        val clueTimestamp = nonDjiTelemetry?.sourceTimestampUs?.div(1000L)
+            ?: droneSpec.mostRecentMsecTimestamp
         val displayState = streamTelemetryDisplayState(
             streamDesignator = designator,
             pairedMappedId = droneSpec.mappedId,
             displayStateByDesignator = altitudeCoordinator.displayStateByDesignator
         )
         val headingSelection = selectClueHeading(
-            telemetry = telemetry,
+            djiCameraAzimuthDeg = freshDjiCamera?.azimuthDeg,
+            djiVideoCourseDeg = freshDjiCamera?.courseDeg,
+            telemetry = nonDjiTelemetry,
             derivedHeadingDeg = displayState?.derivedHeadingDeg,
             ridTrackDeg = droneSpec.lastPositionTelemetry?.aircraftTrackDeg,
         )
         val clueBearing = headingSelection.headingDeg
         val clueAglMeters = displayState?.aglFt?.div(METERS_TO_FEET)
         val clueAtoMeters = displayState?.atoFt?.div(METERS_TO_FEET)
-        val clueGimbalAngle = telemetry?.gimbalPitchDeg
-            ?.takeIf { it.isFinite() }
-            ?.coerceIn(-90.0, 0.0)
+        val clueGimbalAngle = freshDjiCamera?.tiltDeg
+            ?: nonDjiTelemetry?.gimbalPitchDeg
+                ?.takeIf { it.isFinite() }
+                ?.coerceIn(-90.0, 90.0)
             ?: DEFAULT_CLUE_GIMBAL_ANGLE_DEG
         val projectionStartedAtMs = System.currentTimeMillis()
         val projectedLocation = projectClueLocation(
@@ -1841,8 +1929,13 @@ class StreamsViewModel(
         logSnapshotIfSlow("projection", System.currentTimeMillis() - projectionStartedAtMs)
         CTDebug(tag, String.format(
             Locale.US,
-            "onSnapshotCaptured(%s): projection inputs droneLat=%.6f droneLng=%.6f droneAlt=%.1f bearingDeg=%s aglM=%s gimbalDeg=%s projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f",
+            "onSnapshotCaptured(%s): projection inputs source=%s droneLat=%.6f droneLng=%.6f droneAlt=%.1f bearingDeg=%s aglM=%s gimbalDeg=%s projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f",
             designator,
+            when {
+                freshDjiCamera?.latitudeDeg != null -> "dji-sei-position"
+                nonDjiTelemetry?.latitude != null -> "stream"
+                else -> "rid"
+            },
             clueLat,
             clueLng,
             clueAlt,
@@ -1859,6 +1952,7 @@ class StreamsViewModel(
             droneSpec,
             telemetry,
             coordinateDisplayFormat,
+            freshDjiCamera,
         )
         logSnapshotIfSlow("buildTelemetrySummary", System.currentTimeMillis() - summaryStartedAtMs)
 
@@ -1881,7 +1975,8 @@ class StreamsViewModel(
             preview = null,
             title = "",
             description = buildClueDescriptionTemplate(clueTimestamp),
-            streamTelemetrySummary = summary
+            streamTelemetrySummary = summary,
+            aircraftPositionSourceLabel = if (nonDjiTelemetry?.latitude != null) "stream" else "RID",
         )
 
         requestDemClueProjectionRefresh(designator)
@@ -2139,7 +2234,7 @@ class StreamsViewModel(
                         )
                     }
             }
-            CaltopoClient.ShowToast("Local clue copy deleted.")
+            CaltopoClient.ShowToast("Local clue copy deleted; its CalTopo marker remains.")
             CTDebug(tag, "deleteLocalMapMarker: deleted local copy id=$markerId")
         }
         return removed
@@ -2156,13 +2251,14 @@ class StreamsViewModel(
         if (clue.designator != designator) return
         clueProjectionJob?.cancel()
         clueProjectionJob = viewModelScope.launch(Dispatchers.Default) {
+            val projectionAglMeters = clue.aglMeters
             val refined = projectClueLocationWithDem(
                 demElevationService = altitudeCoordinator.demElevationService,
                 droneLat = clue.droneLat,
                 droneLng = clue.droneLng,
                 droneAlt = clue.droneAlt,
                 headingDeg = clue.headingDeg,
-                aglMeters = clue.aglMeters,
+                aglMeters = projectionAglMeters,
                 gimbalAngleDeg = clue.gimbalAngleDeg,
             )
             withContext(Dispatchers.Main) {
@@ -2177,6 +2273,8 @@ class StreamsViewModel(
                     lat = refined.lat,
                     lng = refined.lng,
                     alt = refined.alt,
+                    aglMeters = projectionAglMeters,
+                    aglSourceLabel = current.aglSourceLabel,
                 )
                 CTDebug(tag, String.format(
                     Locale.US,
@@ -2419,6 +2517,7 @@ class StreamsViewModel(
         droneSpec: CtDroneSpec,
         telemetry: StreamTelemetrySnapshot?,
         coordinateDisplayFormat: CoordinateDisplayFormat,
+        djiCameraSample: StreamCameraTelemetrySample? = null,
     ): String? {
         val ridTelemetry = droneSpec.lastPositionTelemetry
         if (telemetry == null && ridTelemetry == null) return null
@@ -2479,20 +2578,83 @@ class StreamsViewModel(
             if (telemetry.remoteIdCandidates.isNotEmpty()) {
                 lines += "  RID candidates: ${telemetry.remoteIdCandidates.joinToString(",")}"
             }
-            if (telemetry.latitude != null && telemetry.longitude != null) {
+            if (telemetry.sourceTag != "dji-sei-245" &&
+                telemetry.latitude != null && telemetry.longitude != null) {
                 val altText = telemetry.altitudeMeters?.let {
                     String.format(Locale.US, ", alt=%.0f'", it * METERS_TO_FEET)
                 } ?: ""
                 lines += String.format(Locale.US, "  Stream position: %.6f, %.6f%s", telemetry.latitude, telemetry.longitude, altText)
             }
-            telemetry.gimbalPitchDeg?.let { lines += String.format(Locale.US, "  Gimbal pitch: %.1f\u00b0", it) }
-            telemetry.cameraYawDeg?.let { lines += String.format(Locale.US, "  Camera yaw: %.1f\u00b0", it) }
+            val diagnosticTilt = if (telemetry.sourceTag == "dji-sei-245") {
+                djiCameraSample?.rawTiltDeg
+            } else {
+                telemetry.gimbalPitchDeg
+            }
+            diagnosticTilt?.let { raw ->
+                val calibrated = if (telemetry.sourceTag == "dji-sei-245") {
+                    DjiCameraOrientation.calibratedTiltDeg(raw)
+                } else null
+                lines += calibrated?.let {
+                    String.format(Locale.US, "  Camera tilt: %.1f\u00b0 (raw %.1f\u00b0)", it, raw)
+                } ?: String.format(Locale.US, "  Gimbal pitch: %.1f\u00b0", raw)
+            }
+            val diagnosticYaw = if (telemetry.sourceTag == "dji-sei-245") {
+                djiCameraSample?.rawCameraAzimuthDeg
+            } else {
+                telemetry.cameraYawDeg
+            }
+            diagnosticYaw?.let { raw ->
+                lines += if (telemetry.sourceTag == "dji-sei-245") {
+                    String.format(Locale.US, "  DJI raw magnetic azimuth encoder: %.1f\u00b0", raw)
+                } else {
+                    String.format(Locale.US, "  Camera yaw: %.1f\u00b0", raw)
+                }
+            }
+            telemetry.horizontalFovDeg?.let { lines += String.format(Locale.US, "  Horizontal FOV: %.2f\u00b0", it) }
+            telemetry.verticalFovDeg?.let { lines += String.format(Locale.US, "  Vertical FOV: %.2f\u00b0", it) }
             telemetry.sourceTag?.let { src ->
                 val confidenceText = telemetry.confidence?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"
                 lines += "  Telemetry source: $src (confidence=$confidenceText)"
             }
-            telemetry.sourceTimestampUs?.let { lines += "  Telemetry timestamp(us): $it" }
+            (djiCameraSample?.sourceTimestampUs ?: telemetry.sourceTimestampUs)
+                ?.let { lines += "  Telemetry timestamp(us): $it" }
         }
+        djiCameraSample?.let { sample ->
+            if (sample.latitudeDeg != null && sample.longitudeDeg != null) {
+                lines += String.format(
+                    Locale.US,
+                    "  DJI SEI aircraft position: %.7f, %.7f relative-up %.1f'",
+                    sample.latitudeDeg,
+                    sample.longitudeDeg,
+                    (sample.relativeUpMeters ?: 0.0) * METERS_TO_FEET,
+                )
+                lines += "  Clue aircraft position source: DJI SEI local displacement"
+            }
+            if (sample.referenceLatitudeDeg != null && sample.referenceLongitudeDeg != null) {
+                lines += String.format(
+                    Locale.US,
+                    "  DJI SEI home/reference: %.7f, %.7f datum alt %s",
+                    sample.referenceLatitudeDeg,
+                    sample.referenceLongitudeDeg,
+                    sample.referenceAltitudeMeters?.let { String.format(Locale.US, "%.1f'", it * METERS_TO_FEET) }
+                        ?: "N/A",
+                )
+            }
+        }
+        djiCameraSample?.attitudeAnglesDeg
+            ?.takeIf { it.size == 9 }
+            ?.let { angles ->
+                lines += "  DJI tag-4 angle candidates (same SEI frame):"
+                angles.forEachIndexed { index, value ->
+                    val offset = 3 + index * 4
+                    lines += String.format(
+                        Locale.US,
+                        "    offset %d: %s",
+                        offset,
+                        if (value.isFinite()) String.format(Locale.US, "%.3f°", value) else "N/A",
+                    )
+                }
+            }
         return lines.joinToString("\n")
     }
 
@@ -2631,6 +2793,7 @@ class StreamsViewModel(
                 )
             }
             ffmpegProbeService?.updateSourcePath(designator, info.sourcePath)
+            ffmpegProbeService?.ensureTelemetryProbeSession(designator)
             renderRouteByDesignator[designator] = useFfmpeg
             ffmpegProbeService?.setRenderEnabled(designator, useFfmpeg)
             if (
@@ -2642,9 +2805,9 @@ class StreamsViewModel(
                 ffmpegProbeService?.ensureManagedVideoRenderSession(designator)
             }
             if (!streamsUiActive && !keepForManagedVideo) {
-                ffmpegProbeService?.onStreamStopped(designator)
+                ffmpegProbeService?.suspendRender(designator)
                 streamSessionService.onStreamStopped(designator)
-                CTDebug(tag, "Stream $designator live -> streams UI inactive, discarding packets")
+                CTDebug(tag, "Stream $designator live -> streams UI inactive, retaining telemetry probe")
                 return@forEach
             }
             if (useFfmpeg) {

@@ -275,6 +275,21 @@ final class RIDTrackViewModel: ObservableObject {
         )
     }
 
+    func terrainDerivedAglMeters(
+        latitude: Double,
+        longitude: Double,
+        mslAltitudeMeters: Double
+    ) async -> Double? {
+        guard let ground = await terrainService.sample(
+            latitude: latitude,
+            longitude: longitude
+        )?.elevationMeters else { return nil }
+        return OperationalClueGeometry.djiVideoAglMeters(
+            mslAltitudeMeters: mslAltitudeMeters,
+            groundElevationMeters: ground
+        )
+    }
+
     private func updateAltitude(for track: RidAircraftTrack) {
         var coordinator = altitudeCoordinatorByAircraftID[track.aircraftID] ?? OperationalAltitudeCoordinator()
         coordinator.ingest(track.lastObservation)
@@ -679,6 +694,30 @@ final class RIDTrackViewModel: ObservableObject {
 
     private func enqueuePublication(remoteID: String, label: String, observation: RidObservation) {
         let previous = publicationChains[remoteID]
+        let videoTelemetry = peerCoordinator?.djiCameraTelemetry(droneDesignator: label)
+        let videoAltitude = videoTelemetry?.relativeUpMeters.flatMap { relativeUp -> Double? in
+            guard observation.heightReference == .takeoff,
+                  let altitude = observation.altitudeMeters,
+                  let height = observation.heightMeters else { return nil }
+            return altitude - height + relativeUp
+        }
+        let publicationObservation = RidObservation(
+            source: observation.source,
+            aircraftId: observation.aircraftId,
+            receivedAt: observation.receivedAt,
+            latitude: videoTelemetry?.latitudeDegrees ?? observation.latitude,
+            longitude: videoTelemetry?.longitudeDegrees ?? observation.longitude,
+            altitudeMeters: videoAltitude ?? observation.altitudeMeters,
+            heightMeters: observation.heightMeters,
+            heightReference: observation.heightReference,
+            horizontalAccuracyCode: observation.horizontalAccuracyCode,
+            headingDegrees: observation.headingDegrees,
+            speedMetersPerSecond: observation.speedMetersPerSecond,
+            operatorLatitude: observation.operatorLatitude,
+            operatorLongitude: observation.operatorLongitude,
+            signalStrengthDbm: observation.signalStrengthDbm,
+            droneScoutRelay: observation.droneScoutRelay
+        )
         let cameraMetadata = peerCoordinator?.caltopoCameraMetadata(
             droneDesignator: label
         )
@@ -688,7 +727,7 @@ final class RIDTrackViewModel: ObservableObject {
             await caltopoPublisher.publish(
                 remoteID: remoteID,
                 label: label,
-                observation: observation,
+                observation: publicationObservation,
                 cameraMetadata: cameraMetadata
             )
         }

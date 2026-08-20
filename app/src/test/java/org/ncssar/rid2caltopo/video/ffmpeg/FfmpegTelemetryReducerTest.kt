@@ -55,4 +55,17 @@ class FfmpegTelemetryReducerTest {
         assertEquals(listOf("RID-1"), result.updatedCandidates.toList())
         assertNull(result.addedRemoteId)
     }
+
+    @Test
+    fun merge_keepsNineDjiAnglesFromOneIncomingFrame() {
+        val prior = (10..18).map(Int::toDouble)
+        val current = (20..28).map(Int::toDouble)
+        val result = FfmpegTelemetryReducer.merge(
+            existing = FfmpegTelemetry(djiAttitudeAnglesDeg = prior),
+            incoming = FfmpegTelemetry(djiAttitudeAnglesDeg = current),
+            existingCandidates = emptySet(),
+        )
+
+        assertEquals(current, result.mergedTelemetry.djiAttitudeAnglesDeg)
+    }
 }

@@ -88,7 +88,7 @@ final class AppleStreamRegistry: ObservableObject {
         case let .streamStarted(path, publisherID), let .streamPublisherHandoff(path, publisherID):
             let session = admit(path: path, state: .live, publisherID: publisherID)
             session?.errorDetail = nil
-            if let session, session.model.state == .idle, let url = session.endpoint.loopbackHlsURL { session.model.start(url: url) }
+            startDecoderIfNeeded(for: session)
             session?.model.handleMediaServerEvent(event)
         case let .hlsStreamStarted(path):
             let activePaths = Set(sessions.filter { $0.state == .live && $0.publisherConnectionID != nil }.map(\.sourcePath))
@@ -96,7 +96,7 @@ final class AppleStreamRegistry: ObservableObject {
                   let session = matching(path)
             else { break }
             session.model.handleMediaServerEvent(event)
-            if session.model.state == .idle, let url = session.endpoint.loopbackHlsURL { session.model.start(url: url) }
+            startDecoderIfNeeded(for: session)
         case let .streamStopped(path, publisherID), let .rtmpSessionClosed(path, publisherID, _):
             stop(path: path, publisherID: publisherID)
         case let .streamError(path, publisherID, detail):
@@ -199,6 +199,13 @@ final class AppleStreamRegistry: ObservableObject {
         guard let session = matching(path) else { return }
         if let publisherID, let current = session.publisherConnectionID, publisherID != current { return }
         session.model.handleMediaServerEvent(.streamStopped(path: session.sourcePath, publisherConnectionID: publisherID))
+        if LiveStreamDecoderLifecyclePolicy.shouldResetAfterPublisherStopped(
+            sessionPath: session.sourcePath,
+            decoderPath: session.model.activeSourcePath
+        ) {
+            session.model.stop()
+            AppleLog.info("Streams", "Reset decoder after publisher stopped path=\(session.sourcePath)")
+        }
         session.state = .stopped
         session.publisherConnectionID = nil
         session.changedAt = Date()
@@ -208,6 +215,24 @@ final class AppleStreamRegistry: ObservableObject {
             if focusedID == session.id { focusedID = sessions.first?.id ?? "demo" }
         }
         rejectedPaths.remove(path)
+    }
+
+    private func startDecoderIfNeeded(for session: AppleLiveStreamSession?) {
+        guard let session, let url = session.endpoint.loopbackHlsURL else { return }
+        let shouldStart = LiveStreamDecoderLifecyclePolicy.shouldStartDecoder(
+            publisherPath: session.sourcePath,
+            decoderPath: session.model.activeSourcePath,
+            decoderIsIdle: session.model.state == .idle
+        )
+        guard shouldStart else { return }
+        if session.model.state != .idle {
+            AppleLog.warning(
+                "Streams",
+                "Resetting decoder for new publisher path=\(session.sourcePath) previous=\(session.model.activeSourcePath ?? "unknown")"
+            )
+            session.model.stop()
+        }
+        session.model.start(url: url)
     }
 
     private func matching(_ path: String) -> AppleLiveStreamSession? {

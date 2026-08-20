@@ -1,4 +1,6 @@
 #include "R2CFFmpegMobile.h"
+#include "R2CH264Packet.h"
+#include "../../../native/R2CDJICameraTelemetry.h"
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -23,6 +25,7 @@ struct R2CFFmpegSession {
     pthread_mutex_t lock;
     atomic_bool running;
     bool workerStarted;
+    bool localPlayback;
     char *url;
     R2CFFmpegStatus status;
     char detail[256];
@@ -36,10 +39,38 @@ struct R2CFFmpegSession {
     bool hasCameraYaw;
     double latestHeadingDegrees;
     bool hasHeading;
+    double latestDJIAzimuthDegrees;
+    double latestDJITiltDegrees;
+    double latestDJIHorizontalFovDegrees;
+    double latestDJIVerticalFovDegrees;
+    double latestDJIAttitudeAnglesDegrees[9];
+    double latestDJIPositionValues[7];
+    bool hasDJIDisplacement;
+    int16_t lastDJIRawNorth;
+    int16_t lastDJIRawEast;
+    int16_t lastDJIRawDown;
+    int64_t djiNorthMillimeters;
+    int64_t djiEastMillimeters;
+    int64_t djiDownMillimeters;
+    int64_t djiInitialDownMillimeters;
+    int64_t djiCourseAnchorNorthMillimeters;
+    int64_t djiCourseAnchorEastMillimeters;
+    double latestDJICourseDegrees;
+    bool hasDJICourse;
+    int64_t latestDJISourceTimestampMicroseconds;
+    uint64_t djiCameraTelemetrySequence;
+    bool hasDJICameraTelemetry;
     char lastFFmpegLog[256];
 };
 
 static _Atomic(R2CFFmpegSession *) activeLogSession = NULL;
+
+static int32_t dji_signed16_delta(int16_t current, int16_t previous) {
+    int32_t delta = (int32_t) current - (int32_t) previous;
+    if (delta > 32767) delta -= 65536;
+    if (delta < -32768) delta += 65536;
+    return delta;
+}
 
 static void capture_ffmpeg_log(void *context, int level, const char *format, va_list arguments) {
     if (level > AV_LOG_VERBOSE) {
@@ -213,6 +244,9 @@ static void *decode_worker(void *opaque) {
     int videoStreamIndex = -1;
     int result = 0;
     int startupPacketErrors = 0;
+    int nalLengthSize = 4;
+    int64_t playbackFirstTimestampMicroseconds = AV_NOPTS_VALUE;
+    int64_t playbackStartedAtMicroseconds = 0;
 
     avformat_network_init();
     atomic_store_explicit(&activeLogSession, session, memory_order_release);
@@ -226,21 +260,27 @@ static void *decode_worker(void *opaque) {
     format->interrupt_callback.callback = interrupt_callback;
     format->interrupt_callback.opaque = session;
 
-    av_dict_set(&options, "rtsp_transport", "tcp", 0);
-    av_dict_set(&options, "allowed_media_types", "video", 0);
-    av_dict_set(&options, "fflags", "nobuffer", 0);
-    av_dict_set(&options, "flags", "low_delay", 0);
-    av_dict_set(&options, "reorder_queue_size", "0", 0);
-    av_dict_set(&options, "max_delay", "100000", 0);
-    av_dict_set(&options, "probesize", "32768", 0);
-    av_dict_set(&options, "analyzeduration", "0", 0);
-    av_dict_set(&options, "fpsprobesize", "0", 0);
+    if (!session->localPlayback) {
+        av_dict_set(&options, "rtsp_transport", "tcp", 0);
+        av_dict_set(&options, "allowed_media_types", "video", 0);
+        av_dict_set(&options, "fflags", "nobuffer", 0);
+        av_dict_set(&options, "flags", "low_delay", 0);
+        av_dict_set(&options, "reorder_queue_size", "0", 0);
+        av_dict_set(&options, "max_delay", "100000", 0);
+        av_dict_set(&options, "probesize", "32768", 0);
+        av_dict_set(&options, "analyzeduration", "0", 0);
+        av_dict_set(&options, "fpsprobesize", "0", 0);
+    }
 
     result = avformat_open_input(&format, session->url, NULL, &options);
     av_dict_free(&options);
     if (result < 0) {
         if (atomic_load(&session->running)) {
-            set_ffmpeg_error(session, "RTSP open failed", result);
+            set_ffmpeg_error(
+                session,
+                session->localPlayback ? "Recording open failed" : "RTSP open failed",
+                result
+            );
         }
         goto finished;
     }
@@ -260,6 +300,12 @@ static void *decode_worker(void *opaque) {
     }
 
     AVStream *stream = format->streams[videoStreamIndex];
+    if (stream->codecpar->codec_id == AV_CODEC_ID_H264 &&
+        stream->codecpar->extradata != NULL &&
+        stream->codecpar->extradata_size >= 5 &&
+        stream->codecpar->extradata[0] == 1) {
+        nalLengthSize = (stream->codecpar->extradata[4] & 0x03) + 1;
+    }
     ingest_telemetry_metadata(session, format->metadata);
     ingest_telemetry_metadata(session, stream->metadata);
     const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
@@ -314,7 +360,15 @@ static void *decode_worker(void *opaque) {
         result = av_read_frame(format, packet);
         if (result < 0) {
             if (atomic_load(&session->running)) {
-                set_ffmpeg_error(session, "RTSP read ended", result);
+                if (session->localPlayback && result == AVERROR_EOF) {
+                    set_status(session, R2C_FFMPEG_STATUS_ENDED, "Playback complete");
+                } else {
+                    set_ffmpeg_error(
+                        session,
+                        session->localPlayback ? "Recording read ended" : "RTSP read ended",
+                        result
+                    );
+                }
             }
             break;
         }
@@ -323,6 +377,113 @@ static void *decode_worker(void *opaque) {
             continue;
         }
         ingest_packet_telemetry_metadata(session, packet);
+        if (stream->codecpar->codec_id == AV_CODEC_ID_H264) {
+            R2CDJICameraTelemetry camera = {0};
+            if (R2CDJIDecodeH264Packet(
+                    packet->data,
+                    (size_t) packet->size,
+                    nalLengthSize,
+                    &camera)) {
+                pthread_mutex_lock(&session->lock);
+                session->latestDJIAzimuthDegrees = camera.azimuthDegrees;
+                session->latestDJITiltDegrees = camera.tiltDegrees;
+                session->latestDJIHorizontalFovDegrees = camera.horizontalFovDegrees;
+                session->latestDJIVerticalFovDegrees = camera.verticalFovDegrees;
+                memcpy(
+                    session->latestDJIAttitudeAnglesDegrees,
+                    camera.attitudeAnglesDegrees,
+                    sizeof(session->latestDJIAttitudeAnglesDegrees)
+                );
+                if (camera.relativeDisplacementValid && camera.positionValid) {
+                    if (!session->hasDJIDisplacement) {
+                        session->djiNorthMillimeters = camera.relativeNorthMillimetersRaw;
+                        session->djiEastMillimeters = camera.relativeEastMillimetersRaw;
+                        session->djiDownMillimeters = camera.relativeDownMillimetersRaw;
+                        session->djiInitialDownMillimeters = camera.relativeDownMillimetersRaw;
+                        session->djiCourseAnchorNorthMillimeters = session->djiNorthMillimeters;
+                        session->djiCourseAnchorEastMillimeters = session->djiEastMillimeters;
+                        session->hasDJIDisplacement = true;
+                    } else {
+                        session->djiNorthMillimeters += dji_signed16_delta(
+                            camera.relativeNorthMillimetersRaw, session->lastDJIRawNorth);
+                        session->djiEastMillimeters += dji_signed16_delta(
+                            camera.relativeEastMillimetersRaw, session->lastDJIRawEast);
+                        session->djiDownMillimeters += dji_signed16_delta(
+                            camera.relativeDownMillimetersRaw, session->lastDJIRawDown);
+                    }
+                    session->lastDJIRawNorth = camera.relativeNorthMillimetersRaw;
+                    session->lastDJIRawEast = camera.relativeEastMillimetersRaw;
+                    session->lastDJIRawDown = camera.relativeDownMillimetersRaw;
+                    int64_t courseNorth = session->djiNorthMillimeters -
+                        session->djiCourseAnchorNorthMillimeters;
+                    int64_t courseEast = session->djiEastMillimeters -
+                        session->djiCourseAnchorEastMillimeters;
+                    if (hypot((double) courseNorth, (double) courseEast) >= 3000.0) {
+                        session->latestDJICourseDegrees = fmod(
+                            atan2((double) courseEast, (double) courseNorth) * 180.0 / M_PI + 360.0,
+                            360.0);
+                        session->hasDJICourse = true;
+                        session->djiCourseAnchorNorthMillimeters = session->djiNorthMillimeters;
+                        session->djiCourseAnchorEastMillimeters = session->djiEastMillimeters;
+                    }
+                    const double earthRadiusMeters = 6378137.0;
+                    double northMeters = (double) session->djiNorthMillimeters / 1000.0;
+                    double eastMeters = (double) session->djiEastMillimeters / 1000.0;
+                    session->latestDJIPositionValues[0] = camera.latitudeDegrees +
+                        northMeters / earthRadiusMeters * 180.0 / M_PI;
+                    session->latestDJIPositionValues[1] = camera.longitudeDegrees +
+                        eastMeters / (earthRadiusMeters * cos(camera.latitudeDegrees * M_PI / 180.0)) *
+                        180.0 / M_PI;
+                    session->latestDJIPositionValues[2] =
+                        (double) (session->djiInitialDownMillimeters - session->djiDownMillimeters) / 1000.0;
+                    session->latestDJIPositionValues[3] = camera.latitudeDegrees;
+                    session->latestDJIPositionValues[4] = camera.longitudeDegrees;
+                    session->latestDJIPositionValues[5] = camera.altitudeMeters;
+                    session->latestDJIPositionValues[6] = session->hasDJICourse
+                        ? session->latestDJICourseDegrees : NAN;
+                }
+                session->latestDJISourceTimestampMicroseconds = packet->pts == AV_NOPTS_VALUE
+                    ? 0
+                    : av_rescale_q(packet->pts, stream->time_base, (AVRational) {1, 1000000});
+                session->djiCameraTelemetrySequence += 1;
+                session->hasDJICameraTelemetry = true;
+                session->latestGimbalPitchDegrees = camera.tiltDegrees;
+                session->hasGimbalPitch = true;
+                pthread_mutex_unlock(&session->lock);
+            }
+        }
+        if (session->localPlayback && stream->codecpar->codec_id == AV_CODEC_ID_H264) {
+            R2CH264PacketContents contents = R2CH264InspectPacket(
+                packet->data,
+                (size_t) packet->size,
+                nalLengthSize
+            );
+            if (R2CH264PacketIsSeiOnly(contents)) {
+                av_packet_unref(packet);
+                continue;
+            }
+        }
+        if (session->localPlayback) {
+            int64_t packetTimestamp = packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
+            if (packetTimestamp != AV_NOPTS_VALUE) {
+                int64_t packetTimestampMicroseconds = av_rescale_q(
+                    packetTimestamp,
+                    stream->time_base,
+                    (AVRational) {1, 1000000}
+                );
+                if (playbackFirstTimestampMicroseconds == AV_NOPTS_VALUE) {
+                    playbackFirstTimestampMicroseconds = packetTimestampMicroseconds;
+                    playbackStartedAtMicroseconds = av_gettime_relative();
+                }
+                int64_t dueAtMicroseconds = playbackStartedAtMicroseconds +
+                    (packetTimestampMicroseconds - playbackFirstTimestampMicroseconds);
+                while (atomic_load_explicit(&session->running, memory_order_relaxed)) {
+                    int64_t remaining = dueAtMicroseconds - av_gettime_relative();
+                    if (remaining <= 0) break;
+                    av_usleep((unsigned int) (remaining > 10000 ? 10000 : remaining));
+                }
+            }
+        }
         int packetFlags = packet->flags;
         int packetSize = packet->size;
         result = avcodec_send_packet(codec, packet);
@@ -382,6 +543,7 @@ static void *decode_worker(void *opaque) {
     }
 
 finished:
+    ;
     R2CFFmpegSession *expectedLogSession = session;
     atomic_compare_exchange_strong_explicit(
         &activeLogSession,
@@ -404,7 +566,7 @@ finished:
     return NULL;
 }
 
-R2CFFmpegSession *R2CFFmpegSessionCreate(const char *url) {
+static R2CFFmpegSession *create_session(const char *url, bool localPlayback) {
     if (url == NULL || url[0] == '\0') {
         return NULL;
     }
@@ -418,8 +580,14 @@ R2CFFmpegSession *R2CFFmpegSessionCreate(const char *url) {
         free(session);
         return NULL;
     }
+    session->localPlayback = localPlayback;
     session->status = R2C_FFMPEG_STATUS_CONNECTING;
-    snprintf(session->detail, sizeof(session->detail), "Opening local RTSP stream");
+    snprintf(
+        session->detail,
+        sizeof(session->detail),
+        "%s",
+        localPlayback ? "Opening local recording" : "Opening local RTSP stream"
+    );
     session->latestPresentationTimeMicroseconds = AV_NOPTS_VALUE;
     atomic_init(&session->running, true);
     if (pthread_create(&session->worker, NULL, decode_worker, session) != 0) {
@@ -430,6 +598,14 @@ R2CFFmpegSession *R2CFFmpegSessionCreate(const char *url) {
     }
     session->workerStarted = true;
     return session;
+}
+
+R2CFFmpegSession *R2CFFmpegSessionCreate(const char *url) {
+    return create_session(url, false);
+}
+
+R2CFFmpegSession *R2CFFmpegSessionCreatePlayback(const char *url) {
+    return create_session(url, true);
 }
 
 void R2CFFmpegSessionDestroy(R2CFFmpegSession *session) {
@@ -548,6 +724,46 @@ bool R2CFFmpegSessionCopyLatestHeadingDegrees(
     bool available = session->hasHeading;
     if (available) {
         *headingDegrees = session->latestHeadingDegrees;
+    }
+    pthread_mutex_unlock(&session->lock);
+    return available;
+}
+
+bool R2CFFmpegSessionCopyLatestDJICameraTelemetry(
+    R2CFFmpegSession *session,
+    double *azimuthDegrees,
+    double *tiltDegrees,
+    double *horizontalFovDegrees,
+    double *verticalFovDegrees,
+    double *attitudeAnglesDegrees,
+    int attitudeAngleCapacity,
+    double *positionValues,
+    int positionValueCapacity,
+    int64_t *sourceTimestampMicroseconds,
+    uint64_t *sequence
+) {
+    if (session == NULL || azimuthDegrees == NULL || tiltDegrees == NULL ||
+        horizontalFovDegrees == NULL || verticalFovDegrees == NULL ||
+        attitudeAnglesDegrees == NULL || attitudeAngleCapacity < 9 ||
+        positionValues == NULL || positionValueCapacity < 7 ||
+        sourceTimestampMicroseconds == NULL || sequence == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&session->lock);
+    bool available = session->hasDJICameraTelemetry;
+    if (available) {
+        *azimuthDegrees = session->latestDJIAzimuthDegrees;
+        *tiltDegrees = session->latestDJITiltDegrees;
+        *horizontalFovDegrees = session->latestDJIHorizontalFovDegrees;
+        *verticalFovDegrees = session->latestDJIVerticalFovDegrees;
+        memcpy(
+            attitudeAnglesDegrees,
+            session->latestDJIAttitudeAnglesDegrees,
+            sizeof(session->latestDJIAttitudeAnglesDegrees)
+        );
+        memcpy(positionValues, session->latestDJIPositionValues, sizeof(session->latestDJIPositionValues));
+        *sourceTimestampMicroseconds = session->latestDJISourceTimestampMicroseconds;
+        *sequence = session->djiCameraTelemetrySequence;
     }
     pthread_mutex_unlock(&session->lock);
     return available;

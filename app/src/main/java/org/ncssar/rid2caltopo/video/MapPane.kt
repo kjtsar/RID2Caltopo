@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
 import LocalMapMarker
+import localMapMarkerForArtifact
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
@@ -12,6 +13,7 @@ import android.graphics.Point
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.location.Location
+import android.text.method.ScrollingMovementMethod
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -324,28 +326,64 @@ private fun applyPolylineStyle(
     polyline.width = width
 }
 
+private data class LocalMarkerInfoContent(
+    val titleText: String,
+    val descriptionText: String,
+    val thumbnail: Bitmap?,
+    val onOpenSnapshot: (() -> Unit)?,
+    val markerId: String?,
+    val onDelete: ((String) -> Unit)?,
+)
+
+internal class MapOwnedReusable<T : Any> {
+    private var owner: Any? = null
+    private var value: T? = null
+
+    fun getOrCreate(owner: Any, factory: () -> T): T {
+        if (this.owner !== owner || value == null) {
+            this.owner = owner
+            value = factory()
+        }
+        return checkNotNull(value)
+    }
+}
+
 private class LocalMarkerInfoWindow(
     mapView: MapView,
-    private val titleText: String,
-    private val descriptionText: String,
-    private val thumbnail: Bitmap?,
-    private val onOpenSnapshot: (() -> Unit)?,
-    private val markerId: String?,
-    private val onDelete: ((String) -> Unit)?
 ) : InfoWindow(R.layout.map_local_marker_info_window, mapView) {
+    private var content: LocalMarkerInfoContent? = null
+
+    fun bind(content: LocalMarkerInfoContent) {
+        this.content = content
+    }
+
+    fun isOpenFor(marker: Marker): Boolean = isOpen && relatedObject === marker
+
     override fun onOpen(item: Any?) {
-        mView.findViewById<TextView>(R.id.local_marker_title)?.text = titleText
+        val content = content ?: return
+        mView.findViewById<TextView>(R.id.local_marker_title)?.text = content.titleText
         mView.findViewById<TextView>(R.id.local_marker_description)?.apply {
-            text = descriptionText
-            visibility = if (descriptionText.isBlank()) View.GONE else View.VISIBLE
+            text = content.descriptionText
+            visibility = if (content.descriptionText.isBlank()) View.GONE else View.VISIBLE
+            movementMethod = ScrollingMovementMethod.getInstance()
+            scrollTo(0, 0)
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE ->
+                        view.parent?.requestDisallowInterceptTouchEvent(true)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                        view.parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                false
+            }
         }
         mView.findViewById<ImageView>(R.id.local_marker_snapshot)?.apply {
-            if (thumbnail != null) {
-                setImageBitmap(thumbnail)
+            if (content.thumbnail != null) {
+                setImageBitmap(content.thumbnail)
                 visibility = View.VISIBLE
-                isClickable = onOpenSnapshot != null
+                isClickable = content.onOpenSnapshot != null
                 setOnClickListener {
-                    onOpenSnapshot?.invoke()
+                    content.onOpenSnapshot?.invoke()
                 }
             } else {
                 setImageDrawable(null)
@@ -354,11 +392,11 @@ private class LocalMarkerInfoWindow(
             }
         }
         mView.findViewById<Button>(R.id.local_marker_delete)?.apply {
-            if (markerId != null && onDelete != null) {
+            if (content.markerId != null && content.onDelete != null) {
                 visibility = View.VISIBLE
                 setOnClickListener {
                     close()
-                    onDelete.invoke(markerId)
+                    content.onDelete.invoke(content.markerId)
                 }
             } else {
                 visibility = View.GONE
@@ -368,8 +406,18 @@ private class LocalMarkerInfoWindow(
     }
 
     override fun onClose() {
+        mView.findViewById<TextView>(R.id.local_marker_description)?.apply {
+            parent?.requestDisallowInterceptTouchEvent(false)
+            setOnTouchListener(null)
+        }
         mView.findViewById<ImageView>(R.id.local_marker_snapshot)?.setOnClickListener(null)
         mView.findViewById<Button>(R.id.local_marker_delete)?.setOnClickListener(null)
+        content = null
+    }
+
+    override fun onDetach() {
+        content = null
+        super.onDetach()
     }
 }
 
@@ -631,6 +679,7 @@ internal fun SplitMapPane(
     var colorPickerTarget by remember { mutableStateOf<PilotColorPickerTarget?>(null) }
     var localDeviceRefreshToken by remember { mutableIntStateOf(0) }
     val managedOverlays = remember { mutableListOf<Overlay>() }
+    val markerInfoWindow = remember { MapOwnedReusable<LocalMarkerInfoWindow>() }
     var artifactOverlayState: ArtifactOverlayState by remember {
         mutableStateOf(cachedOverlayState())
     }
@@ -788,7 +837,12 @@ internal fun SplitMapPane(
             onDismissRequest = { selectedArtifact = null },
             title = { Text(artifact.title) },
             text = {
-                Text(artifact.description.ifBlank { "No description is available for this map item." })
+                Text(
+                    text = artifact.description.ifBlank { "No description is available for this map item." },
+                    modifier = Modifier
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState()),
+                )
             },
             confirmButton = {
                 TextButton(onClick = { selectedArtifact = null }) { Text("Close") }
@@ -2544,6 +2598,11 @@ internal fun SplitMapPane(
                 trackOverlayRefreshToken
                 pilotDisplayRefreshToken
                 localDeviceRefreshToken
+                val sharedMarkerInfoWindow = if (isInsetMode) {
+                    null
+                } else {
+                    markerInfoWindow.getOrCreate(mapView) { LocalMarkerInfoWindow(mapView) }
+                }
                 val uiNowWallMsec = System.currentTimeMillis()
                 mapBounds = mapView.boundingBox
                 val tileSource = baseTileSource
@@ -2938,41 +2997,44 @@ internal fun SplitMapPane(
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = markerTitle
                         snippet = markerSnippet
-                        if (!isInsetMode) {
+                        if (!isInsetMode && sharedMarkerInfoWindow != null) {
+                            infoWindow = sharedMarkerInfoWindow
                             setOnMarkerClickListener { tappedMarker, _ ->
-                                when (markerInfoWindowTapAction(tappedMarker.isInfoWindowShown)) {
+                                when (markerInfoWindowTapAction(sharedMarkerInfoWindow.isOpenFor(tappedMarker))) {
                                     MarkerInfoWindowTapAction.Close -> tappedMarker.closeInfoWindow()
-                                    MarkerInfoWindowTapAction.Show -> tappedMarker.showInfoWindow()
+                                    MarkerInfoWindowTapAction.Show -> {
+                                        sharedMarkerInfoWindow.close()
+                                        sharedMarkerInfoWindow.bind(
+                                            LocalMarkerInfoContent(
+                                                titleText = markerTitle,
+                                                descriptionText = markerSnippet,
+                                                thumbnail = snapshot?.thumbnail,
+                                                onOpenSnapshot = snapshot?.takeIf {
+                                                    it.fullImage != null || it.fullImagePath != null
+                                                }?.let {
+                                                    {
+                                                        openClueSnapshotInExternalViewer(
+                                                            context,
+                                                            it.title,
+                                                            it.fullImage,
+                                                            it.fullImagePath,
+                                                        )
+                                                    }
+                                                },
+                                                markerId = point.id,
+                                                onDelete = { markerId ->
+                                                    if (viewModel.deleteLocalMapMarker(markerId)) {
+                                                        mapView.invalidate()
+                                                    }
+                                                },
+                                            )
+                                        )
+                                        tappedMarker.showInfoWindow()
+                                    }
                                 }
                                 true
                             }
                         }
-                    }
-                    if (!isInsetMode) {
-                        marker.infoWindow = LocalMarkerInfoWindow(
-                            mapView = mapView,
-                            titleText = markerTitle,
-                            descriptionText = markerSnippet,
-                            thumbnail = snapshot?.thumbnail,
-                            onOpenSnapshot = snapshot?.takeIf {
-                                it.fullImage != null || it.fullImagePath != null
-                            }?.let {
-                                {
-                                    openClueSnapshotInExternalViewer(
-                                        context,
-                                        it.title,
-                                        it.fullImage,
-                                        it.fullImagePath,
-                                    )
-                                }
-                            },
-                            markerId = point.id,
-                            onDelete = { markerId ->
-                                if (viewModel.deleteLocalMapMarker(markerId)) {
-                                    mapView.invalidate()
-                                }
-                            }
-                        )
                     }
                     consumeInsetMarkerTaps(marker, isInsetMode)
                     mapView.overlays.add(marker)
@@ -3020,33 +3082,50 @@ internal fun SplitMapPane(
                         title = point.title
                         snippet = point.description
                     }
-                    if (!isInsetMode) {
+                    if (!isInsetMode && sharedMarkerInfoWindow != null) {
                         val snapshot = viewModel.clueSnapshotForTitle(point.title)
+                        val localCopy = localMapMarkerForArtifact(
+                            markers = viewModel.localMapMarkers,
+                            artifactTitle = point.title,
+                            artifactLat = point.lat,
+                            artifactLng = point.lng,
+                        )
                         val viewableSnapshot = snapshot?.takeIf {
                             it.fullImage != null || it.fullImagePath != null
                         }
-                        marker.infoWindow = LocalMarkerInfoWindow(
-                            mapView = mapView,
-                            titleText = point.title,
-                            descriptionText = point.description,
-                            thumbnail = snapshot?.thumbnail,
-                            onOpenSnapshot = viewableSnapshot?.let { captured ->
-                                {
-                                    openClueSnapshotInExternalViewer(
-                                        context,
-                                        captured.title,
-                                        captured.fullImage,
-                                        captured.fullImagePath,
-                                    )
-                                }
-                            },
-                            markerId = null,
-                            onDelete = null
-                        )
+                        marker.infoWindow = sharedMarkerInfoWindow
                         marker.setOnMarkerClickListener { tappedMarker, _ ->
-                            when (markerInfoWindowTapAction(tappedMarker.isInfoWindowShown)) {
+                            when (markerInfoWindowTapAction(sharedMarkerInfoWindow.isOpenFor(tappedMarker))) {
                                 MarkerInfoWindowTapAction.Close -> tappedMarker.closeInfoWindow()
-                                MarkerInfoWindowTapAction.Show -> tappedMarker.showInfoWindow()
+                                MarkerInfoWindowTapAction.Show -> {
+                                    sharedMarkerInfoWindow.close()
+                                    sharedMarkerInfoWindow.bind(
+                                        LocalMarkerInfoContent(
+                                            titleText = point.title,
+                                            descriptionText = point.description,
+                                            thumbnail = snapshot?.thumbnail,
+                                            onOpenSnapshot = viewableSnapshot?.let { captured ->
+                                                {
+                                                    openClueSnapshotInExternalViewer(
+                                                        context,
+                                                        captured.title,
+                                                        captured.fullImage,
+                                                        captured.fullImagePath,
+                                                    )
+                                                }
+                                            },
+                                            markerId = localCopy?.id,
+                                            onDelete = localCopy?.let {
+                                                { markerId ->
+                                                    if (viewModel.deleteLocalMapMarker(markerId)) {
+                                                        mapView.invalidate()
+                                                    }
+                                                }
+                                            },
+                                        )
+                                    )
+                                    tappedMarker.showInfoWindow()
+                                }
                             }
                             true
                         }

@@ -375,6 +375,7 @@ struct RIDTrackMapView: View {
     let streamURL: URL?
     let ingestAddress: String
     let networkSSID: String
+    let bridgeSignalStrengthDbm: Int?
     let onMapStatusTap: () -> Void
     let onSwitchMap: () -> Void
     let onDisconnectMap: () -> Void
@@ -458,6 +459,7 @@ struct RIDTrackMapView: View {
                                 ? "Turn picture in picture off"
                                 : "Turn picture in picture on"
                         )
+                        BridgeSignalIndicator(rssi: bridgeSignalStrengthDbm)
                     }
                     .buttonStyle(.borderedProminent)
                     .padding(10)
@@ -1230,11 +1232,39 @@ struct RIDTrackMapView: View {
             clueError = "The paired aircraft telemetry is no longer available."
             return
         }
-        let captureObservation = captureTrack.lastObservation
+        let djiCameraTelemetry = session.model.freshDJICameraTelemetry()
+        let ridCaptureObservation = captureTrack.lastObservation
         let captureAltitudeDisplay = model.altitudeDisplayByAircraftID[defaultAircraftID]
-        let captureGimbalPitch = session.model.latestGimbalPitchDegrees
+        let seiMslAltitude: Double? = djiCameraTelemetry?.relativeUpMeters.flatMap { relativeUp -> Double? in
+            guard let ridMsl = ridCaptureObservation.altitudeMeters,
+                  let atoFeet = captureAltitudeDisplay?.atoFeet else { return nil }
+            return ridMsl - atoFeet * 0.3048 + relativeUp
+        }
+        let captureObservation = RidObservation(
+            source: ridCaptureObservation.source,
+            aircraftId: ridCaptureObservation.aircraftId,
+            receivedAt: ridCaptureObservation.receivedAt,
+            latitude: djiCameraTelemetry?.latitudeDegrees ?? ridCaptureObservation.latitude,
+            longitude: djiCameraTelemetry?.longitudeDegrees ?? ridCaptureObservation.longitude,
+            altitudeMeters: seiMslAltitude ?? ridCaptureObservation.altitudeMeters,
+            heightMeters: ridCaptureObservation.heightMeters,
+            heightReference: ridCaptureObservation.heightReference,
+            horizontalAccuracyCode: ridCaptureObservation.horizontalAccuracyCode,
+            headingDegrees: ridCaptureObservation.headingDegrees,
+            speedMetersPerSecond: ridCaptureObservation.speedMetersPerSecond,
+            operatorLatitude: ridCaptureObservation.operatorLatitude,
+            operatorLongitude: ridCaptureObservation.operatorLongitude,
+            signalStrengthDbm: ridCaptureObservation.signalStrengthDbm,
+            droneScoutRelay: ridCaptureObservation.droneScoutRelay
+        )
+        let captureGimbalPitch = djiCameraTelemetry?.tiltDegrees
+            ?? session.model.latestGimbalPitchDegrees
         let captureHeading = OperationalClueGeometry.selectedHeading(
-            cameraYawDegrees: session.model.latestCameraYawDegrees,
+            cameraAzimuthDegrees: djiCameraTelemetry?.cameraAzimuthDegrees,
+            videoCourseDegrees: djiCameraTelemetry?.courseDegrees,
+            cameraYawDegrees: djiCameraTelemetry == nil
+                ? session.model.latestCameraYawDegrees
+                : nil,
             streamHeadingDegrees: session.model.latestStreamHeadingDegrees,
             ridHeadingDegrees: captureObservation.headingDegrees,
             derivedHeadingDegrees: OperationalMapGeometry.travelBearingDegrees(
@@ -1257,7 +1287,8 @@ struct RIDTrackMapView: View {
                     ),
                     observation: captureObservation,
                     altitudeDisplay: captureAltitudeDisplay,
-                    heading: captureHeading
+                    heading: captureHeading,
+                    djiCameraTelemetry: djiCameraTelemetry
                 )
             } catch {
                 clueError = error.localizedDescription
@@ -1489,6 +1520,7 @@ struct RIDTrackMapView: View {
                         layout = .split
                     }
                 }
+                BridgeSignalIndicator(rssi: bridgeSignalStrengthDbm)
             }
         }
     }
@@ -1498,6 +1530,48 @@ struct RIDTrackMapView: View {
         layout = layout.withPictureInPicture(videoPipEnabled)
     }
 
+}
+
+struct BridgeSignalIndicator: View {
+    let rssi: Int?
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text("Bridge \(rssi.map(String.init) ?? "—")")
+                .font(.caption2)
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(0 ..< 4, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(index < filledBarCount ? filledColor : Color.secondary.opacity(0.2))
+                        .frame(width: 4, height: CGFloat(5 + index * 4))
+                }
+            }
+            .frame(height: 18, alignment: .bottom)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Bridge signal strength")
+        .accessibilityValue(rssi.map { "\($0) decibels milliwatt" } ?? "not detected")
+    }
+
+    private var filledBarCount: Int {
+        guard let rssi else { return 0 }
+        if rssi >= -60 { return 4 }
+        if rssi >= -70 { return 3 }
+        if rssi >= -80 { return 2 }
+        if rssi >= -90 { return 1 }
+        return 0
+    }
+
+    private var filledColor: Color {
+        switch filledBarCount {
+        case 1: .red
+        case 2: .yellow
+        default: .green
+        }
+    }
 }
 
 private struct BadTileRemovalView: View {
@@ -1640,6 +1714,25 @@ private struct PendingClueSnapshot: Identifiable {
     let observation: RidObservation
     let altitudeDisplay: OperationalAircraftAltitudeDisplay?
     let heading: OperationalClueHeadingSelection
+    let djiCameraTelemetry: AppleDJICameraTelemetry?
+
+    init(
+        snapshot: AppleVideoSnapshot,
+        defaultAircraftID: String,
+        gimbalAngleDegrees: Double,
+        observation: RidObservation,
+        altitudeDisplay: OperationalAircraftAltitudeDisplay?,
+        heading: OperationalClueHeadingSelection,
+        djiCameraTelemetry: AppleDJICameraTelemetry? = nil
+    ) {
+        self.snapshot = snapshot
+        self.defaultAircraftID = defaultAircraftID
+        self.gimbalAngleDegrees = gimbalAngleDegrees
+        self.observation = observation
+        self.altitudeDisplay = altitudeDisplay
+        self.heading = heading
+        self.djiCameraTelemetry = djiCameraTelemetry
+    }
 }
 
 private struct ClueSubmissionView: View {
@@ -1714,7 +1807,9 @@ private struct ClueSubmissionView: View {
     private var designator: String {
         identityStore.identity(for: selectedAircraftID)?.mappedID ?? selectedAircraftID
     }
-    private var aglMeters: Double? { display?.aglFeet.map { $0 * 0.3048 } }
+    private var aglMeters: Double? {
+        return display?.aglFeet.map { $0 * 0.3048 }
+    }
     private var atoMeters: Double? { display?.atoFeet.map { $0 * 0.3048 } }
     private var flatProjection: OperationalClueProjection? {
         guard let observation else { return nil }
@@ -1790,8 +1885,8 @@ private struct ClueSubmissionView: View {
                         }
                     ), in: 0 ... 359, step: 1)
                     LabeledContent("Gimbal angle", value: "\(Int(gimbalAngle.rounded()))°")
-                    Slider(value: $gimbalAngle, in: -90 ... 0, step: 1)
-                    Text("-90° is straight down; 0° is the horizon.")
+                    Slider(value: $gimbalAngle, in: -90 ... 90, step: 1)
+                    Text("-90° is straight down; 0° is the horizon; positive angles look upward.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if terrainProjectionPending {
@@ -1929,10 +2024,43 @@ private struct ClueSubmissionView: View {
             "  Heading used for clue: \(headingMeasurement(heading.degrees))",
             "  Heading source: \(heading.sourceLabel ?? "N/A")",
             "  Gimbal angle at capture: \(String(format: "%.1f°", gimbalAngle))",
-            "  AGL: \(measurement(display?.aglFeet, suffix: display?.aglStale == true ? "? ft" : " ft"))",
+            "  AGL: \(measurement(aglMeters.map { $0 * 3.28084 }, suffix: display?.aglStale == true ? "? ft" : " ft"))",
+            "  AGL source: RID/barometric",
             "  ATO: \(measurement(display?.atoFeet, suffix: " ft"))",
             "  Distance to clue: \(measurement(clueDistanceFeet, suffix: " ft"))"
         ]
+        if let telemetry = pending.djiCameraTelemetry {
+            summaryLines += [
+                "",
+                String(format: "DJI raw azimuth encoder: %.1f°", telemetry.rawAzimuthCandidateDegrees),
+                String(
+                    format: "DJI calibrated camera azimuth: %.1f°",
+                    telemetry.cameraAzimuthDegrees ?? .nan
+                ),
+                "DJI tag-4 angle candidates (same SEI frame):"
+            ]
+            for (index, angle) in telemetry.attitudeAnglesDegrees.enumerated() where angle.isFinite {
+                summaryLines.append(String(format: "  offset %d: %.3f°", 3 + index * 4, angle))
+            }
+            if let timestamp = telemetry.sourceTimestampMicroseconds {
+                summaryLines.append("  Telemetry timestamp(us): \(timestamp)")
+            }
+            if let latitude = telemetry.latitudeDegrees,
+               let longitude = telemetry.longitudeDegrees {
+                summaryLines.append(
+                    String(
+                        format: "  DJI SEI aircraft position (used for clue geometry): %.7f, %.7f relative-up %.1f'",
+                        latitude,
+                        longitude,
+                        (telemetry.relativeUpMeters ?? 0) * 3.28084
+                    )
+                )
+            }
+            if let latitude = telemetry.referenceLatitudeDegrees,
+               let longitude = telemetry.referenceLongitudeDegrees {
+                summaryLines.append(String(format: "  DJI SEI home/reference: %.7f, %.7f", latitude, longitude))
+            }
+        }
         let summary = summaryLines.joined(separator: "\n")
         let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalDescription = trimmedDescription.isEmpty ? summary : trimmedDescription + "\n\n" + summary
@@ -4176,11 +4304,13 @@ private final class ArtifactAnnotationView: MKAnnotationView {
         iconTask?.cancel()
         iconTask = nil
         representedIconURL = nil
+        detailCalloutAccessoryView = nil
     }
 
     func configure(_ artifact: ArtifactAnnotation) {
         annotation = artifact
         iconTask?.cancel()
+        configureDescriptionCallout(artifact.subtitle ?? nil)
         background.backgroundColor = artifact.color
         let style = Self.style(for: artifact.caltopoSymbol)
         showFallback(style)
@@ -4204,6 +4334,34 @@ private final class ArtifactAnnotationView: MKAnnotationView {
             self.imageView.image = image
             self.imageView.isHidden = false
         }
+    }
+
+    private func configureDescriptionCallout(_ description: String?) {
+        guard let description,
+              !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            detailCalloutAccessoryView = nil
+            return
+        }
+
+        let textView = UITextView()
+        textView.text = description
+        textView.font = .preferredFont(forTextStyle: .footnote)
+        textView.textColor = .label
+        textView.backgroundColor = .clear
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = true
+        textView.adjustsFontForContentSizeCategory = true
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+
+        let width: CGFloat = 300
+        let measured = textView.sizeThatFits(
+            CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        ).height
+        textView.frame = CGRect(x: 0, y: 0, width: width, height: min(max(measured, 36), 180))
+        detailCalloutAccessoryView = textView
     }
 
     private func showFallback(_ style: (systemImage: String?, glyph: String?)) {

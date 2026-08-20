@@ -106,23 +106,103 @@ public struct OperationalClueHeadingSelection: Sendable, Equatable {
     }
 }
 
+public struct OperationalDJIVideoPosition: Sendable, Equatable {
+    public let latitude: Double
+    public let longitude: Double
+    public let altitudeMeters: Double
+
+    public init(latitude: Double, longitude: Double, altitudeMeters: Double) {
+        self.latitude = latitude
+        self.longitude = longitude
+        self.altitudeMeters = altitudeMeters
+    }
+}
+
 public enum OperationalClueGeometry {
+    public static func djiAbsoluteCameraAzimuthDegrees(
+        seiCameraAzimuthDegrees: Double?,
+        magneticDeclinationDegrees: Double?
+    ) -> Double? {
+        guard let seiCameraAzimuthDegrees, seiCameraAzimuthDegrees.isFinite,
+              let magneticDeclinationDegrees, magneticDeclinationDegrees.isFinite
+        else { return nil }
+        // DJI encodes this angle counter-clockwise from magnetic east. CalTopo
+        // requires a clockwise bearing from true north.
+        return RidHeading.normalized(90 - seiCameraAzimuthDegrees + magneticDeclinationDegrees)
+    }
+
+    /// Matrice 4TD calibration: raw -90 is down; controlled raw -14.5625 is horizontal.
+    public static func djiCalibratedTiltDegrees(rawTiltDegrees: Double?) -> Double? {
+        guard let rawTiltDegrees, rawTiltDegrees.isFinite else { return nil }
+        let rawHorizontalReferenceDegrees = -14.5625
+        let scale = 90.0 / (rawHorizontalReferenceDegrees - (-90.0))
+        return min(90, max(-90, (rawTiltDegrees - rawHorizontalReferenceDegrees) * scale))
+    }
+
+    public static func djiVideoPosition(
+        tag4AnglesDegrees: [Double]
+    ) -> OperationalDJIVideoPosition? {
+        guard tag4AnglesDegrees.count == 9 else { return nil }
+        func signedAngle(_ value: Double) -> Double {
+            value >= 180 ? value - 360 : value
+        }
+        let latitude = signedAngle(tag4AnglesDegrees[6]) / 2
+        let longitude = signedAngle(tag4AnglesDegrees[7])
+        let altitude = -(signedAngle(tag4AnglesDegrees[8]) / 360 * 4_294_967_296) / 1_000
+        guard latitude.isFinite, longitude.isFinite, altitude.isFinite,
+              (-90 ... 90).contains(latitude),
+              (-180 ... 180).contains(longitude),
+              (-1_000 ... 30_000).contains(altitude),
+              abs(latitude) > 0.00000001 || abs(longitude) > 0.00000001
+        else { return nil }
+        return OperationalDJIVideoPosition(
+            latitude: latitude,
+            longitude: longitude,
+            altitudeMeters: altitude
+        )
+    }
+
+    public static func djiVideoAglMeters(
+        mslAltitudeMeters: Double?,
+        groundElevationMeters: Double?
+    ) -> Double? {
+        guard let mslAltitudeMeters, mslAltitudeMeters.isFinite,
+              let groundElevationMeters, groundElevationMeters.isFinite
+        else { return nil }
+        let agl = mslAltitudeMeters - groundElevationMeters
+        return agl.isFinite && (0 ... 10_000).contains(agl) ? agl : nil
+    }
+
     public static func selectedGimbalAngleDegrees(
         streamPitchDegrees: Double?,
         fallbackDegrees: Double = -90
     ) -> Double {
         guard let streamPitchDegrees, streamPitchDegrees.isFinite else {
-            return min(0, max(-90, fallbackDegrees))
+            return min(90, max(-90, fallbackDegrees))
         }
-        return min(0, max(-90, streamPitchDegrees))
+        return min(90, max(-90, streamPitchDegrees))
     }
 
     public static func selectedHeading(
+        cameraAzimuthDegrees: Double? = nil,
+        videoCourseDegrees: Double? = nil,
         cameraYawDegrees: Double?,
         streamHeadingDegrees: Double?,
         ridHeadingDegrees: Double?,
         derivedHeadingDegrees: Double? = nil
     ) -> OperationalClueHeadingSelection {
+        if let cameraAzimuth = RidHeading.normalized(cameraAzimuthDegrees) {
+            return OperationalClueHeadingSelection(
+                degrees: cameraAzimuth,
+                sourceLabel: "DJI camera azimuth"
+            )
+        }
+        if let videoCourse = RidHeading.normalized(videoCourseDegrees) {
+            return OperationalClueHeadingSelection(
+                degrees: videoCourse,
+                sourceLabel: "DJI video-derived course"
+            )
+        }
         if let derivedHeading = RidHeading.normalized(derivedHeadingDegrees) {
             return OperationalClueHeadingSelection(
                 degrees: derivedHeading,
@@ -172,7 +252,14 @@ public enum OperationalClueGeometry {
                 altitudeMeters: groundAltitude
             )
         }
-        let angle = min(0, max(-90, gimbalAngleDegrees))
+        let angle = min(90, max(-90, gimbalAngleDegrees))
+        guard angle < -0.1 else {
+            return OperationalClueProjection(
+                latitude: droneLatitude,
+                longitude: droneLongitude,
+                altitudeMeters: groundAltitude
+            )
+        }
         let downFromHorizon = abs(angle)
         guard downFromHorizon < 89.9, downFromHorizon > 0.1 else {
             return OperationalClueProjection(
@@ -224,7 +311,8 @@ public enum OperationalClueGeometry {
               let aglMeters, aglMeters.isFinite, aglMeters > 0
         else { return flatProjection }
 
-        let angle = min(0, max(-90, gimbalAngleDegrees))
+        let angle = min(90, max(-90, gimbalAngleDegrees))
+        guard angle < -0.1 else { return flatProjection }
         let tiltFromHorizon = max(0.1, min(90, abs(angle)))
         guard tiltFromHorizon < 89.9 else { return flatProjection }
         let slopeDown = tan(tiltFromHorizon * .pi / 180)

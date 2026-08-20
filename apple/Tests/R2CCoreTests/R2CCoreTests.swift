@@ -262,6 +262,16 @@ import Testing
     ))
 }
 
+@Test func managedVideoSourceGraceTreatsCatalogedRecordingAsAvailable() {
+    let unavailable = ManagedVideoPresencePolicy.unavailableApprovedSessionIDs(
+        approvedSessionIDs: ["live", "recording", "missing"],
+        liveSessionIDs: ["live"],
+        recordingSessionIDs: ["recording"]
+    )
+
+    #expect(unavailable == ["missing"])
+}
+
 @Test
 func managedVideoQualityPolicyBuildsCompleteNamedPresets() {
     let options = ManagedVideoQualityPolicy.options(
@@ -1524,6 +1534,35 @@ private func proximityDrone(
     ) == nil)
 }
 
+@Test func liveStreamDecoderResetsWhenItsPublisherTerminates() {
+    #expect(LiveStreamDecoderLifecyclePolicy.shouldResetAfterPublisherStopped(
+        sessionPath: "1sar7djmvc3pr",
+        decoderPath: "/1sar7djmvc3pr"
+    ))
+    #expect(!LiveStreamDecoderLifecyclePolicy.shouldResetAfterPublisherStopped(
+        sessionPath: "1sar7dja360",
+        decoderPath: "1sar7djmvc3pr"
+    ))
+}
+
+@Test func differentPublisherReplacesStaleWaitingDecoder() {
+    #expect(LiveStreamDecoderLifecyclePolicy.shouldStartDecoder(
+        publisherPath: "1sar7dja360",
+        decoderPath: "1sar7djmvc3pr",
+        decoderIsIdle: false
+    ))
+    #expect(!LiveStreamDecoderLifecyclePolicy.shouldStartDecoder(
+        publisherPath: "1sar7djmvc3pr",
+        decoderPath: "1sar7djmvc3pr",
+        decoderIsIdle: false
+    ))
+    #expect(LiveStreamDecoderLifecyclePolicy.shouldStartDecoder(
+        publisherPath: "1sar7dja360",
+        decoderPath: nil,
+        decoderIsIdle: true
+    ))
+}
+
 @Test func operationalMapTileSourcesMatchAndroidContracts() throws {
     #expect(OperationalMapBaseLayer.openStreetMap.tileURL(zoom: 12, x: 657, y: 1582)?.absoluteString
         == "https://tile.openstreetmap.org/12/657/1582.png")
@@ -1945,6 +1984,18 @@ private func proximityDrone(
     #expect(abs((relative?.distanceMeters ?? 0) - 100) < 0.1)
     #expect(abs((relative?.bearingDegrees ?? 0) - 90) < 0.1)
     #expect(forward.altitudeMeters == 400)
+
+    let upward = OperationalClueGeometry.project(
+        droneLatitude: 39,
+        droneLongitude: -105,
+        droneAltitudeMeters: 500,
+        headingDegrees: 90,
+        aglMeters: 100,
+        gimbalAngleDegrees: 35
+    )
+    #expect(upward.latitude == 39)
+    #expect(upward.longitude == -105)
+    #expect(upward.altitudeMeters == 400)
 }
 
 @Test func operationalClueProjectionUsesConfirmedCameraBearing() {
@@ -1989,12 +2040,21 @@ private func proximityDrone(
 @Test func operationalClueGimbalSelectionMatchesAndroidTelemetryFallback() {
     #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: -44.5) == -44.5)
     #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: -120) == -90)
-    #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: 12) == 0)
+    #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: 12) == 12)
     #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: nil) == -90)
     #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: .nan) == -90)
 }
 
 @Test func operationalClueHeadingSelectionMatchesAndroidTelemetryPriority() {
+    let djiHeading = OperationalClueGeometry.selectedHeading(
+        cameraAzimuthDegrees: 111.46,
+        cameraYawDegrees: 725,
+        streamHeadingDegrees: 180,
+        ridHeadingDegrees: 90,
+        derivedHeadingDegrees: 274
+    )
+    #expect(abs((djiHeading.degrees ?? 0) - 111.46) < 0.000001)
+    #expect(djiHeading.sourceLabel == "DJI camera azimuth")
     #expect(OperationalClueGeometry.selectedHeading(
         cameraYawDegrees: 725,
         streamHeadingDegrees: 180,
@@ -3146,7 +3206,11 @@ private func proximityDrone(
             externalURL: try #require(URL(string: "https://r2c-tracker.com/t/Bz2DZg")),
             thumbnailURL: try #require(URL(
                 string: "https://r2c-tracker.com/ncssar/api/v1/video/thumbnail/session-1"
-            ))
+            )),
+            azimuthDegrees: 111.46,
+            tiltDegrees: -37,
+            horizontalFovDegrees: 37.703125,
+            verticalFovDegrees: 21.207031
         )
     )
     let url = try #require(request.url)
@@ -3163,8 +3227,61 @@ private func proximityDrone(
     #expect(values["aircraft:track"] == "92.0")
     #expect(values["camera:external_url"] == "https://r2c-tracker.com/t/Bz2DZg")
     #expect(values["camera:thumbnail_url"] == "https://r2c-tracker.com/ncssar/api/v1/video/thumbnail/session-1")
+    #expect(values["camera:azimuth"] == "111.46")
+    #expect(values["camera:tilt"] == "-37.0")
+    #expect(values["camera:fov_width"] == "37.703125")
+    #expect(values["camera:fov_height"] == "21.207031")
     #expect(values["aircraft"] == nil)
     #expect(values["camera"] == nil)
+}
+
+@Test func djiCameraOrientationNormalizesSEIAzimuthAndUsesTiltCalibration() {
+    #expect(abs((OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(
+        seiCameraAzimuthDegrees: 80.8,
+        magneticDeclinationDegrees: 14.13
+    ) ?? 0) - 23.33) < 0.000001)
+    #expect(OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(
+        seiCameraAzimuthDegrees: nil,
+        magneticDeclinationDegrees: 14.13
+    ) == nil)
+    #expect(OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(
+        seiCameraAzimuthDegrees: 80.8,
+        magneticDeclinationDegrees: nil
+    ) == nil)
+    #expect(OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -90) == -90)
+    #expect(OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -14.5625) == 0)
+    #expect(abs((OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -24.5) ?? 0) - (-11.86)) < 0.02)
+    #expect(OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: 120) == 90)
+}
+
+@Test func djiVideoPositionDecodesMatriceTag4CoordinatesAndAltitude() throws {
+    let expectedLatitude = 39.153083
+    let expectedLongitude = -121.132845
+    let expectedAltitude = 574.595
+    let altitudeAngle = 360 - expectedAltitude * 1_000 * 360 / 4_294_967_296
+    let position = try #require(OperationalClueGeometry.djiVideoPosition(
+        tag4AnglesDegrees: [
+            2.344, 0, 55.457, 45.917, 0, 359.945,
+            expectedLatitude * 2,
+            expectedLongitude + 360,
+            altitudeAngle
+        ]
+    ))
+    #expect(abs(position.latitude - expectedLatitude) < 0.0000001)
+    #expect(abs(position.longitude - expectedLongitude) < 0.0000001)
+    #expect(abs(position.altitudeMeters - expectedAltitude) < 0.001)
+    #expect(OperationalClueGeometry.djiVideoPosition(
+        tag4AnglesDegrees: Array(repeating: 0, count: 9)
+    ) == nil)
+    let agl = try #require(OperationalClueGeometry.djiVideoAglMeters(
+        mslAltitudeMeters: 574.595,
+        groundElevationMeters: 510
+    ))
+    #expect(abs(agl - 64.595) < 0.000001)
+    #expect(OperationalClueGeometry.djiVideoAglMeters(
+        mslAltitudeMeters: 500,
+        groundElevationMeters: 600
+    ) == nil)
 }
 
 @Test func caltopoStopRequestMatchesAndroidLiveTrackDelete() async throws {

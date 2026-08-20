@@ -16,7 +16,7 @@ struct OperationalAlarmAudioTests {
             "Drone Telemetry",
             "Altitude",
             "Proximity",
-            "Controller Signal Strength",
+            "Stream Wi-Fi Signal Strength",
             "Bridge Not Detected",
         ])
     }

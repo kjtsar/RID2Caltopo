@@ -4,7 +4,7 @@ public enum OperationalSpokenWarningKind: String, CaseIterable, Sendable {
     case droneTelemetry = "Drone Telemetry"
     case altitude = "Altitude"
     case proximity = "Proximity"
-    case controllerSignalStrength = "Controller Signal Strength"
+    case controllerSignalStrength = "Stream Wi-Fi Signal Strength"
     case bridgeNotDetected = "Bridge Not Detected"
 
     public var phrase: String { rawValue }

@@ -281,6 +281,27 @@ final class AppleAnomalyProcessor: @unchecked Sendable {
 /// Pulls decoded BGRA frames from an AVFoundation HLS player at display cadence.
 /// Consumers can render the player while the same decoded CVPixelBuffers feed
 /// the portable anomaly detector boundary.
+struct AppleDJICameraTelemetry: Equatable {
+    /** Raw tag-4 azimuth encoder retained alongside the calibrated azimuth. */
+    let rawAzimuthCandidateDegrees: Double
+    let cameraAzimuthDegrees: Double?
+    let courseDegrees: Double?
+    let rawTiltDegrees: Double
+    let tiltDegrees: Double
+    let horizontalFovDegrees: Double
+    let verticalFovDegrees: Double
+    let attitudeAnglesDegrees: [Double]
+    let latitudeDegrees: Double?
+    let longitudeDegrees: Double?
+    let altitudeMeters: Double?
+    let relativeUpMeters: Double?
+    let referenceLatitudeDegrees: Double?
+    let referenceLongitudeDegrees: Double?
+    let referenceAltitudeMeters: Double?
+    let sourceTimestampMicroseconds: Int64?
+    let receivedAt: Date
+}
+
 @MainActor
 final class AppleVideoFrameSource: ObservableObject {
     enum State: Equatable {
@@ -310,6 +331,8 @@ final class AppleVideoFrameSource: ObservableObject {
     @Published private(set) var usesNativeVideoSurface = false
     @Published private(set) var decoderBackend = "None"
     @Published private(set) var streamDesignator = "--"
+
+    var activeSourcePath: String? { currentPath }
     @Published private(set) var renderDelayMilliseconds: Int64?
     @Published private(set) var decoderDelayMilliseconds: Int64?
     @Published private(set) var decodedFrameAgeSeconds: Double?
@@ -320,13 +343,26 @@ final class AppleVideoFrameSource: ObservableObject {
     @Published private(set) var latestGimbalPitchDegrees: Double?
     @Published private(set) var latestCameraYawDegrees: Double?
     @Published private(set) var latestStreamHeadingDegrees: Double?
+    private(set) var latestDJICameraTelemetry: AppleDJICameraTelemetry?
+
+    func freshDJICameraTelemetry(
+        now: Date = Date(),
+        maximumAge: TimeInterval = 3
+    ) -> AppleDJICameraTelemetry? {
+        latestDJICameraTelemetry.flatMap {
+            let age = now.timeIntervalSince($0.receivedAt)
+            return age >= 0 && age <= maximumAge ? $0 : nil
+        }
+    }
 
     private var videoOutput: AVPlayerItemVideoOutput?
     private var ffmpegSession: OpaquePointer?
     private var ffmpegFrameSequence: UInt64 = 0
+    private var ffmpegDJICameraTelemetrySequence: UInt64 = 0
     private var loggedNativeFrameFormat = false
     private var loggedNativeDisplayFailure = false
     private var nativeFailureHandled = false
+    private var nativeEndHandled = false
     private var displayLink: CADisplayLink?
     private var itemStatusObservation: NSKeyValueObservation?
     private var notificationObservers: [NSObjectProtocol] = []
@@ -423,8 +459,41 @@ final class AppleVideoFrameSource: ObservableObject {
         lagEstimator.reset()
         recoveryPolicy.reset(at: Self.now)
         decoderSelectionPolicy.reset()
-        installPlayer(url: url, beginsRecoveryAttempt: false)
+        startWatchdog()
+        installNativePlayback(url: url)
         AppleLog.info("Video", "Local managed-video playback requested file=\(url.lastPathComponent)")
+    }
+
+    private func installNativePlayback(url: URL) {
+        tearDownPlayer()
+        tearDownNativeDecoder()
+        playerGeneration &+= 1
+        recoveryPolicy.beginRecoveryAttempt(at: Self.now)
+        state = .connecting
+        nextRetryDelaySeconds = nil
+        nativeFailureHandled = false
+        nativeEndHandled = false
+        ffmpegFrameSequence = 0
+        ffmpegDJICameraTelemetrySequence = 0
+        loggedNativeFrameFormat = false
+        loggedNativeDisplayFailure = false
+
+        guard let session = url.absoluteString.withCString({
+            R2CFFmpegSessionCreatePlayback($0)
+        }) else {
+            AppleLog.warning("Video", "Native recording decoder could not start; using AVPlayer fallback")
+            installPlayer(url: url, beginsRecoveryAttempt: false)
+            return
+        }
+        ffmpegSession = session
+        usesNativeVideoSurface = true
+        decoderBackend = "FFmpeg \(String(cString: R2CFFmpegVersion())) / VideoToolbox recording playback"
+        flushDisplayLayers(removeImage: true)
+        installDisplayLink()
+        AppleLog.info(
+            "Video",
+            "Native recording decoder opening \(url.lastPathComponent) backend=\(decoderBackend)"
+        )
     }
 
     private func installPreferredDecoder(hlsURL: URL) {
@@ -435,7 +504,9 @@ final class AppleVideoFrameSource: ObservableObject {
         state = .connecting
         nextRetryDelaySeconds = nil
         nativeFailureHandled = false
+        nativeEndHandled = false
         ffmpegFrameSequence = 0
+        ffmpegDJICameraTelemetrySequence = 0
         loggedNativeFrameFormat = false
         loggedNativeDisplayFailure = false
 
@@ -574,6 +645,8 @@ final class AppleVideoFrameSource: ObservableObject {
         latestGimbalPitchDegrees = nil
         latestCameraYawDegrees = nil
         latestStreamHeadingDegrees = nil
+        latestDJICameraTelemetry = nil
+        ffmpegDJICameraTelemetrySequence = 0
         latestPixelBuffer = nil
         latestFrameCapturedAt = nil
         usesNativeVideoSurface = false
@@ -631,7 +704,9 @@ final class AppleVideoFrameSource: ObservableObject {
                 guard !Task.isCancelled, let self else { return }
                 let now = Self.now
                 decodedFrameAgeSeconds = recoveryPolicy.decodedFrameAge(at: now)
-                inspectNativeDecoderStatus()
+                if inspectNativeDecoderStatus() {
+                    continue
+                }
                 handleRecoveryDecision(recoveryPolicy.evaluate(at: now))
             }
         }
@@ -669,7 +744,11 @@ final class AppleVideoFrameSource: ObservableObject {
                   generation == self.playerGeneration,
                   let url = self.currentURL
             else { return }
-            self.installPreferredDecoder(hlsURL: url)
+            if url.isFileURL {
+                self.installNativePlayback(url: url)
+            } else {
+                self.installPreferredDecoder(hlsURL: url)
+            }
         }
     }
 
@@ -700,6 +779,7 @@ final class AppleVideoFrameSource: ObservableObject {
             self.ffmpegSession = nil
         }
         ffmpegFrameSequence = 0
+        ffmpegDJICameraTelemetrySequence = 0
     }
 
     @objc private func pullFrame(_ displayLink: CADisplayLink) {
@@ -714,6 +794,61 @@ final class AppleVideoFrameSource: ObservableObject {
             let pixelBuffer = retainedPixelBuffer.takeRetainedValue()
             guard sequence != ffmpegFrameSequence else { return }
             ffmpegFrameSequence = sequence
+            var djiAzimuthDegrees = 0.0
+            var djiTiltDegrees = 0.0
+            var djiHorizontalFovDegrees = 0.0
+            var djiVerticalFovDegrees = 0.0
+            var djiTelemetrySequence: UInt64 = 0
+            var djiAttitudeAngles = [Double](repeating: .nan, count: 9)
+            var djiPositionValues = [Double](repeating: .nan, count: 7)
+            var djiSourceTimestampMicroseconds: Int64 = 0
+            let copiedDJITelemetry = djiAttitudeAngles.withUnsafeMutableBufferPointer { angles in
+                djiPositionValues.withUnsafeMutableBufferPointer { position in
+                    R2CFFmpegSessionCopyLatestDJICameraTelemetry(
+                        ffmpegSession,
+                        &djiAzimuthDegrees,
+                        &djiTiltDegrees,
+                        &djiHorizontalFovDegrees,
+                        &djiVerticalFovDegrees,
+                        angles.baseAddress,
+                        Int32(angles.count),
+                        position.baseAddress,
+                        Int32(position.count),
+                        &djiSourceTimestampMicroseconds,
+                        &djiTelemetrySequence
+                    )
+                }
+            }
+            if copiedDJITelemetry,
+               djiTelemetrySequence != ffmpegDJICameraTelemetrySequence {
+                ffmpegDJICameraTelemetrySequence = djiTelemetrySequence
+                latestDJICameraTelemetry = AppleDJICameraTelemetry(
+                    rawAzimuthCandidateDegrees: RidHeading.normalized(djiAzimuthDegrees) ?? djiAzimuthDegrees,
+                    cameraAzimuthDegrees: OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(
+                        seiCameraAzimuthDegrees: djiAzimuthDegrees,
+                        magneticDeclinationDegrees: AppleMagneticNorth.declinationDegrees
+                    ),
+                    courseDegrees: RidHeading.normalized(djiPositionValues[6]),
+                    rawTiltDegrees: djiTiltDegrees,
+                    tiltDegrees: OperationalClueGeometry.djiCalibratedTiltDegrees(
+                        rawTiltDegrees: djiTiltDegrees
+                    ) ?? min(90, max(-90, djiTiltDegrees)),
+                    horizontalFovDegrees: djiHorizontalFovDegrees,
+                    verticalFovDegrees: djiVerticalFovDegrees,
+                    attitudeAnglesDegrees: djiAttitudeAngles,
+                    latitudeDegrees: djiPositionValues[0].isFinite ? djiPositionValues[0] : nil,
+                    longitudeDegrees: djiPositionValues[1].isFinite ? djiPositionValues[1] : nil,
+                    altitudeMeters: nil,
+                    relativeUpMeters: djiPositionValues[2].isFinite ? djiPositionValues[2] : nil,
+                    referenceLatitudeDegrees: djiPositionValues[3].isFinite ? djiPositionValues[3] : nil,
+                    referenceLongitudeDegrees: djiPositionValues[4].isFinite ? djiPositionValues[4] : nil,
+                    referenceAltitudeMeters: djiPositionValues[5].isFinite ? djiPositionValues[5] : nil,
+                    sourceTimestampMicroseconds: djiSourceTimestampMicroseconds > 0
+                        ? djiSourceTimestampMicroseconds
+                        : nil,
+                    receivedAt: Date()
+                )
+            }
             var gimbalPitchDegrees = 0.0
             if R2CFFmpegSessionCopyLatestGimbalPitchDegrees(
                 ffmpegSession,
@@ -947,11 +1082,20 @@ final class AppleVideoFrameSource: ObservableObject {
         AppleLog.warning("Video", message)
     }
 
-    private func inspectNativeDecoderStatus() {
-        guard let ffmpegSession else { return }
+    private func inspectNativeDecoderStatus() -> Bool {
+        guard let ffmpegSession else { return false }
         var detail = [CChar](repeating: 0, count: 256)
         let status = R2CFFmpegSessionGetStatus(ffmpegSession, &detail, Int32(detail.count))
-        guard status == R2C_FFMPEG_STATUS_FAILED, !nativeFailureHandled else { return }
+        if status == R2C_FFMPEG_STATUS_ENDED {
+            if !nativeEndHandled {
+                nativeEndHandled = true
+                nextRetryDelaySeconds = nil
+                state = .idle
+                AppleLog.info("Video", "Native recording playback completed path=\(currentPath ?? "unknown")")
+            }
+            return true
+        }
+        guard status == R2C_FFMPEG_STATUS_FAILED, !nativeFailureHandled else { return false }
         nativeFailureHandled = true
         let message = String(decoding: detail.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
         let nativeDecodedFrames = R2CFFmpegSessionDecodedFrameCount(ffmpegSession)
@@ -967,6 +1111,7 @@ final class AppleVideoFrameSource: ObservableObject {
         } else {
             handleRecoveryDecision(recoveryPolicy.playerFailed(detail: message))
         }
+        return true
     }
 
     func captureSnapshot(

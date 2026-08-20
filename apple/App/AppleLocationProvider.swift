@@ -2,6 +2,22 @@ import CoreLocation
 import Foundation
 
 @MainActor
+enum AppleMagneticNorth {
+    private(set) static var declinationDegrees: Double?
+
+    static func update(from heading: CLHeading) {
+        guard heading.headingAccuracy >= 0,
+              heading.trueHeading >= 0,
+              heading.magneticHeading >= 0
+        else { return }
+        var value = heading.trueHeading - heading.magneticHeading
+        while value <= -180 { value += 360 }
+        while value > 180 { value -= 360 }
+        declinationDegrees = value
+    }
+}
+
+@MainActor
 final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency CLLocationManagerDelegate {
     @Published private(set) var authorizationStatus: CLAuthorizationStatus
     @Published private(set) var lastLocation: CLLocation?
@@ -60,6 +76,7 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
 
     func stop() {
         manager?.stopUpdatingLocation()
+        manager?.stopUpdatingHeading()
         started = false
     }
 
@@ -132,6 +149,10 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
         publishPhysicalLocation(location, provisional: false, source: "fresh fix")
     }
 
+    func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        AppleMagneticNorth.update(from: newHeading)
+    }
+
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         if let locationError = error as? CLError, locationError.code == .locationUnknown {
             return
@@ -152,7 +173,12 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
             if started { manager?.requestWhenInUseAuthorization() }
         case .authorizedAlways, .authorizedWhenInUse:
             errorMessage = nil
-            if started { manager?.startUpdatingLocation() }
+            if started {
+                manager?.startUpdatingLocation()
+                if CLLocationManager.headingAvailable() {
+                    manager?.startUpdatingHeading()
+                }
+            }
         case .denied:
             manager?.stopUpdatingLocation()
             errorMessage = "Location permission denied"

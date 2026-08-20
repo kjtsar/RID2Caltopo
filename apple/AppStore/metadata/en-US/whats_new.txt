@@ -1,22 +1,24 @@
 Latest changes:
-- Added secure Tracker video/audio with measured quality, single-viewer control, requester identity, microphone control, and authenticated links.
+- Added secure Tracker video/audio with quality metrics, viewer control, requester identity, microphone control, and authenticated links.
 - Remote Video Control improves bandwidth safety, source wake-up, playback, thumbnails, and retries.
 - Video and recording requests expire after 60 seconds; approved sessions and transfers survive reconnects.
-- Approved downloads retain tablet originals, remove relay copies, preserve today's iOS files, and use drone/date/time names.
+- Approved downloads preserve tablet originals and today's iOS files, clean relay copies, and use drone/date/time names.
 - CalTopo tracks include backhauled stream links and only the recording overlapping each flight.
-- Tracker-managed configuration synchronizes encrypted CalTopo credentials, RID mappings, track folders, and mutual-aid settings to enrolled devices.
+- Tracker configuration syncs CalTopo credentials, RID mappings, track folders, and mutual-aid settings.
 - Enrollment QR codes open RID2Caltopo, redeem a fresh per-device credential, and start required member authentication immediately.
-- Tracker functionality release 148 separates protocol compatibility from store builds. Reauthentication preserves offline Remote ID and independent CalTopo credentials.
-- Reauthentication returns to the app, avoids duplicate browser attempts, preserves Home, refreshes managed configuration, and reconnects Tracker and NOTAM together.
+- Tracker release 148 separates protocol compatibility from store builds; reauthentication preserves offline RID and CalTopo credentials.
+- Reauthentication returns to the app, avoids duplicate browser attempts, refreshes configuration, and reconnects Tracker and NOTAM.
 - Reset clears stale NOTAM results, and unconfigured NOTAM status no longer implies that a request is pending.
 - Tracker archive replay preserves flight authorization, defers incomplete identities, skips active files, and repairs duplicate text extensions.
-- Task removal, Quit, and idle closure now finalize tracks, stop Tracker/video work, and remove the CalTopo device marker; idle timing uses launch or the latest Remote ID message.
+- Task removal, Quit, and idle closure finalize tracks, stop background work, and remove the map marker.
 - Added Android ANR traces to diagnostic log packages and hardened video/anomaly worker shutdown against lock-order stalls.
 - Recover interrupted CalTopo LiveTracks after termination or update, with clearer dated archive folders.
 - Added archive-cleanup screens showing folder age and size, protecting today's active folder, and requiring confirmation before deletion.
 - Map items and assignments show their CalTopo descriptions when selected; assignment visibility recovery is improved.
 - Improved UI parity with a prominent incident-map control, matching map actions, clearer settings, requester identity, and About & Privacy information.
 - Standardized telemetry as ATO, AGL, RNG, and HDG; added movement-derived course, clue-camera heading, and CalTopo aircraft/camera/video metadata.
+- Matrice 4TD video telemetry supplies drone position, altitude, true camera azimuth, tilt, and FOV for LiveTracks and clue projection.
+- SEI telemetry decoding omits temporary raw payload and layout dumps.
 - Added 30 m, 10 m, and up to 1 m USGS terrain downloads with storage checks, preferring the finest available terrain for AGL.
 - CalTopo settings now reject incomplete credential sets and automatically resume map selection when managed credentials arrive.
 - Limit Ignore to the current flight so later flights request confirmation again.

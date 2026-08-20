@@ -25,6 +25,10 @@ class ManagedVideoStreamPresenceTest {
 
         assertEquals(listOf("Rescue 1"), advertisements.map { it.droneDesignator })
         assertTrue(ManagedVideoStreamPresence.hasLiveDesignator("Rescue 1"))
+        assertEquals(
+            advertisements.single().sessionId,
+            ManagedVideoStreamPresence.matchingLiveSessionId("rescue 1"),
+        )
     }
 
     @Test

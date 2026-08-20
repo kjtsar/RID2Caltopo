@@ -230,7 +230,11 @@ object FfmpegBridge {
         gimbalPitchDeg: Double,
         cameraYawDeg: Double,
         headingDeg: Double,
+        horizontalFovDeg: Double,
+        verticalFovDeg: Double,
+        djiAttitudeAnglesCsv: String,
     ): FfmpegTelemetry {
+        val djiValues = djiAttitudeAnglesCsv.split(',')
         return FfmpegTelemetry(
             sourceTag = sourceTag.ifBlank { null },
             confidence = confidence.takeIf { !it.isNaN() && it >= 0.0 },
@@ -243,6 +247,16 @@ object FfmpegBridge {
             gimbalPitchDeg = gimbalPitchDeg.takeUnless { it.isNaN() },
             cameraYawDeg = cameraYawDeg.takeUnless { it.isNaN() },
             headingDeg = headingDeg.takeUnless { it.isNaN() },
+            horizontalFovDeg = horizontalFovDeg.takeUnless { it.isNaN() },
+            verticalFovDeg = verticalFovDeg.takeUnless { it.isNaN() },
+            djiAttitudeAnglesDeg = djiValues
+                .take(9)
+                .mapNotNull(String::toDoubleOrNull)
+                .takeIf { it.size == 9 }
+                .orEmpty(),
+            djiRelativeNorthMmRaw = djiValues.getOrNull(9)?.toIntOrNull(),
+            djiRelativeEastMmRaw = djiValues.getOrNull(10)?.toIntOrNull(),
+            djiRelativeDownMmRaw = djiValues.getOrNull(11)?.toIntOrNull(),
         )
     }
 
@@ -262,6 +276,9 @@ object FfmpegBridge {
         gimbalPitchDeg: Double,
         cameraYawDeg: Double,
         headingDeg: Double,
+        horizontalFovDeg: Double,
+        verticalFovDeg: Double,
+        djiAttitudeAnglesCsv: String,
     ) {
         if (designator.isBlank() || eventType.isBlank()) return
         val telemetry = normalizeTelemetryFromNative(
@@ -276,7 +293,12 @@ object FfmpegBridge {
             gimbalPitchDeg = gimbalPitchDeg,
             cameraYawDeg = cameraYawDeg,
             headingDeg = headingDeg,
+            horizontalFovDeg = horizontalFovDeg,
+            verticalFovDeg = verticalFovDeg,
+            djiAttitudeAnglesCsv = djiAttitudeAnglesCsv,
         )
+
+        StreamCameraTelemetryRegistry.update(designator, telemetry)
 
         val snapshot = synchronized(listenerLock) { probeListeners.toList() }
         snapshot.forEach { callback ->

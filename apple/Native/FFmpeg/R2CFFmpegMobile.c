@@ -45,16 +45,14 @@ struct R2CFFmpegSession {
     double latestDJIVerticalFovDegrees;
     double latestDJIAttitudeAnglesDegrees[9];
     double latestDJIPositionValues[7];
-    bool hasDJIDisplacement;
-    int16_t lastDJIRawNorth;
-    int16_t lastDJIRawEast;
-    int16_t lastDJIRawDown;
-    int64_t djiNorthMillimeters;
-    int64_t djiEastMillimeters;
-    int64_t djiDownMillimeters;
-    int64_t djiInitialDownMillimeters;
-    int64_t djiCourseAnchorNorthMillimeters;
-    int64_t djiCourseAnchorEastMillimeters;
+    uint8_t latestDJIType245Payload[128];
+    size_t latestDJIType245PayloadSize;
+    int32_t latestDJINorthMillimeters;
+    int32_t latestDJIEastMillimeters;
+    int32_t latestDJIDownMillimeters;
+    bool hasDJICourseAnchor;
+    int32_t djiCourseAnchorNorthMillimeters;
+    int32_t djiCourseAnchorEastMillimeters;
     double latestDJICourseDegrees;
     bool hasDJICourse;
     int64_t latestDJISourceTimestampMicroseconds;
@@ -64,13 +62,6 @@ struct R2CFFmpegSession {
 };
 
 static _Atomic(R2CFFmpegSession *) activeLogSession = NULL;
-
-static int32_t dji_signed16_delta(int16_t current, int16_t previous) {
-    int32_t delta = (int32_t) current - (int32_t) previous;
-    if (delta > 32767) delta -= 65536;
-    if (delta < -32768) delta += 65536;
-    return delta;
-}
 
 static void capture_ffmpeg_log(void *context, int level, const char *format, va_list arguments) {
     if (level > AV_LOG_VERBOSE) {
@@ -394,48 +385,42 @@ static void *decode_worker(void *opaque) {
                     camera.attitudeAnglesDegrees,
                     sizeof(session->latestDJIAttitudeAnglesDegrees)
                 );
+                session->latestDJIType245PayloadSize = camera.type245PayloadSize;
+                memcpy(
+                    session->latestDJIType245Payload,
+                    camera.type245Payload,
+                    camera.type245PayloadSize
+                );
+                session->latestDJINorthMillimeters = camera.relativeNorthMillimeters;
+                session->latestDJIEastMillimeters = camera.relativeEastMillimeters;
+                session->latestDJIDownMillimeters = camera.downMillimeters;
                 if (camera.relativeDisplacementValid && camera.positionValid) {
-                    if (!session->hasDJIDisplacement) {
-                        session->djiNorthMillimeters = camera.relativeNorthMillimetersRaw;
-                        session->djiEastMillimeters = camera.relativeEastMillimetersRaw;
-                        session->djiDownMillimeters = camera.relativeDownMillimetersRaw;
-                        session->djiInitialDownMillimeters = camera.relativeDownMillimetersRaw;
-                        session->djiCourseAnchorNorthMillimeters = session->djiNorthMillimeters;
-                        session->djiCourseAnchorEastMillimeters = session->djiEastMillimeters;
-                        session->hasDJIDisplacement = true;
-                    } else {
-                        session->djiNorthMillimeters += dji_signed16_delta(
-                            camera.relativeNorthMillimetersRaw, session->lastDJIRawNorth);
-                        session->djiEastMillimeters += dji_signed16_delta(
-                            camera.relativeEastMillimetersRaw, session->lastDJIRawEast);
-                        session->djiDownMillimeters += dji_signed16_delta(
-                            camera.relativeDownMillimetersRaw, session->lastDJIRawDown);
+                    if (!session->hasDJICourseAnchor) {
+                        session->djiCourseAnchorNorthMillimeters = camera.relativeNorthMillimeters;
+                        session->djiCourseAnchorEastMillimeters = camera.relativeEastMillimeters;
+                        session->hasDJICourseAnchor = true;
                     }
-                    session->lastDJIRawNorth = camera.relativeNorthMillimetersRaw;
-                    session->lastDJIRawEast = camera.relativeEastMillimetersRaw;
-                    session->lastDJIRawDown = camera.relativeDownMillimetersRaw;
-                    int64_t courseNorth = session->djiNorthMillimeters -
-                        session->djiCourseAnchorNorthMillimeters;
-                    int64_t courseEast = session->djiEastMillimeters -
-                        session->djiCourseAnchorEastMillimeters;
+                    int64_t courseNorth = (int64_t) camera.relativeNorthMillimeters -
+                        (int64_t) session->djiCourseAnchorNorthMillimeters;
+                    int64_t courseEast = (int64_t) camera.relativeEastMillimeters -
+                        (int64_t) session->djiCourseAnchorEastMillimeters;
                     if (hypot((double) courseNorth, (double) courseEast) >= 3000.0) {
                         session->latestDJICourseDegrees = fmod(
                             atan2((double) courseEast, (double) courseNorth) * 180.0 / M_PI + 360.0,
                             360.0);
                         session->hasDJICourse = true;
-                        session->djiCourseAnchorNorthMillimeters = session->djiNorthMillimeters;
-                        session->djiCourseAnchorEastMillimeters = session->djiEastMillimeters;
+                        session->djiCourseAnchorNorthMillimeters = camera.relativeNorthMillimeters;
+                        session->djiCourseAnchorEastMillimeters = camera.relativeEastMillimeters;
                     }
                     const double earthRadiusMeters = 6378137.0;
-                    double northMeters = (double) session->djiNorthMillimeters / 1000.0;
-                    double eastMeters = (double) session->djiEastMillimeters / 1000.0;
+                    double northMeters = (double) camera.relativeNorthMillimeters / 1000.0;
+                    double eastMeters = (double) camera.relativeEastMillimeters / 1000.0;
                     session->latestDJIPositionValues[0] = camera.latitudeDegrees +
                         northMeters / earthRadiusMeters * 180.0 / M_PI;
                     session->latestDJIPositionValues[1] = camera.longitudeDegrees +
                         eastMeters / (earthRadiusMeters * cos(camera.latitudeDegrees * M_PI / 180.0)) *
                         180.0 / M_PI;
-                    session->latestDJIPositionValues[2] =
-                        (double) (session->djiInitialDownMillimeters - session->djiDownMillimeters) / 1000.0;
+                    session->latestDJIPositionValues[2] = camera.relativeUpMeters;
                     session->latestDJIPositionValues[3] = camera.latitudeDegrees;
                     session->latestDJIPositionValues[4] = camera.longitudeDegrees;
                     session->latestDJIPositionValues[5] = camera.altitudeMeters;
@@ -762,6 +747,39 @@ bool R2CFFmpegSessionCopyLatestDJICameraTelemetry(
             sizeof(session->latestDJIAttitudeAnglesDegrees)
         );
         memcpy(positionValues, session->latestDJIPositionValues, sizeof(session->latestDJIPositionValues));
+        *sourceTimestampMicroseconds = session->latestDJISourceTimestampMicroseconds;
+        *sequence = session->djiCameraTelemetrySequence;
+    }
+    pthread_mutex_unlock(&session->lock);
+    return available;
+}
+
+bool R2CFFmpegSessionCopyLatestDJISEIPayload(
+    R2CFFmpegSession *session,
+    uint8_t *payload,
+    int payloadCapacity,
+    int *payloadSize,
+    int32_t *northMillimeters,
+    int32_t *eastMillimeters,
+    int32_t *downMillimeters,
+    int64_t *sourceTimestampMicroseconds,
+    uint64_t *sequence
+) {
+    if (session == NULL || payload == NULL || payloadCapacity < 128 ||
+        payloadSize == NULL || northMillimeters == NULL ||
+        eastMillimeters == NULL || downMillimeters == NULL ||
+        sourceTimestampMicroseconds == NULL || sequence == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&session->lock);
+    bool available = session->hasDJICameraTelemetry &&
+        session->latestDJIType245PayloadSize <= (size_t) payloadCapacity;
+    if (available) {
+        memcpy(payload, session->latestDJIType245Payload, session->latestDJIType245PayloadSize);
+        *payloadSize = (int) session->latestDJIType245PayloadSize;
+        *northMillimeters = session->latestDJINorthMillimeters;
+        *eastMillimeters = session->latestDJIEastMillimeters;
+        *downMillimeters = session->latestDJIDownMillimeters;
         *sourceTimestampMicroseconds = session->latestDJISourceTimestampMicroseconds;
         *sequence = session->djiCameraTelemetrySequence;
     }

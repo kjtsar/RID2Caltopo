@@ -58,6 +58,18 @@ class R2CActivityLogArchiveTest {
         assertFalse(shouldOpenTrackerReauthentication(browserAlreadyOpen = true))
     }
 
+    @Test
+    fun trackerReauthenticationPresentsAnExplicitSignInAction() {
+        val activitySource = projectSource(
+            "app/src/main/java/org/ncssar/rid2caltopo/app/R2CActivity.kt"
+        )
+
+        assertTrue(activitySource.contains("Tracker sign-in required"))
+        assertTrue(activitySource.contains("Text(\"Sign in\")"))
+        assertTrue(activitySource.contains("Text(\"Continue offline\")"))
+        assertTrue(activitySource.contains("onSignIn = ::openPendingTrackerReauthentication"))
+    }
+
     private fun projectSource(relativePath: String): String {
         val workingDirectory = File(requireNotNull(System.getProperty("user.dir")))
         val candidates = listOf(

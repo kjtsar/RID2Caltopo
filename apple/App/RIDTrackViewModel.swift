@@ -694,20 +694,14 @@ final class RIDTrackViewModel: ObservableObject {
 
     private func enqueuePublication(remoteID: String, label: String, observation: RidObservation) {
         let previous = publicationChains[remoteID]
-        let videoTelemetry = peerCoordinator?.djiCameraTelemetry(droneDesignator: label)
-        let videoAltitude = videoTelemetry?.relativeUpMeters.flatMap { relativeUp -> Double? in
-            guard observation.heightReference == .takeoff,
-                  let altitude = observation.altitudeMeters,
-                  let height = observation.heightMeters else { return nil }
-            return altitude - height + relativeUp
-        }
         let publicationObservation = RidObservation(
             source: observation.source,
             aircraftId: observation.aircraftId,
             receivedAt: observation.receivedAt,
-            latitude: videoTelemetry?.latitudeDegrees ?? observation.latitude,
-            longitude: videoTelemetry?.longitudeDegrees ?? observation.longitude,
-            altitudeMeters: videoAltitude ?? observation.altitudeMeters,
+            // RID remains the canonical aircraft track. SEI position is used only for clue geometry.
+            latitude: observation.latitude,
+            longitude: observation.longitude,
+            altitudeMeters: observation.altitudeMeters,
             heightMeters: observation.heightMeters,
             heightReference: observation.heightReference,
             horizontalAccuracyCode: observation.horizontalAccuracyCode,

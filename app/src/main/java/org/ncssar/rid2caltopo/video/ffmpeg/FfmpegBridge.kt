@@ -32,6 +32,8 @@ object FfmpegBridge {
     private val probeListeners = linkedSetOf<(String, Long, String, FfmpegTelemetry) -> Unit>()
     private val remoteVideoFrameListeners = linkedMapOf<Long, RemoteVideoFrameListener>()
     private val listenerLock = Any()
+    @Volatile
+    private var djiSeiHexDumpEnabled = false
 
     init {
         RegisterDebugTags(listOf(TAG, NATIVE_TAG))
@@ -55,6 +57,13 @@ object FfmpegBridge {
     fun decoderBackend(): String {
         if (!nativeLoaded) return "missing-native"
         return nativeDecoderBackend()
+    }
+
+    fun isDjiSeiHexDumpEnabled(): Boolean = djiSeiHexDumpEnabled
+
+    fun setDjiSeiHexDumpEnabled(enabled: Boolean) {
+        djiSeiHexDumpEnabled = enabled
+        if (nativeLoaded) nativeSetDjiSeiHexDumpEnabled(enabled)
     }
 
     fun isRealDecoderBackend(): Boolean {
@@ -254,9 +263,9 @@ object FfmpegBridge {
                 .mapNotNull(String::toDoubleOrNull)
                 .takeIf { it.size == 9 }
                 .orEmpty(),
-            djiRelativeNorthMmRaw = djiValues.getOrNull(9)?.toIntOrNull(),
-            djiRelativeEastMmRaw = djiValues.getOrNull(10)?.toIntOrNull(),
-            djiRelativeDownMmRaw = djiValues.getOrNull(11)?.toIntOrNull(),
+            djiNorthMm = djiValues.getOrNull(9)?.toIntOrNull(),
+            djiEastMm = djiValues.getOrNull(10)?.toIntOrNull(),
+            djiDownMm = djiValues.getOrNull(11)?.toIntOrNull(),
         )
     }
 
@@ -330,6 +339,7 @@ object FfmpegBridge {
 
     private external fun nativeIsAvailable(): Boolean
     private external fun nativeInitBridge()
+    private external fun nativeSetDjiSeiHexDumpEnabled(enabled: Boolean)
     private external fun nativeDecoderBackend(): String
     private external fun nativeStartProbe(designator: String, rtspUrl: String): Long
     private external fun nativeStartRender(designator: String, rtspUrl: String): Long

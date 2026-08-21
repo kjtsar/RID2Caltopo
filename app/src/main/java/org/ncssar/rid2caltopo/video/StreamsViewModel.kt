@@ -1882,8 +1882,12 @@ class StreamsViewModel(
         val telemetryStartedAtMs = System.currentTimeMillis()
         val telemetry = ffmpegProbeService?.telemetrySnapshot(designator)
         logSnapshotIfSlow("telemetrySnapshot", System.currentTimeMillis() - telemetryStartedAtMs)
-        val freshDjiCamera = StreamCameraTelemetryRegistry.fresh(
+        val freshDjiCamera = StreamCameraTelemetryRegistry.freshAnchored(
             designator = designator,
+            anchorLatitudeDeg = droneSpec.lastLat,
+            anchorLongitudeDeg = droneSpec.lastLng,
+            anchorAltitudeMeters = droneSpec.lastAlt,
+            takeoffMslMeters = droneSpec.getImpliedTakeoffAltM(),
             nowMs = System.currentTimeMillis(),
         )
         val nonDjiTelemetry = telemetry?.takeUnless { it.sourceTag == "dji-sei-245" }

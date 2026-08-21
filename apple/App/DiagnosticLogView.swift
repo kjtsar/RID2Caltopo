@@ -14,6 +14,25 @@ struct DiagnosticLogView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("DJI SEI Research") {
+                Toggle(
+                    "Capture full type-245 payloads",
+                    isOn: Binding(
+                        get: { AppleSEIHexDiagnostics.enabled },
+                        set: { enabled in
+                            AppleSEIHexDiagnostics.enabled = enabled
+                            AppleLog.info(
+                                "DjiSeiHex",
+                                "DJI SEI hex capture \(enabled ? "enabled" : "disabled")"
+                            )
+                        }
+                    )
+                )
+                Text("Off by default and reset when the app restarts. While enabled, each payload sample observed by the video frame source is written to the diagnostic log, which can grow quickly.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Select Log Days") {
                 if diagnostics.days.isEmpty {
                     ContentUnavailableView("No logs", systemImage: "doc.text.magnifyingglass")

@@ -119,6 +119,49 @@ public struct OperationalDJIVideoPosition: Sendable, Equatable {
 }
 
 public enum OperationalClueGeometry {
+    /// Validates a complete DJI SEI position against RID without changing its epoch or coordinate.
+    public static func djiValidatedHorizontalPosition(
+        latitudeDegrees: Double?,
+        longitudeDegrees: Double?,
+        ridLatitudeDegrees: Double,
+        ridLongitudeDegrees: Double,
+        maximumResidualMeters: Double = 30
+    ) -> (latitudeDegrees: Double, longitudeDegrees: Double)? {
+        guard let latitudeDegrees, latitudeDegrees.isFinite,
+              let longitudeDegrees, longitudeDegrees.isFinite,
+              ridLatitudeDegrees.isFinite, ridLongitudeDegrees.isFinite,
+              (-90 ... 90).contains(latitudeDegrees),
+              (-180 ... 180).contains(longitudeDegrees),
+              (-90 ... 90).contains(ridLatitudeDegrees),
+              (-180 ... 180).contains(ridLongitudeDegrees),
+              maximumResidualMeters.isFinite, maximumResidualMeters >= 0
+        else { return nil }
+        let earthRadiusMeters = 6_378_137.0
+        let latitudeRadians = latitudeDegrees * .pi / 180
+        let residualNorth = (ridLatitudeDegrees - latitudeDegrees) * .pi / 180 * earthRadiusMeters
+        let residualEast = (ridLongitudeDegrees - longitudeDegrees) * .pi / 180 *
+            earthRadiusMeters * cos(latitudeRadians)
+        guard hypot(residualNorth, residualEast) <= maximumResidualMeters
+        else { return nil }
+        return (latitudeDegrees, longitudeDegrees)
+    }
+
+    /// Validates direct SEI relative-up against RID when RID altitude is available.
+    public static func djiValidatedRelativeUpMeters(
+        observedRelativeUpMeters: Double?,
+        ridAltitudeMeters: Double?,
+        takeoffMslMeters: Double?,
+        maximumResidualMeters: Double = 20
+    ) -> Double? {
+        guard let observedRelativeUpMeters, observedRelativeUpMeters.isFinite,
+              maximumResidualMeters.isFinite, maximumResidualMeters >= 0 else { return nil }
+        guard let ridAltitudeMeters, ridAltitudeMeters.isFinite,
+              let takeoffMslMeters, takeoffMslMeters.isFinite else { return observedRelativeUpMeters }
+        let targetUp = ridAltitudeMeters - takeoffMslMeters
+        return abs(observedRelativeUpMeters - targetUp) <= maximumResidualMeters
+            ? observedRelativeUpMeters : nil
+    }
+
     public static func djiAbsoluteCameraAzimuthDegrees(
         seiCameraAzimuthDegrees: Double?,
         magneticDeclinationDegrees: Double?

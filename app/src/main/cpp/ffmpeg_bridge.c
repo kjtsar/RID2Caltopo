@@ -447,6 +447,7 @@ static jmethodID g_ctwarn_mid = NULL;
 static jmethodID g_cterror_mid = NULL;
 static jmethodID g_register_debug_tag_mid = NULL;
 static atomic_uint_fast64_t g_person_relevance_evidence_id = 1u;
+static atomic_bool g_dji_sei_hex_dump_enabled = false;
 
 #if HAVE_FFMPEG && HAVE_SWSCALE
 static bool person_relevance_native_backend(
@@ -5301,6 +5302,30 @@ static void emit_dji_camera_telemetry(
             &camera)) {
         return;
     }
+    if (atomic_load_explicit(&g_dji_sei_hex_dump_enabled, memory_order_relaxed)) {
+        char payload_hex[sizeof(camera.type245Payload) * 2 + 1];
+        if (R2CDJIHexEncode(
+                camera.type245Payload,
+                camera.type245PayloadSize,
+                payload_hex,
+                sizeof(payload_hex))) {
+            ct_debug(
+                    "DjiSeiHex",
+                    "DJI_SEI_HEX designator=%s sessionId=%lld role=%s ptsUs=%lld len=%zu northMm=%d eastMm=%d downMm=%d rawN16=%d rawE16=%d rawD16=%d payload=%s",
+                    session->designator,
+                    (long long) session->session_id,
+                    session->is_render ? "render" : "probe",
+                    (long long) packet_ts_us,
+                    camera.type245PayloadSize,
+                    camera.relativeNorthMillimeters,
+                    camera.relativeEastMillimeters,
+                    camera.downMillimeters,
+                    (int) camera.relativeNorthMillimetersRaw,
+                    (int) camera.relativeEastMillimetersRaw,
+                    (int) camera.relativeDownMillimetersRaw,
+                    payload_hex);
+        }
+    }
     char attitude_angles_csv[256];
     snprintf(
             attitude_angles_csv,
@@ -5315,9 +5340,9 @@ static void emit_dji_camera_telemetry(
             camera.attitudeAnglesDegrees[6],
             camera.attitudeAnglesDegrees[7],
             camera.attitudeAnglesDegrees[8],
-            (int) camera.relativeNorthMillimetersRaw,
-            (int) camera.relativeEastMillimetersRaw,
-            (int) camera.relativeDownMillimetersRaw);
+            camera.relativeNorthMillimeters,
+            camera.relativeEastMillimeters,
+            camera.downMillimeters);
     dispatch_probe_event_ex(
             session->designator,
             "telemetry",
@@ -6867,6 +6892,20 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeInitBridge(
             (*env)->ExceptionClear(env);
         }
     }
+}
+
+JNIEXPORT void JNICALL
+Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetDjiSeiHexDumpEnabled(
+        JNIEnv *env,
+        jobject thiz,
+        jboolean enabled
+) {
+    (void) env;
+    (void) thiz;
+    atomic_store_explicit(
+            &g_dji_sei_hex_dump_enabled,
+            enabled == JNI_TRUE,
+            memory_order_relaxed);
 }
 
 JNIEXPORT jstring JNICALL

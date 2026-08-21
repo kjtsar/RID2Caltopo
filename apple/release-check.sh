@@ -98,7 +98,7 @@ for library in \
     "$ffmpeg_root/simulator/libR2CFFmpegMobile.a"; do
     lipo -info "$library" | grep -q 'architecture: arm64'
 done
-for symbol in R2CFFmpegSessionCreate R2CFFmpegSessionCreatePlayback R2CFFmpegSessionDestroy R2CFFmpegSessionCopyLatestFrame R2CFFmpegSessionGetStatus R2CFFmpegSessionCopyLatestDJICameraTelemetry; do
+for symbol in R2CFFmpegSessionCreate R2CFFmpegSessionCreatePlayback R2CFFmpegSessionDestroy R2CFFmpegSessionCopyLatestFrame R2CFFmpegSessionGetStatus R2CFFmpegSessionCopyLatestDJICameraTelemetry R2CFFmpegSessionCopyLatestDJISEIPayload; do
     nm -gU "$ffmpeg_root/device/libR2CFFmpegMobile.a" | grep "_$symbol$" >/dev/null
     nm -gU "$ffmpeg_root/simulator/libR2CFFmpegMobile.a" | grep "_$symbol$" >/dev/null
 done

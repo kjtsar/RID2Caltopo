@@ -8,6 +8,35 @@ private struct DroneConfirmationRequest: Identifiable {
     let id: String
 }
 
+private struct TrackerReauthenticationPromptModifier: ViewModifier {
+    @Environment(\.openURL) private var openURL
+    @Binding var isPresented: Bool
+    @Binding var reauthenticationURL: URL?
+    @Binding var browserOpen: Bool
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Tracker sign-in required",
+            isPresented: $isPresented
+        ) {
+            Button("Sign in") {
+                guard let url = reauthenticationURL else { return }
+                browserOpen = true
+                openURL(url)
+            }
+            Button("Continue offline", role: .cancel) {
+                reauthenticationURL = nil
+            }
+        } message: {
+            Text(
+                "Sign in with an authorized organization account to restore Tracker "
+                    + "sharing and online organization services. RID, video, maps, and "
+                    + "your existing CalTopo configuration remain available."
+            )
+        }
+    }
+}
+
 private struct NavigationBarDoubleTapBridge: UIViewRepresentable {
     let action: () -> Void
 
@@ -157,6 +186,8 @@ struct ContentView: View {
     @State private var pendingCredentialProfileID: String?
     @State private var showCredentialSwitchConfirmation = false
     @State private var trackerReauthenticationBrowserOpen = false
+    @State private var trackerReauthenticationURL: URL?
+    @State private var showTrackerReauthenticationPrompt = false
     @AppStorage("video.captureStreams") private var captureStreams = false
 
     private var startupRoot: some View {
@@ -341,6 +372,11 @@ struct ContentView: View {
             } message: {
                 Text("Continue with limited functionality until RID2Caltopo is upgraded.")
             }
+            .modifier(TrackerReauthenticationPromptModifier(
+                isPresented: $showTrackerReauthenticationPrompt,
+                reauthenticationURL: $trackerReauthenticationURL,
+                browserOpen: $trackerReauthenticationBrowserOpen
+            ))
             .alert("Confirm Exit", isPresented: $showConfirmExit) {
                 Button("Cancel", role: .cancel) {
                     AppleLog.info("Lifecycle", "Quit cancelled")
@@ -800,6 +836,8 @@ struct ContentView: View {
                 let rawValue = url.absoluteString
                 if url.scheme == "r2creauth" {
                     trackerReauthenticationBrowserOpen = false
+                    trackerReauthenticationURL = nil
+                    showTrackerReauthenticationPrompt = false
                     if url.host == "complete" {
                         AppleLog.info(
                             "TrackerPeer",
@@ -916,6 +954,10 @@ struct ContentView: View {
                 updateIdleTimerPolicy(for: phase)
                 switch phase {
                 case .active:
+                    if trackerReauthenticationBrowserOpen,
+                       trackerReauthenticationURL != nil {
+                        showTrackerReauthenticationPrompt = true
+                    }
                     trackerReauthenticationBrowserOpen = false
                     mediaMTX.ensureHealthy(captureStreams: captureStreams)
                     Task {
@@ -976,9 +1018,8 @@ struct ContentView: View {
                         : "Tracker access paused; independent CalTopo credentials and offline RID remain available"
                 )
                 if let url = peerCoordinator.reauthenticationURL {
-                    guard !trackerReauthenticationBrowserOpen else { return }
-                    trackerReauthenticationBrowserOpen = true
-                    openURL(url)
+                    trackerReauthenticationURL = url
+                    showTrackerReauthenticationPrompt = true
                 }
             }
             .onChange(of: peerCoordinator.heartbeatAcknowledgedAtMilliseconds) { _, _ in

@@ -16,7 +16,7 @@ data class FfmpegTelemetry(
     val verticalFovDeg: Double? = null,
     /** Diagnostic-only tag-4 binary angles, captured from the same DJI SEI frame. */
     val djiAttitudeAnglesDeg: List<Double> = emptyList(),
-    val djiRelativeNorthMmRaw: Int? = null,
-    val djiRelativeEastMmRaw: Int? = null,
-    val djiRelativeDownMmRaw: Int? = null,
+    val djiNorthMm: Int? = null,
+    val djiEastMm: Int? = null,
+    val djiDownMm: Int? = null,
 )

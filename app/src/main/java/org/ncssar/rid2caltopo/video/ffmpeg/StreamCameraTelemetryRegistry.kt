@@ -13,10 +13,10 @@ data class StreamCameraTelemetrySample(
     val tiltDeg: Double,
     val horizontalFovDeg: Double,
     val verticalFovDeg: Double,
-    /** Reconstructed aircraft coordinate from the reference plus unwrapped N/E displacement. */
+    /** Aircraft coordinate reconstructed from the reference plus full-width N/E displacement. */
     val latitudeDeg: Double?,
     val longitudeDeg: Double?,
-    /** Barometric altitude is supplied by the paired RID state, not DJI's unknown datum. */
+    /** MSL altitude is supplied by the paired RID state. */
     val altitudeMeters: Double?,
     val relativeUpMeters: Double?,
     val referenceLatitudeDeg: Double?,
@@ -35,68 +35,27 @@ data class StreamCameraTelemetrySample(
 object StreamCameraTelemetryRegistry {
     const val DEFAULT_MAX_AGE_MS = 3_000L
     private const val EARTH_RADIUS_METERS = 6_378_137.0
+    private const val MAX_RID_ANCHOR_RESIDUAL_METERS = 30.0
+    private const val MAX_RID_VERTICAL_RESIDUAL_METERS = 20.0
     private const val COURSE_BASELINE_METERS = 3.0
     private val lock = Any()
     private val samples = mutableMapOf<String, StreamCameraTelemetrySample>()
-    private val unwrapStates = mutableMapOf<String, DisplacementState>()
+    private val courseStates = mutableMapOf<String, CourseState>()
 
-    private data class DisplacementState(
+    private data class CourseState(
+        var anchorNorthMm: Int,
+        var anchorEastMm: Int,
         var lastSourceTimestampUs: Long?,
-        var lastRawNorth: Int,
-        var lastRawEast: Int,
-        var lastRawDown: Int,
-        var northMm: Long,
-        var eastMm: Long,
-        var downMm: Long,
-        val initialDownMm: Long,
-        var courseAnchorNorthMm: Long,
-        var courseAnchorEastMm: Long,
         var courseDeg: Double? = null,
     )
 
-    private fun signed16Delta(current: Int, previous: Int): Int {
-        var delta = current - previous
-        if (delta > 32_767) delta -= 65_536
-        if (delta < -32_768) delta += 65_536
-        return delta
-    }
-
-    private fun newState(telemetry: FfmpegTelemetry): DisplacementState? {
-        val north = telemetry.djiRelativeNorthMmRaw ?: return null
-        val east = telemetry.djiRelativeEastMmRaw ?: return null
-        val down = telemetry.djiRelativeDownMmRaw ?: return null
-        return DisplacementState(
-            lastSourceTimestampUs = telemetry.sourceTimestampUs,
-            lastRawNorth = north,
-            lastRawEast = east,
-            lastRawDown = down,
-            northMm = north.toLong(),
-            eastMm = east.toLong(),
-            downMm = down.toLong(),
-            initialDownMm = down.toLong(),
-            courseAnchorNorthMm = north.toLong(),
-            courseAnchorEastMm = east.toLong(),
-        )
-    }
-
-    private fun updateDisplacement(state: DisplacementState, telemetry: FfmpegTelemetry) {
-        val north = telemetry.djiRelativeNorthMmRaw ?: return
-        val east = telemetry.djiRelativeEastMmRaw ?: return
-        val down = telemetry.djiRelativeDownMmRaw ?: return
-        state.northMm += signed16Delta(north, state.lastRawNorth)
-        state.eastMm += signed16Delta(east, state.lastRawEast)
-        state.downMm += signed16Delta(down, state.lastRawDown)
-        state.lastRawNorth = north
-        state.lastRawEast = east
-        state.lastRawDown = down
-        state.lastSourceTimestampUs = telemetry.sourceTimestampUs
-
-        val deltaNorthMm = state.northMm - state.courseAnchorNorthMm
-        val deltaEastMm = state.eastMm - state.courseAnchorEastMm
+    private fun updateCourse(state: CourseState, northMm: Int, eastMm: Int) {
+        val deltaNorthMm = northMm.toLong() - state.anchorNorthMm
+        val deltaEastMm = eastMm.toLong() - state.anchorEastMm
         if (hypot(deltaNorthMm.toDouble(), deltaEastMm.toDouble()) >= COURSE_BASELINE_METERS * 1_000.0) {
             state.courseDeg = ((Math.toDegrees(atan2(deltaEastMm.toDouble(), deltaNorthMm.toDouble())) % 360.0) + 360.0) % 360.0
-            state.courseAnchorNorthMm = state.northMm
-            state.courseAnchorEastMm = state.eastMm
+            state.anchorNorthMm = northMm
+            state.anchorEastMm = eastMm
         }
     }
 
@@ -119,21 +78,31 @@ object StreamCameraTelemetryRegistry {
             ).declination.toDouble()
         } else null
         val absoluteAzimuth = DjiCameraOrientation.trueAzimuthDeg(rawAzimuth, declination) ?: return
+        val northMm = telemetry.djiNorthMm
+        val eastMm = telemetry.djiEastMm
+        val downMm = telemetry.djiDownMm
         val key = designator.trim().uppercase()
         if (key.isEmpty()) return
         synchronized(lock) {
-            val prior = unwrapStates[key]
-            val sourceRestarted = prior?.lastSourceTimestampUs?.let { previous ->
-                telemetry.sourceTimestampUs?.let { current -> current + 1_000_000L < previous } ?: false
-            } ?: false
-            val state = if (prior == null || sourceRestarted) {
-                newState(telemetry)?.also { unwrapStates[key] = it }
+            val courseState = if (northMm != null && eastMm != null) {
+                val prior = courseStates[key]
+                val sourceRestarted = prior?.lastSourceTimestampUs?.let { previous ->
+                    telemetry.sourceTimestampUs?.let { current -> current + 1_000_000L < previous } ?: false
+                } ?: false
+                if (prior == null || sourceRestarted) {
+                    CourseState(northMm, eastMm, telemetry.sourceTimestampUs).also {
+                        courseStates[key] = it
+                    }
+                } else {
+                    updateCourse(prior, northMm, eastMm)
+                    prior.lastSourceTimestampUs = telemetry.sourceTimestampUs
+                    prior
+                }
             } else {
-                updateDisplacement(prior, telemetry)
-                prior
+                null
             }
-            val northMeters = state?.northMm?.div(1_000.0)
-            val eastMeters = state?.eastMm?.div(1_000.0)
+            val northMeters = northMm?.div(1_000.0)
+            val eastMeters = eastMm?.div(1_000.0)
             val aircraftLatitude = if (referenceLatitude != null && northMeters != null) {
                 referenceLatitude + Math.toDegrees(northMeters / EARTH_RADIUS_METERS)
             } else null
@@ -142,14 +111,16 @@ object StreamCameraTelemetryRegistry {
             } else null
             samples[key] = StreamCameraTelemetrySample(
                 azimuthDeg = absoluteAzimuth,
-                courseDeg = state?.courseDeg,
+                courseDeg = courseState?.courseDeg,
                 tiltDeg = tilt,
                 horizontalFovDeg = width,
                 verticalFovDeg = height,
                 latitudeDeg = aircraftLatitude,
                 longitudeDeg = aircraftLongitude,
                 altitudeMeters = null,
-                relativeUpMeters = state?.let { (it.initialDownMm - it.downMm) / 1_000.0 },
+                relativeUpMeters = if (downMm != null && referenceAltitude != null) {
+                    -downMm.toDouble() / 1_000.0 - referenceAltitude
+                } else null,
                 referenceLatitudeDeg = referenceLatitude,
                 referenceLongitudeDeg = referenceLongitude,
                 referenceAltitudeMeters = referenceAltitude,
@@ -175,11 +146,55 @@ object StreamCameraTelemetryRegistry {
         }
     }
 
+    /**
+     * Validates the independently decoded full-width DJI position against a current RID fix.
+     * Position is withheld when the two sources disagree beyond the operational gate, while
+     * camera orientation remains usable and RID remains the caller's position fallback.
+     */
+    fun freshAnchored(
+        designator: String,
+        anchorLatitudeDeg: Double,
+        anchorLongitudeDeg: Double,
+        anchorAltitudeMeters: Double? = null,
+        takeoffMslMeters: Double? = null,
+        nowMs: Long = System.currentTimeMillis(),
+        maxAgeMs: Long = DEFAULT_MAX_AGE_MS,
+    ): StreamCameraTelemetrySample? {
+        val sample = fresh(designator, nowMs, maxAgeMs) ?: return null
+        val anchoredHorizontal = if (
+            anchorLatitudeDeg.isFinite() && anchorLatitudeDeg in -90.0..90.0 &&
+            anchorLongitudeDeg.isFinite() && anchorLongitudeDeg in -180.0..180.0 &&
+            sample.latitudeDeg != null && sample.longitudeDeg != null
+        ) {
+            val latitudeRadians = Math.toRadians(sample.latitudeDeg)
+            val residualNorth = Math.toRadians(anchorLatitudeDeg - sample.latitudeDeg) * EARTH_RADIUS_METERS
+            val residualEast = Math.toRadians(anchorLongitudeDeg - sample.longitudeDeg) *
+                EARTH_RADIUS_METERS * cos(latitudeRadians)
+            hypot(residualNorth, residualEast).takeIf { it <= MAX_RID_ANCHOR_RESIDUAL_METERS }
+        } else null
+        val validatedRelativeUp = if (
+            sample.relativeUpMeters != null && anchorAltitudeMeters?.isFinite() == true &&
+            takeoffMslMeters?.isFinite() == true
+        ) {
+            val targetUp = anchorAltitudeMeters - takeoffMslMeters
+            sample.relativeUpMeters.takeIf {
+                kotlin.math.abs(it - targetUp) <= MAX_RID_VERTICAL_RESIDUAL_METERS
+            }
+        } else sample.relativeUpMeters
+        return sample.copy(
+            latitudeDeg = sample.latitudeDeg.takeIf { anchoredHorizontal != null },
+            longitudeDeg = sample.longitudeDeg.takeIf { anchoredHorizontal != null },
+            northMeters = sample.northMeters.takeIf { anchoredHorizontal != null },
+            eastMeters = sample.eastMeters.takeIf { anchoredHorizontal != null },
+            relativeUpMeters = validatedRelativeUp,
+        )
+    }
+
     fun clear(designator: String) {
         synchronized(lock) {
             val key = designator.trim().uppercase()
             samples.remove(key)
-            unwrapStates.remove(key)
+            courseStates.remove(key)
         }
     }
 }

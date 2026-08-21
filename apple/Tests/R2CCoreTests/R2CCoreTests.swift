@@ -29,7 +29,10 @@ import Testing
 
     #expect(contentView.contains("AppleTrackerEnrollmentClient.normalizedEnrollmentURL"))
     #expect(contentView.contains("trackerReauthenticationBrowserOpen"))
-    #expect(contentView.contains("guard !trackerReauthenticationBrowserOpen else { return }"))
+    #expect(contentView.contains("Tracker sign-in required"))
+    #expect(contentView.contains("Button(\"Sign in\")"))
+    #expect(contentView.contains("Button(\"Continue offline\", role: .cancel)"))
+    #expect(contentView.contains("showTrackerReauthenticationPrompt = true"))
     #expect(contentView.contains("of: peerCoordinator.reauthenticationRequiredGeneration,"))
     #expect(contentView.contains("initial: true"))
     #expect(enrollmentClient.contains("static let appLinkScheme = \"r2cenroll\""))
@@ -3281,6 +3284,40 @@ private func proximityDrone(
     #expect(OperationalClueGeometry.djiVideoAglMeters(
         mslAltitudeMeters: 500,
         groundElevationMeters: 600
+    ) == nil)
+}
+
+@Test func djiFullWidthPositionValidatesAgainstRIDWithoutChangingCoordinates() throws {
+    let referenceLatitude = 39.319435
+    let referenceLongitude = -120.658820
+    let earthRadius = 6_378_137.0
+    let north = 375.216
+    let east = -371.216
+    let seiLatitude = referenceLatitude + north / earthRadius * 180 / .pi
+    let seiLongitude = referenceLongitude + east /
+        (earthRadius * cos(referenceLatitude * .pi / 180)) * 180 / .pi
+    let validated = try #require(OperationalClueGeometry.djiValidatedHorizontalPosition(
+        latitudeDegrees: seiLatitude,
+        longitudeDegrees: seiLongitude,
+        ridLatitudeDegrees: seiLatitude + 1.5 / earthRadius * 180 / .pi,
+        ridLongitudeDegrees: seiLongitude
+    ))
+    #expect(abs(validated.latitudeDegrees - seiLatitude) < 0.000000001)
+    #expect(abs(validated.longitudeDegrees - seiLongitude) < 0.000000001)
+    #expect(abs((OperationalClueGeometry.djiValidatedRelativeUpMeters(
+        observedRelativeUpMeters: 68,
+        ridAltitudeMeters: 1_462,
+        takeoffMslMeters: 1_394
+    ) ?? 0) - 68) < 0.000000001)
+
+    let ambiguousLatitude = referenceLatitude + 32.768 / earthRadius * 180 / .pi
+    let ambiguousLongitude = referenceLongitude + 32.768 /
+        (earthRadius * cos(referenceLatitude * .pi / 180)) * 180 / .pi
+    #expect(OperationalClueGeometry.djiValidatedHorizontalPosition(
+        latitudeDegrees: referenceLatitude,
+        longitudeDegrees: referenceLongitude,
+        ridLatitudeDegrees: ambiguousLatitude,
+        ridLongitudeDegrees: ambiguousLongitude
     ) == nil)
 }
 

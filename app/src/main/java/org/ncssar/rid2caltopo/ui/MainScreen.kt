@@ -98,6 +98,7 @@ import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionPanel
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionStatusChip
 import org.ncssar.rid2caltopo.video.ComplianceAlertBell
 import org.ncssar.rid2caltopo.video.ComplianceAlertDialog
+import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge
 import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
 import java.time.Instant
 import java.time.ZoneId
@@ -376,6 +377,7 @@ fun MainScreen(
     var selectedKnownTags by remember { mutableStateOf(setOf<String>()) }
     var customDebugTagsText by remember { mutableStateOf("") }
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
+    var djiSeiHexDumpEnabled by remember { mutableStateOf(FfmpegBridge.isDjiSeiHexDumpEnabled()) }
     val context =  LocalContext.current
     var pendingDriveAction by remember { mutableStateOf<DriveSyncAction?>(null) }
     var pendingOrgExport by remember { mutableStateOf(false) }
@@ -1946,6 +1948,24 @@ fun MainScreen(
                     ) {
                         Text("LogLevel:$level")
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            djiSeiHexDumpEnabled = !djiSeiHexDumpEnabled
+                            FfmpegBridge.setDjiSeiHexDumpEnabled(djiSeiHexDumpEnabled)
+                            CTDebug(
+                                "DjiSeiHex",
+                                "DJI SEI hex capture ${if (djiSeiHexDumpEnabled) "enabled" else "disabled"}"
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("DJI SEI Hex: ${if (djiSeiHexDumpEnabled) "On" else "Off"}")
+                    }
+                    Text(
+                        "Research capture only. Logs every type-245 payload and can fill the diagnostic log quickly.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = {

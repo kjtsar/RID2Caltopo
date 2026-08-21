@@ -187,6 +187,11 @@ enum AppleLog {
 }
 
 @MainActor
+enum AppleSEIHexDiagnostics {
+    static var enabled = false
+}
+
+@MainActor
 final class AppleDiagnosticsCenter: ObservableObject {
     @Published private(set) var days: [AppleLogDay] = []
     @Published var selectedDays: Set<String> = []

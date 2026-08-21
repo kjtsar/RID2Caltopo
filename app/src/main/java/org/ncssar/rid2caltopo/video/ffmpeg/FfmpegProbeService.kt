@@ -32,9 +32,9 @@ data class StreamTelemetrySnapshot(
     val horizontalFovDeg: Double? = null,
     val verticalFovDeg: Double? = null,
     val djiAttitudeAnglesDeg: List<Double> = emptyList(),
-    val djiRelativeNorthMmRaw: Int? = null,
-    val djiRelativeEastMmRaw: Int? = null,
-    val djiRelativeDownMmRaw: Int? = null,
+    val djiNorthMm: Int? = null,
+    val djiEastMm: Int? = null,
+    val djiDownMm: Int? = null,
     val latestRemoteId: String? = null,
     val remoteIdCandidates: List<String> = emptyList(),
 )
@@ -108,9 +108,9 @@ object FfmpegTelemetryReducer {
             verticalFovDeg = incoming.verticalFovDeg ?: existing?.verticalFovDeg,
             djiAttitudeAnglesDeg = incoming.djiAttitudeAnglesDeg.takeIf { it.size == 9 }
                 ?: existing?.djiAttitudeAnglesDeg.orEmpty(),
-            djiRelativeNorthMmRaw = incoming.djiRelativeNorthMmRaw ?: existing?.djiRelativeNorthMmRaw,
-            djiRelativeEastMmRaw = incoming.djiRelativeEastMmRaw ?: existing?.djiRelativeEastMmRaw,
-            djiRelativeDownMmRaw = incoming.djiRelativeDownMmRaw ?: existing?.djiRelativeDownMmRaw,
+            djiNorthMm = incoming.djiNorthMm ?: existing?.djiNorthMm,
+            djiEastMm = incoming.djiEastMm ?: existing?.djiEastMm,
+            djiDownMm = incoming.djiDownMm ?: existing?.djiDownMm,
         )
         val candidates = LinkedHashSet(existingCandidates)
         val addedRemoteId = incoming.remoteId?.takeIf { candidates.add(it) }
@@ -1110,9 +1110,9 @@ class FfmpegProbeService(
             horizontalFovDeg = merged.horizontalFovDeg,
             verticalFovDeg = merged.verticalFovDeg,
             djiAttitudeAnglesDeg = merged.djiAttitudeAnglesDeg,
-            djiRelativeNorthMmRaw = merged.djiRelativeNorthMmRaw,
-            djiRelativeEastMmRaw = merged.djiRelativeEastMmRaw,
-            djiRelativeDownMmRaw = merged.djiRelativeDownMmRaw,
+            djiNorthMm = merged.djiNorthMm,
+            djiEastMm = merged.djiEastMm,
+            djiDownMm = merged.djiDownMm,
             latestRemoteId = merged.remoteId,
             remoteIdCandidates = candidates,
         )

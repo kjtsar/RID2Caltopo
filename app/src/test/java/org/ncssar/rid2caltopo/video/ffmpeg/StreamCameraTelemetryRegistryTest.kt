@@ -20,9 +20,9 @@ class StreamCameraTelemetryRegistryTest {
                 longitude = -121.132845,
                 altitudeMeters = 574.595,
                 djiAttitudeAnglesDeg = (0..8).map(Int::toDouble),
-                djiRelativeNorthMmRaw = 1_000,
-                djiRelativeEastMmRaw = 2_000,
-                djiRelativeDownMmRaw = -500,
+                djiNorthMm = 1_000,
+                djiEastMm = 2_000,
+                djiDownMm = -574_595,
             ),
             nowMs = 10_000,
         )
@@ -51,7 +51,7 @@ class StreamCameraTelemetryRegistryTest {
     }
 
     @Test
-    fun registryUnwrapsLocalDisplacementAndDerivesCourseAndRelativeUp() {
+    fun registryUsesFullWidthDisplacementAndDerivesCourseAndRelativeUp() {
         val base = FfmpegTelemetry(
             sourceTag = "dji-sei-245",
             sourceTimestampUs = 1_000_000,
@@ -62,18 +62,18 @@ class StreamCameraTelemetryRegistryTest {
             latitude = 39.0,
             longitude = -121.0,
             altitudeMeters = 595.8,
-            djiRelativeNorthMmRaw = 32_760,
-            djiRelativeEastMmRaw = 0,
-            djiRelativeDownMmRaw = -1_000,
+            djiNorthMm = 32_760,
+            djiEastMm = 0,
+            djiDownMm = -595_800,
         )
         StreamCameraTelemetryRegistry.update("WRAP", base, nowMs = 1_000)
         StreamCameraTelemetryRegistry.update(
             "WRAP",
             base.copy(
                 sourceTimestampUs = 1_033_333,
-                djiRelativeNorthMmRaw = -28_776, // +4,000 mm across the signed wrap
-                djiRelativeEastMmRaw = 4_000,
-                djiRelativeDownMmRaw = -3_500,
+                djiNorthMm = 36_760,
+                djiEastMm = 4_000,
+                djiDownMm = -598_300,
             ),
             nowMs = 1_010,
         )
@@ -84,6 +84,89 @@ class StreamCameraTelemetryRegistryTest {
         assertEquals(45.0, sample?.courseDeg ?: 0.0, 1e-9)
         assertEquals(14.7, sample?.azimuthDeg ?: 0.0, 1e-9)
         StreamCameraTelemetryRegistry.clear("WRAP")
+    }
+
+    @Test
+    fun freshAnchoredValidatesFullWidthPositionAfterStreamRestart() {
+        val referenceLatitude = 39.319435
+        val referenceLongitude = -120.658820
+        StreamCameraTelemetryRegistry.update(
+            "RESTART",
+            FfmpegTelemetry(
+                sourceTag = "dji-sei-245",
+                sourceTimestampUs = 1_000_000,
+                gimbalPitchDeg = -90.0,
+                cameraYawDeg = 75.0,
+                horizontalFovDeg = 37.7,
+                verticalFovDeg = 21.2,
+                latitude = referenceLatitude,
+                longitude = referenceLongitude,
+                altitudeMeters = 1_394.0,
+                djiNorthMm = 375_216,
+                djiEastMm = -371_216,
+                djiDownMm = -1_462_000,
+            ),
+            nowMs = 2_000,
+        )
+        val targetNorthMeters = 375.216
+        val targetEastMeters = -371.216
+        val targetLatitude = referenceLatitude + Math.toDegrees(targetNorthMeters / 6_378_137.0)
+        val targetLongitude = referenceLongitude + Math.toDegrees(
+            targetEastMeters / (6_378_137.0 * kotlin.math.cos(Math.toRadians(referenceLatitude)))
+        )
+
+        val anchored = StreamCameraTelemetryRegistry.freshAnchored(
+            designator = "RESTART",
+            anchorLatitudeDeg = targetLatitude + Math.toDegrees(1.5 / 6_378_137.0),
+            anchorLongitudeDeg = targetLongitude,
+            anchorAltitudeMeters = 1_462.0,
+            takeoffMslMeters = 1_394.0,
+            nowMs = 2_000,
+        )
+
+        assertEquals(targetLatitude, anchored?.latitudeDeg ?: 0.0, 1e-10)
+        assertEquals(targetLongitude, anchored?.longitudeDeg ?: 0.0, 1e-10)
+        assertEquals(targetNorthMeters, anchored?.northMeters ?: 0.0, 1e-9)
+        assertEquals(targetEastMeters, anchored?.eastMeters ?: 0.0, 1e-9)
+        assertEquals(68.0, anchored?.relativeUpMeters ?: 0.0, 1e-9)
+        StreamCameraTelemetryRegistry.clear("RESTART")
+    }
+
+    @Test
+    fun freshAnchoredWithholdsPositionWhenRidDisagrees() {
+        StreamCameraTelemetryRegistry.update(
+            "AMBIGUOUS",
+            FfmpegTelemetry(
+                sourceTag = "dji-sei-245",
+                sourceTimestampUs = 1_000_000,
+                gimbalPitchDeg = -90.0,
+                cameraYawDeg = 75.0,
+                horizontalFovDeg = 37.7,
+                verticalFovDeg = 21.2,
+                latitude = 39.0,
+                longitude = -121.0,
+                altitudeMeters = 500.0,
+                djiNorthMm = 0,
+                djiEastMm = 0,
+                djiDownMm = -500_000,
+            ),
+            nowMs = 3_000,
+        )
+        // A 46.3 m diagonal difference is outside the RID plausibility gate.
+        val anchorLatitude = 39.0 + Math.toDegrees(32.768 / 6_378_137.0)
+        val anchorLongitude = -121.0 + Math.toDegrees(
+            32.768 / (6_378_137.0 * kotlin.math.cos(Math.toRadians(39.0)))
+        )
+        val anchored = StreamCameraTelemetryRegistry.freshAnchored(
+            "AMBIGUOUS",
+            anchorLatitude,
+            anchorLongitude,
+            nowMs = 3_000,
+        )
+        assertNull(anchored?.latitudeDeg)
+        assertNull(anchored?.longitudeDeg)
+        assertEquals(15.0, anchored?.azimuthDeg ?: 0.0, 1e-9)
+        StreamCameraTelemetryRegistry.clear("AMBIGUOUS")
     }
 
     @Test

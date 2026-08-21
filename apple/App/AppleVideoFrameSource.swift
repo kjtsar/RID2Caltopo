@@ -300,6 +300,43 @@ struct AppleDJICameraTelemetry: Equatable {
     let referenceAltitudeMeters: Double?
     let sourceTimestampMicroseconds: Int64?
     let receivedAt: Date
+
+    func anchoredToRID(
+        latitude ridLatitude: Double,
+        longitude ridLongitude: Double,
+        altitudeMeters ridAltitude: Double?,
+        takeoffMslMeters: Double?
+    ) -> AppleDJICameraTelemetry {
+        let horizontal = OperationalClueGeometry.djiValidatedHorizontalPosition(
+            latitudeDegrees: latitudeDegrees,
+            longitudeDegrees: longitudeDegrees,
+            ridLatitudeDegrees: ridLatitude,
+            ridLongitudeDegrees: ridLongitude
+        )
+        return AppleDJICameraTelemetry(
+            rawAzimuthCandidateDegrees: rawAzimuthCandidateDegrees,
+            cameraAzimuthDegrees: cameraAzimuthDegrees,
+            courseDegrees: courseDegrees,
+            rawTiltDegrees: rawTiltDegrees,
+            tiltDegrees: tiltDegrees,
+            horizontalFovDegrees: horizontalFovDegrees,
+            verticalFovDegrees: verticalFovDegrees,
+            attitudeAnglesDegrees: attitudeAnglesDegrees,
+            latitudeDegrees: horizontal?.latitudeDegrees,
+            longitudeDegrees: horizontal?.longitudeDegrees,
+            altitudeMeters: nil,
+            relativeUpMeters: OperationalClueGeometry.djiValidatedRelativeUpMeters(
+                observedRelativeUpMeters: relativeUpMeters,
+                ridAltitudeMeters: ridAltitude,
+                takeoffMslMeters: takeoffMslMeters
+            ),
+            referenceLatitudeDegrees: referenceLatitudeDegrees,
+            referenceLongitudeDegrees: referenceLongitudeDegrees,
+            referenceAltitudeMeters: referenceAltitudeMeters,
+            sourceTimestampMicroseconds: sourceTimestampMicroseconds,
+            receivedAt: receivedAt
+        )
+    }
 }
 
 @MainActor
@@ -822,6 +859,35 @@ final class AppleVideoFrameSource: ObservableObject {
             if copiedDJITelemetry,
                djiTelemetrySequence != ffmpegDJICameraTelemetrySequence {
                 ffmpegDJICameraTelemetrySequence = djiTelemetrySequence
+                if AppleSEIHexDiagnostics.enabled {
+                    var payload = [UInt8](repeating: 0, count: 128)
+                    var payloadSize: Int32 = 0
+                    var northMillimeters: Int32 = 0
+                    var eastMillimeters: Int32 = 0
+                    var downMillimeters: Int32 = 0
+                    var payloadTimestampMicroseconds: Int64 = 0
+                    var payloadSequence: UInt64 = 0
+                    let copiedPayload = payload.withUnsafeMutableBufferPointer { bytes in
+                        R2CFFmpegSessionCopyLatestDJISEIPayload(
+                            ffmpegSession,
+                            bytes.baseAddress,
+                            Int32(bytes.count),
+                            &payloadSize,
+                            &northMillimeters,
+                            &eastMillimeters,
+                            &downMillimeters,
+                            &payloadTimestampMicroseconds,
+                            &payloadSequence
+                        )
+                    }
+                    if copiedPayload, payloadSize > 0, Int(payloadSize) <= payload.count {
+                        let hex = payload.prefix(Int(payloadSize)).map { String(format: "%02x", $0) }.joined()
+                        AppleLog.debug(
+                            "DjiSeiHex",
+                            "DJI_SEI_HEX path=\(currentPath ?? "unknown") sequence=\(payloadSequence) ptsUs=\(payloadTimestampMicroseconds) len=\(payloadSize) northMm=\(northMillimeters) eastMm=\(eastMillimeters) downMm=\(downMillimeters) payload=\(hex)"
+                        )
+                    }
+                }
                 latestDJICameraTelemetry = AppleDJICameraTelemetry(
                     rawAzimuthCandidateDegrees: RidHeading.normalized(djiAzimuthDegrees) ?? djiAzimuthDegrees,
                     cameraAzimuthDegrees: OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(

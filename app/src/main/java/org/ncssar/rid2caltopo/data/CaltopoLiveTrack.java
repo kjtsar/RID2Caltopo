@@ -138,10 +138,10 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
         trackObservedStartedAtMs = trackObservedEndedAtMs = System.currentTimeMillis();
 
-        StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry();
-        double effectiveLat = cameraLatitude(cameraTelemetry, lat);
-        double effectiveLng = cameraLongitude(cameraTelemetry, lng);
-        double effectiveEle = cameraBarometricAltitude(cameraTelemetry, ele);
+        StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry(lat, lng, ele);
+        double effectiveLat = lat;
+        double effectiveLng = lng;
+        double effectiveEle = ele;
         linePoints.add(new QueuedPoint(effectiveLat, effectiveLng, effectiveEle, droneTimestampInMsec,
                 droneSpec.getLastPositionTelemetry(), cameraTelemetry));
         notifyLocalTrackPoint(effectiveLat, effectiveLng, effectiveEle, droneTimestampInMsec);
@@ -162,10 +162,10 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
         trackObservedStartedAtMs = trackObservedEndedAtMs = startedAtMs;
 
-        StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry();
-        double effectiveLat = cameraLatitude(cameraTelemetry, lat);
-        double effectiveLng = cameraLongitude(cameraTelemetry, lng);
-        double effectiveEle = cameraBarometricAltitude(cameraTelemetry, ele);
+        StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry(lat, lng, ele);
+        double effectiveLat = lat;
+        double effectiveLng = lng;
+        double effectiveEle = ele;
         linePoints.add(new QueuedPoint(effectiveLat, effectiveLng, effectiveEle, droneTimestampInMsec,
                 droneSpec.getLastPositionTelemetry(), cameraTelemetry));
         long notifyStartedAtMs = System.currentTimeMillis();
@@ -701,10 +701,11 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             @Nullable CtDroneSpec.PositionTelemetry telemetry,
             boolean notifyCoordinator) {
         long startedAtMs = System.currentTimeMillis();
-        StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry();
-        double effectiveLat = cameraLatitude(cameraTelemetry, lat);
-        double effectiveLng = cameraLongitude(cameraTelemetry, lng);
-        double effectiveAltitudeMeters = cameraBarometricAltitude(cameraTelemetry, altitudeMeters);
+        StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry(lat, lng, altitudeMeters);
+        // RID remains the canonical aircraft track. SEI position is used only for clue geometry.
+        double effectiveLat = lat;
+        double effectiveLng = lng;
+        double effectiveAltitudeMeters = altitudeMeters;
         QueuedPoint previousPoint = linePoints.peekLast();
         if (isDuplicateOfPreviousPoint(previousPoint, effectiveLat, effectiveLng,
                 effectiveAltitudeMeters, timestampMsec)) {
@@ -872,31 +873,21 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     @Nullable
-    private StreamCameraTelemetrySample currentCameraTelemetry() {
+    private StreamCameraTelemetrySample currentCameraTelemetry(
+            double ridLatitude,
+            double ridLongitude,
+            double ridAltitudeMeters) {
         String mappedId = droneSpec.getMappedId().trim();
         return mappedId.isEmpty()
                 ? null
-                : StreamCameraTelemetryRegistry.INSTANCE.fresh(mappedId, System.currentTimeMillis(),
+                : StreamCameraTelemetryRegistry.INSTANCE.freshAnchored(
+                        mappedId,
+                        ridLatitude,
+                        ridLongitude,
+                        ridAltitudeMeters,
+                        droneSpec.getImpliedTakeoffAltM(),
+                        System.currentTimeMillis(),
                         StreamCameraTelemetryRegistry.DEFAULT_MAX_AGE_MS);
-    }
-
-    private double cameraLatitude(@Nullable StreamCameraTelemetrySample cameraTelemetry, double fallback) {
-        Double value = cameraTelemetry == null ? null : cameraTelemetry.getLatitudeDeg();
-        return value == null || !Double.isFinite(value) ? fallback : value;
-    }
-
-    private double cameraLongitude(@Nullable StreamCameraTelemetrySample cameraTelemetry, double fallback) {
-        Double value = cameraTelemetry == null ? null : cameraTelemetry.getLongitudeDeg();
-        return value == null || !Double.isFinite(value) ? fallback : value;
-    }
-
-    private double cameraBarometricAltitude(
-            @Nullable StreamCameraTelemetrySample cameraTelemetry,
-            double fallback) {
-        Double takeoffMsl = droneSpec.getImpliedTakeoffAltM();
-        Double relativeUp = cameraTelemetry == null ? null : cameraTelemetry.getRelativeUpMeters();
-        if (takeoffMsl == null || relativeUp == null || !Double.isFinite(relativeUp)) return fallback;
-        return takeoffMsl + relativeUp;
     }
 
     private boolean isDuplicateOfPreviousPoint(

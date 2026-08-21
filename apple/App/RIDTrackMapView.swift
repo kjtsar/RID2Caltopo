@@ -1232,9 +1232,17 @@ struct RIDTrackMapView: View {
             clueError = "The paired aircraft telemetry is no longer available."
             return
         }
-        let djiCameraTelemetry = session.model.freshDJICameraTelemetry()
         let ridCaptureObservation = captureTrack.lastObservation
         let captureAltitudeDisplay = model.altitudeDisplayByAircraftID[defaultAircraftID]
+        let takeoffMsl = ridCaptureObservation.altitudeMeters.flatMap { ridMsl in
+            captureAltitudeDisplay?.atoFeet.map { ridMsl - $0 * 0.3048 }
+        }
+        let djiCameraTelemetry = session.model.freshDJICameraTelemetry()?.anchoredToRID(
+            latitude: ridCaptureObservation.latitude,
+            longitude: ridCaptureObservation.longitude,
+            altitudeMeters: ridCaptureObservation.altitudeMeters,
+            takeoffMslMeters: takeoffMsl
+        )
         let seiMslAltitude: Double? = djiCameraTelemetry?.relativeUpMeters.flatMap { relativeUp -> Double? in
             guard let ridMsl = ridCaptureObservation.altitudeMeters,
                   let atoFeet = captureAltitudeDisplay?.atoFeet else { return nil }

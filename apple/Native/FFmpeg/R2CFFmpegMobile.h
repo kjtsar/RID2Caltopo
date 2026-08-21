@@ -76,6 +76,20 @@ bool R2CFFmpegSessionCopyLatestDJICameraTelemetry(
     uint64_t *sequence
 );
 
+// Copies the exact decoded type-245 payload retained with the latest DJI SEI
+// telemetry sample. The caller supplies at least 128 bytes.
+bool R2CFFmpegSessionCopyLatestDJISEIPayload(
+    R2CFFmpegSession *session,
+    uint8_t *payload,
+    int payloadCapacity,
+    int *payloadSize,
+    int32_t *northMillimeters,
+    int32_t *eastMillimeters,
+    int32_t *downMillimeters,
+    int64_t *sourceTimestampMicroseconds,
+    uint64_t *sequence
+);
+
 const char *R2CFFmpegVersion(void);
 
 #ifdef __cplusplus

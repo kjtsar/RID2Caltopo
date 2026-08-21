@@ -191,6 +191,34 @@ private fun BluetoothDisabledDialog(
     )
 }
 
+@Composable
+private fun TrackerReauthenticationDialog(
+    onSignIn: () -> Unit,
+    onContinueOffline: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onContinueOffline,
+        title = { Text("Tracker sign-in required") },
+        text = {
+            Text(
+                "Sign in with an authorized organization account to restore Tracker " +
+                    "sharing and online organization services. RID, video, maps, and " +
+                    "your existing CalTopo configuration remain available."
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onSignIn) {
+                Text("Sign in")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onContinueOffline) {
+                Text("Continue offline")
+            }
+        },
+    )
+}
+
 internal fun shouldOpenTrackerReauthentication(browserAlreadyOpen: Boolean): Boolean =
     !browserAlreadyOpen
 
@@ -435,6 +463,7 @@ class R2CActivity :
     private var bluetoothDisabled by mutableStateOf(false)
     private var launchDisclaimerAccepted by mutableStateOf(false)
     private var trackerReauthenticationBrowserOpen = false
+    private var pendingTrackerReauthenticationUrl by mutableStateOf<String?>(null)
     private var pendingVideoStreamRequest by mutableStateOf<VideoStreamViewRequest?>(null)
     private var pendingRecordingDownloadRequest by mutableStateOf<RecordingDownloadRequest?>(null)
     private var pendingVideoPreflightRouteKind by mutableStateOf<String?>(null)
@@ -675,6 +704,7 @@ class R2CActivity :
         val uri = intent.data ?: return
         if (uri.scheme == "r2creauth") {
             trackerReauthenticationBrowserOpen = false
+            pendingTrackerReauthenticationUrl = null
             // Consume the callback before acting on it. Keeping the VIEW intent attached to
             // the activity can replay it after a configuration change or activity restart.
             setIntent(Intent(this, R2CActivity::class.java).setAction(Intent.ACTION_MAIN))
@@ -1120,6 +1150,14 @@ class R2CActivity :
                         onQuit = { CaltopoClient.QuitApplication() },
                     )
                 }
+                pendingTrackerReauthenticationUrl?.let {
+                    TrackerReauthenticationDialog(
+                        onSignIn = ::openPendingTrackerReauthentication,
+                        onContinueOffline = {
+                            pendingTrackerReauthenticationUrl = null
+                        },
+                    )
+                }
             }
         }
     }
@@ -1559,21 +1597,22 @@ class R2CActivity :
 
     fun beginTrackerReauthentication(url: String) {
         runOnUiThread {
-            if (!shouldOpenTrackerReauthentication(trackerReauthenticationBrowserOpen)) {
-                CTDebug(TAG, "Tracker reauthentication browser is already open")
-                return@runOnUiThread
-            }
-            trackerReauthenticationBrowserOpen = true
-            showToast(
-                "Tracker access is paused. Sign in with an authorized account; " +
-                    "your RID map and CalTopo configuration are preserved."
-            )
-            runCatching {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            }.onFailure {
-                trackerReauthenticationBrowserOpen = false
-                showToast("Unable to open Tracker reauthentication.")
-            }
+            pendingTrackerReauthenticationUrl = url
+        }
+    }
+
+    private fun openPendingTrackerReauthentication() {
+        val url = pendingTrackerReauthenticationUrl ?: return
+        if (!shouldOpenTrackerReauthentication(trackerReauthenticationBrowserOpen)) {
+            CTDebug(TAG, "Tracker reauthentication browser is already open")
+            return
+        }
+        trackerReauthenticationBrowserOpen = true
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }.onFailure {
+            trackerReauthenticationBrowserOpen = false
+            showToast("Unable to open Tracker sign-in. Tap Sign in to try again.")
         }
     }
 

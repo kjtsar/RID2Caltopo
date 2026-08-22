@@ -43,6 +43,16 @@ public struct MapScreenPoint: Sendable, Equatable {
     }
 }
 
+public struct CameraFovBoundaryBearings: Sendable, Equatable {
+    public let leftDegrees: Double
+    public let rightDegrees: Double
+
+    public init(leftDegrees: Double, rightDegrees: Double) {
+        self.leftDegrees = leftDegrees
+        self.rightDegrees = rightDegrees
+    }
+}
+
 public enum OperationalMapGeometry {
     public static let minimumTravelBearingDisplacementMeters = 2.0
 
@@ -77,6 +87,21 @@ public enum OperationalMapGeometry {
             )
         }
         return nil
+    }
+
+    public static func cameraFovBoundaryBearings(
+        cameraAzimuthDegrees: Double?,
+        horizontalFovDegrees: Double?
+    ) -> CameraFovBoundaryBearings? {
+        guard let cameraAzimuthDegrees, cameraAzimuthDegrees.isFinite,
+              let horizontalFovDegrees, horizontalFovDegrees.isFinite,
+              horizontalFovDegrees > 0, horizontalFovDegrees <= 180
+        else { return nil }
+        let halfFov = horizontalFovDegrees / 2
+        return CameraFovBoundaryBearings(
+            leftDegrees: normalizedDegrees(cameraAzimuthDegrees - halfFov),
+            rightDegrees: normalizedDegrees(cameraAzimuthDegrees + halfFov)
+        )
     }
 
     public static func bearingLineToViewportEdge(
@@ -138,6 +163,11 @@ public enum OperationalMapGeometry {
         let degrees = atan2(y, x) * 180 / .pi
         let remainder = degrees.truncatingRemainder(dividingBy: 360)
         return remainder >= 0 ? remainder : remainder + 360
+    }
+
+    private static func normalizedDegrees(_ degrees: Double) -> Double {
+        let normalized = degrees.truncatingRemainder(dividingBy: 360)
+        return normalized < 0 ? normalized + 360 : normalized
     }
 
 }

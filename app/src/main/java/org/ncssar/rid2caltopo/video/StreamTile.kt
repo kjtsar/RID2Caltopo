@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.video
 
 import DroneDisplayState
 import StreamsViewModel
+import CenterpointElevationSample
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color as AndroidColor
@@ -51,9 +52,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
@@ -115,6 +119,81 @@ internal fun streamTelemetryHeaderText(displayState: DroneDisplayState?): String
         headingDeg = displayState?.headingDeg,
     )
 
+internal fun isNearStreamCenter(
+    tap: Offset,
+    widthPx: Float,
+    heightPx: Float,
+    radiusPx: Float,
+): Boolean {
+    if (widthPx <= 0f || heightPx <= 0f || radiusPx <= 0f) return false
+    val dx = tap.x - widthPx / 2f
+    val dy = tap.y - heightPx / 2f
+    return dx * dx + dy * dy <= radiusPx * radiusPx
+}
+
+private val CenterpointTurquoise = Color(0xFF40E0D0)
+
+internal fun centerpointElevationLabel(sample: CenterpointElevationSample?): String = when {
+    sample == null -> "--' MSL"
+    sample.demResolutionMeters != null ->
+        "${sample.elevationFeet}' MSL · ${sample.demResolutionMeters}m DEM"
+    else -> "${sample.elevationFeet}' MSL · USGS DEM"
+}
+
+@Composable
+private fun CenterpointElevationOverlay(sample: CenterpointElevationSample?) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .semantics {
+                contentDescription = sample?.let {
+                    val resolution = it.demResolutionMeters?.let { meters -> ", $meters meter DEM" }
+                        ?: ", USGS DEM"
+                    "Centerpoint elevation ${it.elevationFeet} feet$resolution"
+                }
+                    ?: "Centerpoint elevation unavailable"
+            },
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val arm = 18.dp.toPx()
+            val gap = 4.dp.toPx()
+            val segments = listOf(
+                center.copy(x = center.x - arm) to center.copy(x = center.x - gap),
+                center.copy(x = center.x + gap) to center.copy(x = center.x + arm),
+                center.copy(y = center.y - arm) to center.copy(y = center.y - gap),
+                center.copy(y = center.y + gap) to center.copy(y = center.y + arm),
+            )
+            segments.forEach { (start, end) ->
+                drawLine(Color.Black, start, end, strokeWidth = 4.dp.toPx())
+                drawLine(CenterpointTurquoise, start, end, strokeWidth = 1.5.dp.toPx())
+            }
+            drawCircle(Color.Black, radius = 3.5.dp.toPx(), center = center, style = Stroke(2.5.dp.toPx()))
+            drawCircle(CenterpointTurquoise, radius = 3.5.dp.toPx(), center = center, style = Stroke(1.dp.toPx()))
+        }
+        val label = centerpointElevationLabel(sample)
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .offset(x = 42.dp, y = 28.dp),
+        ) {
+            Text(
+                text = label,
+                color = Color.Black,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                style = TextStyle(drawStyle = Stroke(width = 5f)),
+            )
+            Text(
+                text = label,
+                color = CenterpointTurquoise,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
 
 @Composable
 fun StreamTile(
@@ -169,6 +248,9 @@ fun StreamTile(
     val currentIsFocused by rememberUpdatedState(isFocused)
     val currentDesignatorState by rememberUpdatedState(designatorState)
     var pendingAnnotationPoint by remember(streamDesignator) { mutableStateOf<Offset?>(null) }
+    var centerpointElevationEnabled by remember(streamDesignator) { mutableStateOf(false) }
+    var centerpointElevation by remember(streamDesignator) { mutableStateOf<CenterpointElevationSample?>(null) }
+    val density = LocalDensity.current
     val localRuntimeSnapshot by produceState<org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot?>(
         initialValue = null,
         streamDesignator,
@@ -241,6 +323,23 @@ fun StreamTile(
 
     LaunchedEffect(streamTileSize, zoomScale) {
         zoomOffset = clampZoomOffset(zoomOffset, zoomScale)
+    }
+
+    LaunchedEffect(isFocused) {
+        if (!isFocused) {
+            centerpointElevationEnabled = false
+            centerpointElevation = null
+        }
+    }
+
+    LaunchedEffect(centerpointElevationEnabled, isFocused, streamState) {
+        if (!centerpointElevationEnabled || !isFocused || streamState != StreamState.LIVE) return@LaunchedEffect
+        while (true) {
+            viewModel.centerpointElevationForStream(streamDesignator)?.let { updated ->
+                if (centerpointElevation != updated) centerpointElevation = updated
+            }
+            delay(500L)
+        }
     }
 
     fun openTelemetryPairingControl() {
@@ -497,6 +596,9 @@ fun StreamTile(
                     }
             )
         }
+        if (centerpointElevationEnabled && isFocused && streamState == StreamState.LIVE) {
+            CenterpointElevationOverlay(centerpointElevation)
+        }
 
         // Match the map's canonical ATO / AGL / RNG / HDG telemetry order.
         if (streamState == StreamState.LIVE && !isLocalPlayback && showStandaloneTelemetryOverlay) {
@@ -581,10 +683,32 @@ fun StreamTile(
                     } else {
                         Modifier.pointerInput(streamDesignator, designatorState, currentIsFocused, currentDesignatorState) {
                             detectTapGestures(
-                                onTap = {
+                                onTap = { tapOffset ->
                                     CTDebug(tag, "StreamTile{${streamDesignator}) onTap")
                                     if (isLocalPlayback) {
                                         viewModel.ensureFocus(streamDesignator)
+                                    } else if (currentIsFocused) {
+                                        val minimumDimension = minOf(size.width, size.height).toFloat()
+                                        val radiusPx = with(density) {
+                                            (minimumDimension * 0.20f)
+                                                .coerceIn(48.dp.toPx(), 96.dp.toPx())
+                                        }
+                                        if (isNearStreamCenter(
+                                                tap = tapOffset,
+                                                widthPx = size.width.toFloat(),
+                                                heightPx = size.height.toFloat(),
+                                                radiusPx = radiusPx,
+                                            )
+                                        ) {
+                                            centerpointElevationEnabled = !centerpointElevationEnabled
+                                            if (centerpointElevationEnabled) {
+                                                centerpointElevation = null
+                                                zoomScale = 1f
+                                                zoomOffset = Offset.Zero
+                                            }
+                                            return@detectTapGestures
+                                        }
+                                        onToggleFocus()
                                     } else {
                                         onToggleFocus()
                                     }
@@ -610,7 +734,7 @@ fun StreamTile(
                 onClick = { requestClueCapture("camera-button") },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
-                    .padding(end = 6.dp)
+                    .padding(end = 62.dp)
                     .size(44.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.88f))

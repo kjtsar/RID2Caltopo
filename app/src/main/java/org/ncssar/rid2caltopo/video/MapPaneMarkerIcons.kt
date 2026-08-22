@@ -6,10 +6,13 @@ import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
 import android.graphics.Rect
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import java.util.Locale
+import kotlin.math.max
 
 internal fun buildNotamMarkerIcon(
     context: Context,
@@ -100,6 +103,71 @@ internal fun cachedScaledRemoteMarkerDrawable(
     )
     cache[scaledCacheKey] = scaled
     return scaled.constantState?.newDrawable(resources)?.mutate() ?: scaled
+}
+
+internal fun cachedWhiteOutlinedMarkerDrawable(
+    resources: android.content.res.Resources,
+    source: Drawable,
+    cache: MutableMap<String, Drawable>,
+    cacheKey: String,
+    outlineWidthPx: Int = 3
+): Drawable {
+    val safeOutlineWidth = max(1, outlineWidthPx)
+    val outlinedCacheKey = "$cacheKey|white-outline|$safeOutlineWidth"
+    val cached = cache[outlinedCacheKey]
+    if (cached != null) {
+        return cached.constantState?.newDrawable(resources)?.mutate() ?: cached
+    }
+
+    val sourceWidth = source.intrinsicWidth.takeIf { it > 0 } ?: 1
+    val sourceHeight = source.intrinsicHeight.takeIf { it > 0 } ?: 1
+    val sourceBitmap = Bitmap.createBitmap(sourceWidth, sourceHeight, Bitmap.Config.ARGB_8888)
+    val sourceCanvas = Canvas(sourceBitmap)
+    val previousBounds = Rect(source.bounds)
+    source.setBounds(0, 0, sourceWidth, sourceHeight)
+    source.draw(sourceCanvas)
+    source.setBounds(previousBounds)
+
+    val outlinedBitmap = Bitmap.createBitmap(
+        sourceWidth + safeOutlineWidth * 2,
+        sourceHeight + safeOutlineWidth * 2,
+        Bitmap.Config.ARGB_8888
+    )
+    val outlinedCanvas = Canvas(outlinedBitmap)
+    val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        colorFilter = PorterDuffColorFilter(AndroidColor.WHITE, PorterDuff.Mode.SRC_IN)
+    }
+    markerOutlineOffsets(safeOutlineWidth).forEach { (offsetX, offsetY) ->
+        outlinedCanvas.drawBitmap(
+            sourceBitmap,
+            (safeOutlineWidth + offsetX).toFloat(),
+            (safeOutlineWidth + offsetY).toFloat(),
+            outlinePaint
+        )
+    }
+    outlinedCanvas.drawBitmap(
+        sourceBitmap,
+        safeOutlineWidth.toFloat(),
+        safeOutlineWidth.toFloat(),
+        null
+    )
+
+    val outlined = BitmapDrawable(resources, outlinedBitmap)
+    cache[outlinedCacheKey] = outlined
+    return outlined.constantState?.newDrawable(resources)?.mutate() ?: outlined
+}
+
+internal fun markerOutlineOffsets(radiusPx: Int): List<Pair<Int, Int>> {
+    val safeRadius = max(1, radiusPx)
+    return buildList {
+        for (y in -safeRadius..safeRadius) {
+            for (x in -safeRadius..safeRadius) {
+                if (x * x + y * y <= safeRadius * safeRadius) {
+                    add(x to y)
+                }
+            }
+        }
+    }
 }
 
 private fun symbolGlyphForMarkerSymbol(symbol: String): String? {
@@ -267,12 +335,12 @@ private fun buildCaltopoLikeSymbolDrawable(
             canvas.drawLine(cx - 2, cy + 10, cx + 3, cy + 2, blackStroke)
         }
         "radiotower" -> {
-            canvas.drawLine(cx, cy - 12, cx - 5, cy + 12, blackStroke)
-            canvas.drawLine(cx, cy - 12, cx + 5, cy + 12, blackStroke)
-            canvas.drawLine(cx - 4, cy + 2, cx + 4, cy + 2, blackStroke)
-            canvas.drawLine(cx - 6, cy + 12, cx + 6, cy + 12, blackStroke)
-            canvas.drawArc(cx - 14, cy - 12, cx - 2, cy, -70f, 140f, false, blackStroke)
-            canvas.drawArc(cx + 2, cy - 12, cx + 14, cy, 110f, 140f, false, blackStroke)
+            canvas.drawLine(cx, cy - 12, cx - 5, cy + 12, stroke)
+            canvas.drawLine(cx, cy - 12, cx + 5, cy + 12, stroke)
+            canvas.drawLine(cx - 4, cy + 2, cx + 4, cy + 2, stroke)
+            canvas.drawLine(cx - 6, cy + 12, cx + 6, cy + 12, stroke)
+            canvas.drawArc(cx - 14, cy - 12, cx - 2, cy, -70f, 140f, false, stroke)
+            canvas.drawArc(cx + 2, cy - 12, cx + 14, cy, 110f, 140f, false, stroke)
         }
         "waterfalls" -> {
             val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {

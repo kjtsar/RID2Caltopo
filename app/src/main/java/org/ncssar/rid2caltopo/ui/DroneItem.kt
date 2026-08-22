@@ -175,17 +175,16 @@ fun DroneItem(drone: CtDroneSpec,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    text = droneRssiStatisticsText(
-                        directRssiDbm = drone.lastRssi,
-                        droneToBridgeRssiDbm = drone.lastDroneToBridgeRssi,
-                    ),
-                    textAlign = TextAlign.Center,
-                    fontSize = 9.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                droneToBridgeRssiText(drone.lastDroneToBridgeRssi)?.let { bridgeRssiText ->
+                    Text(
+                        text = bridgeRssiText,
+                        textAlign = TextAlign.Center,
+                        fontSize = 9.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             // BT4 count
             Column(
@@ -344,10 +343,5 @@ fun DroneItem(drone: CtDroneSpec,
     }
 }
 
-internal fun droneRssiStatisticsText(
-    directRssiDbm: Int,
-    droneToBridgeRssiDbm: Int,
-): String {
-    fun value(rssiDbm: Int) = if (rssiDbm == 0) "—" else "$rssiDbm"
-    return "D→Device ${value(directRssiDbm)} • D→Bridge ${value(droneToBridgeRssiDbm)} dBm"
-}
+internal fun droneToBridgeRssiText(droneToBridgeRssiDbm: Int): String? =
+    droneToBridgeRssiDbm.takeIf { it in -127..-1 }?.let { "D→Bridge $it dBm" }

@@ -936,6 +936,9 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     ) == "map-42")
     #expect(!OperationalMainScreenPresentation.showsAircraftHeader(activeTrackCount: 0))
     #expect(OperationalMainScreenPresentation.showsAircraftHeader(activeTrackCount: 1))
+    #expect(OperationalMainScreenPresentation.droneToBridgeRSSIText(-74) == "D→Bridge -74 dBm")
+    #expect(OperationalMainScreenPresentation.droneToBridgeRSSIText(nil) == nil)
+    #expect(OperationalMainScreenPresentation.droneToBridgeRSSIText(-128) == nil)
 }
 
 @Test func operationalStreamSetupMatchesAndroidWording() {
@@ -1146,6 +1149,17 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(throws: OperationalZipError.self) {
         try OperationalZipArchive.encode([.init(path: "../escape", data: Data())])
     }
+}
+
+@Test func operationalZipWritesARealModificationDate() throws {
+    let archive = try OperationalZipArchive.encode([
+        .init(path: "log.txt", data: Data("diagnostic".utf8)),
+    ])
+    #expect(archive.count >= 14)
+    let dosTime = UInt16(archive[10]) | UInt16(archive[11]) << 8
+    let dosDate = UInt16(archive[12]) | UInt16(archive[13]) << 8
+    #expect(dosTime != 0 || dosDate != 0)
+    #expect(dosDate != 0)
 }
 
 @Test func operationalZipReadsDeflatedJavaCompatibleEntries() throws {
@@ -1650,6 +1664,52 @@ private func proximityDrone(
     #expect(OperationalMapVideoLayout.split.withPictureInPicture(false) == .split)
 }
 
+@Test func operationalSplitSizingUsesDragDistanceAndReachesCollapsedEdges() {
+    #expect(abs(OperationalSplitSizing.adjustedFraction(
+        current: 0.5,
+        dragDelta: 100,
+        available: 1000
+    ) - 0.6) < 0.0001)
+    #expect(OperationalSplitSizing.adjustedFraction(
+        current: 0.5,
+        dragDelta: 1000,
+        available: 1000
+    ) == OperationalSplitSizing.maximumFraction)
+    #expect(OperationalSplitSizing.adjustedFraction(
+        current: 0.5,
+        dragDelta: -1000,
+        available: 1000
+    ) == OperationalSplitSizing.minimumFraction)
+    #expect(OperationalSplitSizing.adjustedFraction(
+        current: 0,
+        dragDelta: 100,
+        available: 0
+    ) == OperationalSplitSizing.minimumFraction)
+}
+
+@Test func operationalSplitSizingSnapsWithinTwoHandleWidthsOfEitherEdge() {
+    #expect(OperationalSplitSizing.snappedFraction(
+        0.088,
+        available: 1000,
+        handleWidth: 44
+    ) == OperationalSplitSizing.minimumFraction)
+    #expect(abs(OperationalSplitSizing.snappedFraction(
+        0.089,
+        available: 1000,
+        handleWidth: 44
+    ) - 0.089) < 0.0001)
+    #expect(OperationalSplitSizing.snappedFraction(
+        0.912,
+        available: 1000,
+        handleWidth: 44
+    ) == OperationalSplitSizing.maximumFraction)
+    #expect(abs(OperationalSplitSizing.snappedFraction(
+        0.911,
+        available: 1000,
+        handleWidth: 44
+    ) - 0.911) < 0.0001)
+}
+
 @Test func operationalMapFullScreenPreservesPictureInPicture() {
     #expect(OperationalMapVideoLayout.mapPrimary.fullScreenPresentation(
         pictureInPictureEnabled: true
@@ -2040,6 +2100,33 @@ private func proximityDrone(
     #expect((projected.altitudeMeters ?? 0) < 34)
 }
 
+@Test func centerpointElevationTapRequiresTheConfiguredCenterRadius() {
+    #expect(OperationalCenterpointElevation.isNearCenter(
+        x: 500, y: 300, width: 1_000, height: 600, radius: 80
+    ))
+    #expect(OperationalCenterpointElevation.isNearCenter(
+        x: 560, y: 340, width: 1_000, height: 600, radius: 80
+    ))
+    #expect(!OperationalCenterpointElevation.isNearCenter(
+        x: 581, y: 300, width: 1_000, height: 600, radius: 80
+    ))
+    #expect(!OperationalCenterpointElevation.isNearCenter(
+        x: 500, y: 300, width: 0, height: 600, radius: 80
+    ))
+}
+
+@Test func centerpointElevationDisplayDistinguishesKnownResolutionFromOnlineDEM() {
+    #expect(OperationalCenterpointElevation.displayText(.init(
+        elevationFeet: 4_812,
+        demResolutionMeters: 1
+    )) == "4812' MSL · 1m DEM")
+    #expect(OperationalCenterpointElevation.displayText(.init(
+        elevationFeet: 4_812,
+        demResolutionMeters: nil
+    )) == "4812' MSL · USGS DEM")
+    #expect(OperationalCenterpointElevation.displayText(nil) == "--' MSL")
+}
+
 @Test func operationalClueGimbalSelectionMatchesAndroidTelemetryFallback() {
     #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: -44.5) == -44.5)
     #expect(OperationalClueGeometry.selectedGimbalAngleDegrees(streamPitchDegrees: -120) == -90)
@@ -2206,6 +2293,10 @@ private func proximityDrone(
 }
 
 @Test func operationalCoordinateFormatsMatchAndroid() {
+    #expect(OperationalCoordinateDisplayFormat.restored(from: "usng") == .usng)
+    #expect(OperationalCoordinateDisplayFormat.restored(from: "utm") == .utm)
+    #expect(OperationalCoordinateDisplayFormat.restored(from: nil) == .decimal)
+    #expect(OperationalCoordinateDisplayFormat.restored(from: "invalid") == .decimal)
     #expect(OperationalCoordinateFormatter.format(
         latitude: 39.9526,
         longitude: -75.1652,
@@ -2757,6 +2848,66 @@ private func proximityDrone(
     ])
 }
 
+@Test func pairedVideoKeepsFlightActiveAndRestartPreservesRemoteIDBinding() async {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = RidTrackStore(policy: .init(activeTimeout: 30))
+    _ = await store.ingest(RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "RID2CALTOPO12345",
+        receivedAt: start,
+        latitude: 39.7392,
+        longitude: -104.9903
+    ))
+    var video = PairedVideoFlightActivityStore()
+    video.pair(streamID: "RC2/Red1", aircraftID: "RID2CALTOPO12345")
+    video.publisherStarted(streamID: "RC2/Red1", at: start.addingTimeInterval(5))
+
+    let whilePublishing = start.addingTimeInterval(90)
+    #expect(await store.removeInactive(
+        at: whilePublishing,
+        pairedVideoLastActivityAt: video.activityByAircraftID(at: whilePublishing)
+    ).isEmpty)
+
+    video.publisherStopped(streamID: "RC2/Red1", at: whilePublishing)
+    #expect(await store.removeInactive(
+        at: whilePublishing.addingTimeInterval(29),
+        pairedVideoLastActivityAt: video.activityByAircraftID(at: whilePublishing.addingTimeInterval(29))
+    ).isEmpty)
+
+    video.publisherStarted(streamID: "rc2/red1", at: whilePublishing.addingTimeInterval(29))
+    #expect(video.boundAircraftID(for: "RC2/RED1") == "RID2CALTOPO12345")
+    #expect(await store.removeInactive(
+        at: whilePublishing.addingTimeInterval(60),
+        pairedVideoLastActivityAt: video.activityByAircraftID(at: whilePublishing.addingTimeInterval(60))
+    ).isEmpty)
+}
+
+@Test func flightEndsThirtySecondsAfterRidAndPairedVideoAreBothAbsent() async {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = RidTrackStore(policy: .init(activeTimeout: 30))
+    _ = await store.ingest(RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "RID2CALTOPO12345",
+        receivedAt: start,
+        latitude: 39.7392,
+        longitude: -104.9903
+    ))
+    var video = PairedVideoFlightActivityStore()
+    video.pair(streamID: "Red1", aircraftID: "RID2CALTOPO12345")
+    let videoStoppedAt = start.addingTimeInterval(60)
+    video.publisherStarted(streamID: "Red1", at: start.addingTimeInterval(5))
+    video.publisherStopped(streamID: "Red1", at: videoStoppedAt)
+
+    #expect(await store.removeInactive(
+        at: videoStoppedAt.addingTimeInterval(29.999),
+        pairedVideoLastActivityAt: video.activityByAircraftID(at: videoStoppedAt.addingTimeInterval(29.999))
+    ).isEmpty)
+    #expect(await store.removeInactive(
+        at: videoStoppedAt.addingTimeInterval(30.001),
+        pairedVideoLastActivityAt: video.activityByAircraftID(at: videoStoppedAt.addingTimeInterval(30.001))
+    ).map(\.aircraftID) == ["RID2CALTOPO12345"])
+}
+
 @Test func droneScoutSelfIDIdentifiesRelayAndBridgeInputRSSI() async throws {
     let metadata = DroneScoutRelayMetadata.parse("DS WIFI B -74 dBm drone")
     #expect(metadata?.droneToBridgeRssiDbm == -74)
@@ -3013,7 +3164,7 @@ private func proximityDrone(
     #expect(await store.activeSnapshot(at: start.addingTimeInterval(16)).isEmpty)
 }
 
-@Test func trackStoreMatchesAndroidRemoteLossGraceMultiplier() async {
+@Test func trackStoreDoesNotExtendFlightFromDistanceAlone() async {
     let start = Date(timeIntervalSince1970: 1_700_000_000)
     let store = RidTrackStore(policy: .init(
         minimumDistanceMeters: 0,
@@ -3031,8 +3182,8 @@ private func proximityDrone(
         latitude: 39.7400,
         longitude: -104.9903
     ))
-    #expect(await store.activeSnapshot(at: start.addingTimeInterval(150)).count == 1)
-    #expect(await store.activeSnapshot(at: start.addingTimeInterval(161)).isEmpty)
+    #expect(await store.activeSnapshot(at: start.addingTimeInterval(39)).count == 1)
+    #expect(await store.activeSnapshot(at: start.addingTimeInterval(41)).isEmpty)
 }
 
 @Test func trafficSeparationReturnsEveryPairInDistanceOrder() {
@@ -3251,10 +3402,42 @@ private func proximityDrone(
         seiCameraAzimuthDegrees: 80.8,
         magneticDeclinationDegrees: nil
     ) == nil)
+    #expect(abs((OperationalClueGeometry.djiClockwiseFovAzimuthDegrees(
+        seiCameraAzimuthDegrees: 80.8,
+        magneticDeclinationDegrees: 14.13
+    ) ?? 0) - 4.93) < 0.000001)
+    #expect(OperationalClueGeometry.djiClockwiseFovAzimuthDegrees(
+        seiCameraAzimuthDegrees: nil,
+        magneticDeclinationDegrees: 14.13
+    ) == nil)
     #expect(OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -90) == -90)
     #expect(OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -14.5625) == 0)
     #expect(abs((OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -24.5) ?? 0) - (-11.86)) < 0.02)
     #expect(OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: 120) == 90)
+}
+
+@Test func cameraFovBoundariesCenterOnSEIAzimuthAndRejectInvalidWidths() throws {
+    let east = try #require(OperationalMapGeometry.cameraFovBoundaryBearings(
+        cameraAzimuthDegrees: 90,
+        horizontalFovDegrees: 40
+    ))
+    #expect(east.leftDegrees == 70)
+    #expect(east.rightDegrees == 110)
+
+    let north = try #require(OperationalMapGeometry.cameraFovBoundaryBearings(
+        cameraAzimuthDegrees: 5,
+        horizontalFovDegrees: 30
+    ))
+    #expect(north.leftDegrees == 350)
+    #expect(north.rightDegrees == 20)
+    #expect(OperationalMapGeometry.cameraFovBoundaryBearings(
+        cameraAzimuthDegrees: 90,
+        horizontalFovDegrees: 0
+    ) == nil)
+    #expect(OperationalMapGeometry.cameraFovBoundaryBearings(
+        cameraAzimuthDegrees: 90,
+        horizontalFovDegrees: 181
+    ) == nil)
 }
 
 @Test func djiVideoPositionDecodesMatriceTag4CoordinatesAndAltitude() throws {
@@ -4042,6 +4225,54 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(first["ownerName"] as? String == "1sar7")
     let telemetry = first["telemetry"] as? [String: Any]
     #expect((telemetry?["headingDeg"] as? NSNumber)?.doubleValue == 92)
+}
+
+@Test func currentFlightConfirmationPromptsAgainAfterDefinitiveFlightEnd() {
+    var lifecycle = CurrentFlightConfirmationLifecycle()
+
+    let first = lifecycle.reconcile(
+        orderedRemoteIDs: ["DRONE1"],
+        confirmedRemoteIDs: [],
+        ignoredRemoteIDs: []
+    )
+    #expect(first.candidateRemoteID == "DRONE1")
+    #expect(first.endedRemoteIDs.isEmpty)
+
+    let saved = lifecycle.reconcile(
+        orderedRemoteIDs: ["DRONE1"],
+        confirmedRemoteIDs: ["DRONE1"],
+        ignoredRemoteIDs: []
+    )
+    #expect(saved.candidateRemoteID == nil)
+
+    let ended = lifecycle.reconcile(
+        orderedRemoteIDs: [],
+        confirmedRemoteIDs: ["DRONE1"],
+        ignoredRemoteIDs: []
+    )
+    #expect(ended.endedRemoteIDs == ["DRONE1"])
+
+    let nextFlight = lifecycle.reconcile(
+        orderedRemoteIDs: ["DRONE1"],
+        confirmedRemoteIDs: [],
+        ignoredRemoteIDs: []
+    )
+    #expect(nextFlight.candidateRemoteID == "DRONE1")
+}
+
+@Test func currentFlightConfirmationDoesNotRepeatWithinContinuousFlight() {
+    var lifecycle = CurrentFlightConfirmationLifecycle()
+
+    #expect(lifecycle.reconcile(
+        orderedRemoteIDs: ["DRONE1"],
+        confirmedRemoteIDs: [],
+        ignoredRemoteIDs: []
+    ).candidateRemoteID == "DRONE1")
+    #expect(lifecycle.reconcile(
+        orderedRemoteIDs: ["DRONE1"],
+        confirmedRemoteIDs: [],
+        ignoredRemoteIDs: []
+    ).candidateRemoteID == nil)
 }
 
 @Test func trackerOwnershipRequiresLocalLeaseAndLocalSave() throws {

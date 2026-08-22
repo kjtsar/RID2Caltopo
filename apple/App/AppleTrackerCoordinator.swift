@@ -2336,7 +2336,11 @@ final class AppleTrackerCoordinator: ObservableObject {
         trackStartedAt: Date,
         trackEndedAt: Date
     ) -> URL? {
-        let recordings = Array(managedVideoRecordingsBySessionID.values)
+        var recordings = Array(managedVideoRecordingsBySessionID.values)
+        let knownSessionIDs = Set(recordings.map(\.sessionId))
+        recordings += AppleManagedVideoRecordingCatalog.snapshot(
+            sessionStartedAt: managedVideoIncidentStartedAt
+        ).filter { !knownSessionIDs.contains($0.sessionId) }
         guard let match = ManagedVideoRecordingIdentity.recording(
             matching: designators,
             trackStartedAt: trackStartedAt,

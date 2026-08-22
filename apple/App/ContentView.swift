@@ -588,6 +588,7 @@ struct ContentView: View {
                 iCloudBackup.scheduleBackup()
                 mediaMTX.eventHandler = { event in
                     streamRegistry.handle(event)
+                    reconcileStreamFlightPairings()
                     if case .recordFileCompleted = event {
                         peerCoordinator.updateManagedVideoStreams(
                             incidentName: currentIncidentName,
@@ -606,6 +607,9 @@ struct ContentView: View {
                     try? await bluetoothScanner.start()
                 }
                 ridTracks.configurePublicationSuppression(droneConfirmations.isIgnored)
+                ridTracks.configurePairedVideoActivity {
+                    streamRegistry.flightActivityByAircraftID()
+                }
                 ridTracks.bind(to: bluetoothScanner.observations, sourceID: "bluetooth")
                 ridTracks.bindAircraftMessages(
                     to: bluetoothScanner.aircraftMessages,
@@ -1030,6 +1034,7 @@ struct ContentView: View {
             }
             .onReceive(ridTracks.$tracks) { tracks in
                 updateProximityAlerts()
+                reconcileStreamFlightPairings()
                 let remoteID = droneConfirmations.reconcileActiveFlights(tracks.map(\.aircraftID))
                 if !ProcessInfo.processInfo.arguments.contains("--suppress-auto-confirmation"),
                    pendingDroneConfirmation == nil,
@@ -1048,6 +1053,7 @@ struct ContentView: View {
                     await Task.yield()
                     updateProximityAlerts()
                     configureTrackArchive()
+                    reconcileStreamFlightPairings()
                 }
             }
             .onChange(of: proximityConfigurationFingerprint) { _, _ in
@@ -1336,7 +1342,7 @@ struct ContentView: View {
         HStack(spacing: 1) {
             androidGroupedHeader(top: "", bottom: "", width: 28)
             androidGroupedHeader(top: "", bottom: "Track Label:", width: 200)
-            androidGroupedHeader(top: "RSSI: D→Device / D→Bridge", bottom: "Remote ID:", width: 240)
+            androidGroupedHeader(top: "Drone→Bridge RSSI", bottom: "Remote ID:", width: 240)
             VStack(spacing: 1) {
                 Text("Waypoints Received")
                     .font(.caption.bold())
@@ -1377,10 +1383,14 @@ struct ContentView: View {
                 Text(track.aircraftID)
                     .font(.caption.monospaced())
                     .lineLimit(1)
-                Text(droneRSSIStatisticsText(track))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if let bridgeRSSI = OperationalMainScreenPresentation.droneToBridgeRSSIText(
+                    track.lastDroneToBridgeSignalStrengthDbm
+                ) {
+                    Text(bridgeRSSI)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
             .frame(width: 240, height: 42)
             .background(Color(uiColor: .secondarySystemBackground))
@@ -1404,12 +1414,6 @@ struct ContentView: View {
             .frame(width: 40, height: 42)
             .background(Color(uiColor: .secondarySystemBackground))
         }
-    }
-
-    private func droneRSSIStatisticsText(_ track: RidAircraftTrack) -> String {
-        let direct = track.lastDirectSignalStrengthDbm.map(String.init) ?? "—"
-        let bridge = track.lastDroneToBridgeSignalStrengthDbm.map(String.init) ?? "—"
-        return "D→Device \(direct) • D→Bridge \(bridge) dBm"
     }
 
     private func androidSignalBars(rssi: Int?, colorByStrength: Bool = false) -> some View {
@@ -2077,6 +2081,20 @@ struct ContentView: View {
             identityProvider: droneConfirmations.identity,
             alertEligibility: peerCoordinator.isLocalAlertEligible
         )
+    }
+
+    private func reconcileStreamFlightPairings() {
+        for streamID in streamRegistry.activePublisherStreamIDs {
+            let normalizedStreamID = streamID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let matches = ridTracks.tracks.filter { track in
+                let identity = droneConfirmations.identity(for: track.aircraftID)
+                return track.aircraftID.uppercased() == normalizedStreamID
+                    || identity?.mappedID.uppercased() == normalizedStreamID
+            }
+            if matches.count == 1 {
+                streamRegistry.pairIfUnbound(streamID: streamID, aircraftID: matches[0].aircraftID)
+            }
+        }
     }
 
     private func updateOperationalAlerts() {

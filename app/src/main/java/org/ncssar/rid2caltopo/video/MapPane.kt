@@ -88,6 +88,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetryRegistry
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetrySample
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -435,6 +437,12 @@ private fun consumeInsetMarkerTaps(marker: Marker, isInsetMode: Boolean) {
     marker.setOnMarkerClickListener { _, _ -> true }
 }
 
+internal fun mapPaneAttributionText(contoursEnabled: Boolean): String =
+    buildString {
+        append("© OpenStreetMap contributors · DEM: USGS")
+        if (contoursEnabled) append(" · Contours: USGS")
+    }
+
 private fun openClueSnapshotInExternalViewer(
     context: Context,
     title: String,
@@ -671,6 +679,7 @@ internal fun SplitMapPane(
     fun cachedOverlayState(): ArtifactOverlayState = cachedArtifactOverlayState(artifactRenderCache.overlayState)
     val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val currentFlightTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
+    val seiTelemetryByMappedId = remember { mutableStateMapOf<String, StreamCameraTelemetrySample>() }
     val localTrackMappedIdsByRemoteId = remember { mutableStateMapOf<String, MutableSet<String>>() }
     val localTrackLastSeededTimestampByMappedId = remember { mutableMapOf<String, Long>() }
     var trackOverlayRefreshToken by remember { mutableIntStateOf(0) }
@@ -704,6 +713,7 @@ internal fun SplitMapPane(
     val symbolMarkerCache = remember { LinkedHashMap<String, Drawable>() }
     val caltopoMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
     val scaledRemoteMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
+    val localDeviceOutlinedMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
     val caltopoMarkerPending = remember { HashSet<String>() }
     val unknownSymbolsSeen = remember { LinkedHashSet<String>() }
     val iconCacheService = remember(context) { CaltopoIconCacheService(context) }
@@ -780,6 +790,60 @@ internal fun SplitMapPane(
     var selectedNotam by remember { mutableStateOf<NearbyNotam?>(null) }
     var selectedNotamGroup by remember { mutableStateOf<List<NearbyNotam>?>(null) }
     var selectedArtifact by remember { mutableStateOf<ArtifactInspection?>(null) }
+    LaunchedEffect(viewModel) {
+        while (isActive) {
+            val nowMs = System.currentTimeMillis()
+            val activeMappedIds = linkedSetOf<String>()
+            viewModel.droneStates.forEach { (designator, state) ->
+                activeMappedIds.add(designator)
+                val seiSample = viewModel.cameraTelemetryDesignatorsFor(state.remoteId, state.mappedId)
+                    .firstNotNullOfOrNull { streamDesignator ->
+                        StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
+                            designator = streamDesignator,
+                            anchorLatitudeDeg = state.lastLat,
+                            anchorLongitudeDeg = state.lastLng,
+                            nowMs = nowMs,
+                        )
+                    }
+                if (seiSample == null) {
+                    seiTelemetryByMappedId.remove(designator)
+                    return@forEach
+                }
+                seiTelemetryByMappedId[designator] = seiSample
+
+                val seiLat = seiSample.latitudeDeg
+                val seiLng = seiSample.longitudeDeg
+                if (seiLat != null && seiLng != null &&
+                    seiLat.isFinite() && seiLng.isFinite() &&
+                    !(seiLat == 0.0 && seiLng == 0.0)
+                ) {
+                    val list = localTrackPointsByMappedId.getOrPut(designator) { mutableStateListOf() }
+                    if (list.lastOrNull()?.receivedAtMsec != seiSample.receivedAtMs) {
+                        val flightList = currentFlightTrackPointsByMappedId.getOrPut(designator) {
+                            mutableStateListOf()
+                        }
+                        val point = LocalTrackPoint(
+                            mappedId = designator,
+                            lat = seiLat,
+                            lng = seiLng,
+                            altitudeM = state.lastAlt,
+                            timestampMsec = seiSample.receivedAtMs,
+                            receivedAtMsec = seiSample.receivedAtMs,
+                        )
+                        list.add(point)
+                        flightList.add(point)
+                        trackOverlayRefreshToken++
+                        if (list.size > LOCAL_TRACK_RECENT_POINT_LIMIT) list.removeAt(0)
+                        if (flightList.size > LOCAL_TRACK_FLIGHT_POINT_LIMIT) flightList.removeAt(0)
+                    }
+                }
+            }
+            seiTelemetryByMappedId.keys
+                .filter { it !in activeMappedIds }
+                .forEach { seiTelemetryByMappedId.remove(it) }
+            delay(250L)
+        }
+    }
     val dronePointEntries = viewModel.droneStates.mapNotNull { (designator, state) ->
         val stateTs = state.source.mostRecentMsecTimestamp
         var lat = state.lastLat
@@ -808,7 +872,14 @@ internal fun SplitMapPane(
         if ((lat == 0.0 && lng == 0.0) || timestampMsec <= staleTrackCutoffMs) {
             null
         } else {
-            val headingDeg = viewModel.droneDisplayStateFor(designator)?.headingDeg?.takeIf { it.isFinite() }
+            val cameraTelemetry = seiTelemetryByMappedId[designator]
+            val cameraAzimuthDeg = cameraTelemetry?.fovAzimuthDeg?.takeIf { it.isFinite() }
+            val horizontalCameraFovDeg = cameraTelemetry?.horizontalFovDeg
+                ?.takeIf { it.isFinite() && it > 0.0 && it <= 180.0 }
+            // Preserve the pre-FOV status-label heading selection. The marker arrow and
+            // optional long bearing line are both derived from recent movement below.
+            val headingDeg = cameraTelemetry?.azimuthDeg?.takeIf { it.isFinite() }
+                ?: viewModel.droneDisplayStateFor(designator)?.headingDeg?.takeIf { it.isFinite() }
             Pair(
                 DroneMapPoint(
                     designator = designator,
@@ -819,6 +890,8 @@ internal fun SplitMapPane(
                     timestampMsec = timestampMsec,
                     receivedAtMsec = receivedAtMsec,
                     headingDeg = headingDeg,
+                    cameraAzimuthDeg = cameraAzimuthDeg,
+                    horizontalCameraFovDeg = horizontalCameraFovDeg,
                     droneSpec = state.source
                 ),
                 usingLocalTail
@@ -2186,7 +2259,7 @@ internal fun SplitMapPane(
             val atoFeet  = bubbleDisplayState?.atoFt
             val rangeFeet = distanceFeetFromTakeoff(point)
             val telemetry = point.droneSpec?.lastPositionTelemetry
-            val headingDeg = bubbleDisplayState?.headingDeg ?: telemetry?.aircraftTrackDeg
+            val headingDeg = point.headingDeg ?: bubbleDisplayState?.headingDeg ?: telemetry?.aircraftTrackDeg
             val detailLines = droneDetailLines(
                 locationText = CoordinateFormatter.format(point.lat, point.lng, coordinateDisplayFormat),
                 coordinateFormatLabel = coordinateDisplayFormat.label,
@@ -3190,7 +3263,7 @@ internal fun SplitMapPane(
                     }
                     val localMarker = Marker(mapView).apply {
                         position = GeoPoint(myLocation.latitude, myLocation.longitude)
-                        icon = localRemoteIcon?.let { icon ->
+                        val baseIcon = localRemoteIcon?.let { icon ->
                             cachedScaledRemoteMarkerDrawable(
                                 resources = context.resources,
                                 source = icon,
@@ -3206,6 +3279,12 @@ internal fun SplitMapPane(
                                 cache = symbolMarkerCache,
                                 scale = markerScale
                             )
+                        icon = cachedWhiteOutlinedMarkerDrawable(
+                            resources = context.resources,
+                            source = baseIcon,
+                            cache = localDeviceOutlinedMarkerCache,
+                            cacheKey = "$localCacheKey|$markerScale"
+                        )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         val localDeviceName = R2CActivity.MyDeviceName
                         title = if (localDeviceName.isBlank() || localDeviceName == "<unknown>") {
@@ -3286,9 +3365,10 @@ internal fun SplitMapPane(
                 val iconLimitAglM = AGL_LIMIT_FT * FT_TO_METERS
                 val nearIconAglM = (AGL_LIMIT_FT - AGL_ICON_NEAR_DELTA_FT) * FT_TO_METERS
                 val droneLabelSpecs = mutableListOf<DroneLabelDrawSpec>()
+                val cameraFovSpecs = mutableListOf<CameraFovDrawSpec>()
                 dronePoints.forEach { point ->
                     val pointLatencyKey =
-                        "${point.timestampMsec}|${"%.6f".format(Locale.US, point.lat)}|${"%.6f".format(Locale.US, point.lng)}|${"%.1f".format(Locale.US, point.altitudeM)}"
+                        "${point.timestampMsec}|${"%.6f".format(Locale.US, point.lat)}|${"%.6f".format(Locale.US, point.lng)}|${"%.1f".format(Locale.US, point.altitudeM)}|${point.headingDeg?.let { "%.1f".format(Locale.US, it) } ?: "n/a"}|${point.cameraAzimuthDeg?.let { "%.1f".format(Locale.US, it) } ?: "n/a"}|${point.horizontalCameraFovDeg?.let { "%.1f".format(Locale.US, it) } ?: "n/a"}"
                     if (renderLatencyKeyByDesignator[point.designator] != pointLatencyKey) {
                         val renderWallMsec = System.currentTimeMillis()
                         val ingestToRenderMs = point.receivedAtMsec?.let { renderWallMsec - it }
@@ -3296,7 +3376,8 @@ internal fun SplitMapPane(
                             ICON_LATENCY_TAG,
                             "icon_render designator=${point.designator} wall=$renderWallMsec droneTs=${point.timestampMsec} " +
                                 "lat=${"%.6f".format(Locale.US, point.lat)} lng=${"%.6f".format(Locale.US, point.lng)} " +
-                                "alt=${"%.1f".format(Locale.US, point.altitudeM)} " +
+                                "alt=${"%.1f".format(Locale.US, point.altitudeM)} heading=${point.headingDeg?.let { "%.1f".format(Locale.US, it) } ?: "n/a"} " +
+                                "cameraAzimuth=${point.cameraAzimuthDeg?.let { "%.1f".format(Locale.US, it) } ?: "n/a"} horizontalFov=${point.horizontalCameraFovDeg?.let { "%.1f".format(Locale.US, it) } ?: "n/a"} " +
                                 "trackToRenderMs=${ingestToRenderMs?.toString() ?: "n/a"}"
                         )
                         renderLatencyKeyByDesignator[point.designator] = pointLatencyKey
@@ -3313,19 +3394,35 @@ internal fun SplitMapPane(
                     }
                     val renderLat = predictedHead?.lat ?: point.lat
                     val renderLng = predictedHead?.lng ?: point.lng
+                    val cameraFov = cameraFovBoundaryBearings(
+                        point.cameraAzimuthDeg,
+                        point.horizontalCameraFovDeg
+                    )
+                    if (cameraFov != null) {
+                        cameraFovSpecs.add(
+                            CameraFovDrawSpec(
+                                position = GeoPoint(renderLat, renderLng),
+                                leftBearingDeg = cameraFov.leftBearingDeg,
+                                rightBearingDeg = cameraFov.rightBearingDeg,
+                                scale = markerScale
+                            )
+                        )
+                    }
                     // AGL, ATO, heading — all computed by DroneAltitudeCoordinator.
                     val displayState = viewModel.droneDisplayStateFor(point.designator)
-                    val headingDeg  = displayState?.headingDeg
+                    val headingDeg  = point.headingDeg ?: displayState?.headingDeg
                     val labelAglFeet = displayState?.aglFt
                     val labelAglStale = displayState?.aglStale ?: false
                     val labelAtoFeet = displayState?.atoFt
                     val labelRangeFeet = distanceFeetFromTakeoff(point, renderLat, renderLng)
                     val pilotKey = normalizePilotCallsign(point.droneSpec?.owner)
                     val pilotPreference = pilotDisplayPreferenceFor(pilotKey)
+                    // Always compute the short marker arrow from recent visible movement.
+                    // The optional long bearing line uses this exact same value.
+                    val travelBearingDeg = travelBearingDegrees(
+                        localTrackPointsByMappedId[localTrackDesignator(point.designator)].orEmpty()
+                    )
                     if (pilotPreference.bearingEnabled) {
-                        val travelBearingDeg = travelBearingDegrees(
-                            localTrackPointsByMappedId[localTrackDesignator(point.designator)].orEmpty()
-                        )
                         val markerGeoPoint = GeoPoint(renderLat, renderLng)
                         val startPoint = Point()
                         mapView.projection.toPixels(markerGeoPoint, startPoint)
@@ -3379,7 +3476,7 @@ internal fun SplitMapPane(
                             resources = context.resources,
                             baseIcon = droneMarkerIcon,
                             tint = markerTint,
-                            headingDeg = headingDeg,
+                            headingDeg = travelBearingDeg,
                             scale = markerScale
                         )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
@@ -3421,6 +3518,11 @@ internal fun SplitMapPane(
                             )
                         )
                     }
+                }
+                if (cameraFovSpecs.isNotEmpty()) {
+                    val cameraFovOverlay = CameraFovOverlay(cameraFovSpecs, context.resources)
+                    mapView.overlays.add(cameraFovOverlay)
+                    managedOverlays.add(cameraFovOverlay)
                 }
                 if (droneLabelSpecs.isNotEmpty()) {
                     val labelOverlay = DroneLabelOverlay(droneLabelSpecs)
@@ -4517,40 +4619,24 @@ internal fun SplitMapPane(
                     }
             )
         } else {
-            Row(
+            Text(
+                text = mapPaneAttributionText(contourOverlayEnabled),
+                fontSize = 8.sp,
+                lineHeight = 10.sp,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
+                    .fillMaxWidth()
                     .navigationBarsPadding()
                     .padding(start = 6.dp, end = 6.dp, bottom = 6.dp)
                     .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
-                    .padding(horizontal = 4.dp, vertical = 1.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "© OpenStreetMap contributors",
-                    fontSize = 8.sp,
-                    lineHeight = 8.sp,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.clickable {
+                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                    .clickable {
                         uriHandler.openUri("https://www.openstreetmap.org/copyright")
                     }
-                )
-                Text(
-                    text = "DEM: USGS National Geospatial Program",
-                    fontSize = 8.sp,
-                    lineHeight = 8.sp,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                if (contourOverlayEnabled) {
-                    Text(
-                        text = "Contours: USGS The National Map",
-                        fontSize = 8.sp,
-                        lineHeight = 8.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-            }
+            )
         }
     }
 }

@@ -781,6 +781,8 @@ struct AppleMapCacheManagementView: View {
     @Binding var offlineOnly: Bool
     @Binding var followFocusedDrone: Bool
     let canReloadMap: Bool
+    let mapReloadInFlight: Bool
+    let mapReloadStatus: String
     let onReloadMap: () -> Void
     let onExportMutualAid: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -794,8 +796,16 @@ struct AppleMapCacheManagementView: View {
                         followFocusedDrone ? "Follow Focused Drone: On" : "Follow Focused Drone: Off",
                         isOn: $followFocusedDrone
                     )
-                    Button("Reload Map") { onReloadMap() }
-                        .disabled(!canReloadMap)
+                    Button(action: onReloadMap) {
+                        HStack {
+                            Text(mapReloadInFlight ? "Reloading Map…" : "Reload Map")
+                            if mapReloadInFlight { ProgressView() }
+                        }
+                    }
+                    .disabled(!canReloadMap || mapReloadInFlight)
+                    Text(mapReloadStatus)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                     NavigationLink("Bad Tiles…") {
                         AppleBadTileManagementView(manager: manager)
                     }

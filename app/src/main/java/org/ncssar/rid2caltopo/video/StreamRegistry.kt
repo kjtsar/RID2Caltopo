@@ -256,6 +256,12 @@ object StreamRegistry {
         stateChangedAtMs.putAll(state.stateChangedAtMs)
         rejectedPaths.clear()
         rejectedPaths.addAll(state.rejectedPaths)
+        StreamFlightActivityRegistry.replaceLivePublishers(
+            state.active.values
+                .filter { it.state == StreamState.LIVE && !it.isLocalPlayback }
+                .map { it.designator },
+            nowMsProvider(),
+        )
     }
 
     private fun hasMatchingSourcePathLocked(parsed: ParsedStreamPath): Boolean {
@@ -704,5 +710,6 @@ object StreamRegistry {
             nowMsProvider = { System.currentTimeMillis() }
         }
         UpstreamTimingRegistry.resetForTests()
+        StreamFlightActivityRegistry.resetForTests()
     }
 }

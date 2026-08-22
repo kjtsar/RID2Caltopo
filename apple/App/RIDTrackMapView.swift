@@ -128,6 +128,7 @@ private final class ApplePilotDisplayStore: ObservableObject {
 private final class AppleMapArtifactModel: ObservableObject {
     @Published private(set) var snapshot = CaltopoArtifactSnapshot()
     @Published private(set) var status = "Map artifacts not configured"
+    @Published private(set) var isRefreshing = false
     @Published var hiddenFolderIDs: Set<String> = []
     @Published var hiddenItemIDs: Set<String> = []
     @Published private(set) var zoomRequest: ArtifactZoomRequest?
@@ -205,6 +206,10 @@ private final class AppleMapArtifactModel: ObservableObject {
     }
 
     func refresh(_ configuration: AppleCaltopoConfiguration) {
+        AppleLog.info("Map", "Manual CalTopo artifact reload requested map=\(configuration.mapID)")
+        // Operator-requested reloads are immediate. The minimum interval only
+        // protects the automatic poller from unnecessary requests.
+        lastPollAtByMapID[configuration.mapID] = nil
         configurationFingerprint = ""
         configure(configuration)
     }
@@ -288,6 +293,8 @@ private final class AppleMapArtifactModel: ObservableObject {
         }
         guard !Task.isCancelled, mapID == configuredMapID else { return }
         lastPollAtByMapID[mapID] = Date()
+        isRefreshing = true
+        defer { isRefreshing = false }
         status = "Refreshing CalTopo artifacts…"
         do {
             let value = try await client.fetchMapArtifacts()
@@ -360,6 +367,9 @@ private final class AppleMapArtifactModel: ObservableObject {
 }
 
 struct RIDTrackMapView: View {
+    private static let splitDividerTouchThickness: CGFloat = 88
+    private static let splitDividerTouchLength: CGFloat = 96
+
     @ObservedObject var model: RIDTrackViewModel
     @ObservedObject var locationProvider: AppleLocationProvider
     let caltopoConfiguration: AppleCaltopoConfiguration
@@ -424,7 +434,7 @@ struct RIDTrackMapView: View {
     @State private var pipResizeDragStartFraction: Double?
     @State private var expandedStreamID: String?
     @State private var pairingStreamID: String?
-    @State private var streamAircraftBindings: [String: String] = [:]
+    @State private var cameraTelemetryRefreshToken = 0
 
     private var baseLayer: OperationalMapBaseLayer {
         get { OperationalMapBaseLayer(rawValue: storedBaseLayer) ?? .openStreetMap }
@@ -510,7 +520,9 @@ struct RIDTrackMapView: View {
                         if enabled { operatorAdjustedViewport = false }
                     }
                 ),
-                canReloadMap: !caltopoConfiguration.mapID.isEmpty,
+                canReloadMap: caltopoConfiguration.liveConfiguration != nil,
+                mapReloadInFlight: artifacts.isRefreshing,
+                mapReloadStatus: artifacts.status,
                 onReloadMap: { artifacts.refresh(caltopoConfiguration) },
                 onExportMutualAid: {
                     showMapManagement = false
@@ -551,13 +563,13 @@ struct RIDTrackMapView: View {
                     streamID: pairingStreamID,
                     tracks: model.tracks,
                     identityStore: identityStore,
-                    selectedAircraftID: streamAircraftBindings[pairingStreamID],
+                    selectedAircraftID: streamRegistry.boundAircraftID(for: pairingStreamID),
                     onSelect: { aircraftID in
-                        streamAircraftBindings[pairingStreamID] = aircraftID
+                        streamRegistry.pair(streamID: pairingStreamID, aircraftID: aircraftID)
                         self.pairingStreamID = nil
                     },
                     onUnpair: {
-                        streamAircraftBindings.removeValue(forKey: pairingStreamID)
+                        streamRegistry.unpair(streamID: pairingStreamID)
                         self.pairingStreamID = nil
                     }
                 )
@@ -638,6 +650,13 @@ struct RIDTrackMapView: View {
             set: { if !$0 { clueError = nil } }
         )) { Button("OK") { clueError = nil } } message: { Text(clueError ?? "") }
         .task { artifacts.configure(caltopoConfiguration) }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { break }
+                cameraTelemetryRefreshToken &+= 1
+            }
+        }
         .task {
             guard ProcessInfo.processInfo.arguments.contains("--demo-focus-first-drone") else { return }
             try? await Task.sleep(for: .seconds(2))
@@ -806,105 +825,192 @@ struct RIDTrackMapView: View {
         size: CGSize,
         presentation: OperationalMapVideoLayout? = nil
     ) -> some View {
-        switch presentation ?? layout {
-        case .map:
-            mapPane(inset: false)
-        case .video:
-            videoPane
-        case .split:
-            splitLayout(size: size)
-        case .mapPrimary:
-            ZStack(alignment: .bottomTrailing) {
+        let activeLayout = presentation ?? layout
+        return ZStack {
+            switch activeLayout {
+            case .map:
                 mapPane(inset: false)
-                insetFrame(size: size, onTap: { layout = .videoPrimary }) { videoPane }
-            }
-        case .videoPrimary:
-            ZStack(alignment: .bottomTrailing) {
+            case .video:
                 videoPane
-                insetFrame(size: size, onTap: { layout = .mapPrimary }) { mapPane(inset: true) }
+            case .split:
+                splitLayout(size: size)
+            case .mapPrimary:
+                ZStack(alignment: .bottomTrailing) {
+                    mapPane(inset: false)
+                    insetFrame(size: size, onTap: { layout = .videoPrimary }) { videoPane }
+                }
+            case .videoPrimary:
+                ZStack(alignment: .bottomTrailing) {
+                    videoPane
+                    insetFrame(size: size, onTap: { layout = .mapPrimary }) { mapPane(inset: true) }
+                }
+            }
+            if !streamsFullScreen {
+                let vertical = size.width > size.height
+                let fraction = effectiveSplitFraction(for: activeLayout)
+                splitDivider(vertical: vertical, available: vertical ? size.width : size.height)
+                    .frame(
+                        width: vertical ? Self.splitDividerTouchThickness : size.width,
+                        height: vertical ? size.height : Self.splitDividerTouchThickness
+                    )
+                    .position(
+                        x: vertical ? size.width * fraction : size.width / 2,
+                        y: vertical ? size.height / 2 : size.height * fraction
+                    )
             }
         }
     }
 
     @ViewBuilder
     private func splitLayout(size: CGSize) -> some View {
-        let dividerThickness: CGFloat = 22
         if size.width > size.height {
-            let available = max(0, size.width - dividerThickness)
             HStack(spacing: 0) {
-                videoPane
-                    .frame(width: available * splitFraction)
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded {
-                        layout = OperationalMapVideoLayout.video.withPictureInPicture(videoPipEnabled)
-                    })
-                splitDivider(vertical: true, available: available)
-                mapPane(inset: false)
-                    .frame(width: available * (1 - splitFraction))
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded {
-                        layout = OperationalMapVideoLayout.map.withPictureInPicture(videoPipEnabled)
-                    })
+                if splitFraction > 0 {
+                    videoPane
+                        .frame(width: size.width * splitFraction)
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(TapGesture().onEnded {
+                            splitFraction = 1
+                            layout = OperationalMapVideoLayout.video.withPictureInPicture(videoPipEnabled)
+                        })
+                }
+                if splitFraction < 1 {
+                    mapPane(inset: false)
+                        .frame(width: size.width * (1 - splitFraction))
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(TapGesture().onEnded {
+                            splitFraction = 0
+                            layout = OperationalMapVideoLayout.map.withPictureInPicture(videoPipEnabled)
+                        })
+                }
             }
         } else {
-            let available = max(0, size.height - dividerThickness)
             VStack(spacing: 0) {
-                videoPane
-                    .frame(height: available * splitFraction)
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded {
-                        layout = OperationalMapVideoLayout.video.withPictureInPicture(videoPipEnabled)
-                    })
-                splitDivider(vertical: false, available: available)
-                mapPane(inset: false)
-                    .frame(height: available * (1 - splitFraction))
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded {
-                        layout = OperationalMapVideoLayout.map.withPictureInPicture(videoPipEnabled)
-                    })
+                if splitFraction > 0 {
+                    videoPane
+                        .frame(height: size.height * splitFraction)
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(TapGesture().onEnded {
+                            splitFraction = 1
+                            layout = OperationalMapVideoLayout.video.withPictureInPicture(videoPipEnabled)
+                        })
+                }
+                if splitFraction < 1 {
+                    mapPane(inset: false)
+                        .frame(height: size.height * (1 - splitFraction))
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(TapGesture().onEnded {
+                            splitFraction = 0
+                            layout = OperationalMapVideoLayout.map.withPictureInPicture(videoPipEnabled)
+                        })
+                }
             }
         }
     }
 
+    private func effectiveSplitFraction(for layout: OperationalMapVideoLayout) -> CGFloat {
+        switch layout {
+        case .map, .mapPrimary: 0
+        case .video, .videoPrimary: 1
+        case .split: splitFraction
+        }
+    }
+
+    private func applySplitFraction(_ fraction: CGFloat) {
+        splitFraction = fraction
+        if fraction <= CGFloat(OperationalSplitSizing.minimumFraction) {
+            layout = OperationalMapVideoLayout.map.withPictureInPicture(videoPipEnabled)
+        } else if fraction >= CGFloat(OperationalSplitSizing.maximumFraction) {
+            layout = OperationalMapVideoLayout.video.withPictureInPicture(videoPipEnabled)
+        } else {
+            videoPipEnabled = false
+            pipEditorMode = false
+            layout = .split
+        }
+    }
+
     private func splitDivider(vertical: Bool, available: CGFloat) -> some View {
-        Rectangle()
-            .fill(.clear)
-            .frame(
-                width: vertical ? 22 : nil,
-                height: vertical ? nil : 22
-            )
-            .overlay {
-                Rectangle()
-                    .fill(Color.accentColor.opacity(0.75))
+        ZStack {
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.75))
+                .frame(
+                    width: vertical ? 4 : nil,
+                    height: vertical ? nil : 4
+                )
+                .allowsHitTesting(false)
+            ZStack {
+                Color.clear
+                Capsule()
+                    .fill(Color.accentColor)
                     .frame(
-                        width: vertical ? 4 : nil,
-                        height: vertical ? nil : 4
+                        width: vertical ? 28 : 48,
+                        height: vertical ? 48 : 28
                     )
+                    .overlay {
+                        HStack(spacing: 5) {
+                            ForEach(0..<3) { _ in
+                                Circle().fill(.white).frame(width: 4, height: 4)
+                            }
+                        }
+                        .rotationEffect(vertical ? .degrees(90) : .zero)
+                    }
             }
+            .frame(
+                width: vertical
+                    ? Self.splitDividerTouchThickness
+                    : Self.splitDividerTouchLength,
+                height: vertical
+                    ? Self.splitDividerTouchLength
+                    : Self.splitDividerTouchThickness
+            )
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                // Measure against the fixed screen coordinate space. Measuring in the
+                // divider's local space makes its own movement alter the reported
+                // translation, which produces visible jitter during a long drag.
+                DragGesture(coordinateSpace: .global)
                     .onChanged { value in
                         guard available > 0 else { return }
-                        let start = splitDragStartFraction ?? splitFraction
+                        let start = splitDragStartFraction ?? effectiveSplitFraction(for: layout)
                         if splitDragStartFraction == nil { splitDragStartFraction = start }
                         let delta = vertical ? value.translation.width : value.translation.height
-                        splitFraction = min(0.9, max(0.1, start + delta / available))
+                        let adjusted = OperationalSplitSizing.adjustedFraction(
+                            current: Double(start),
+                            dragDelta: Double(delta),
+                            available: Double(available)
+                        )
+                        applySplitFraction(CGFloat(OperationalSplitSizing.snappedFraction(
+                            adjusted,
+                            available: Double(available),
+                            handleWidth: 44
+                        )))
                     }
                     .onEnded { _ in splitDragStartFraction = nil }
             )
             .accessibilityLabel("Resize video and map panes")
+            .accessibilityValue("\(Int((effectiveSplitFraction(for: layout) * 100).rounded())) percent video")
+            .accessibilityAdjustableAction { direction in
+                let delta: Double = direction == .increment ? 0.05 : -0.05
+                applySplitFraction(CGFloat(OperationalSplitSizing.adjustedFraction(
+                    current: Double(effectiveSplitFraction(for: layout)),
+                    dragDelta: delta,
+                    available: 1
+                )))
+            }
+        }
     }
 
     private func mapPane(inset: Bool) -> some View {
         let renderedArtifacts = artifacts.visibleSnapshot.excludingRenderedPointIDs(
             [peerCoordinator.localZoneID]
         )
+        let cameraFovByAircraftID = self.cameraFovByAircraftID
         return ZStack(alignment: .bottomTrailing) {
             OperationalMKMapView(
                 tracks: model.tracks,
                 aircraftDisplay: aircraftDisplay,
                 altitudeDisplay: model.altitudeDisplayByAircraftID,
+                cameraFovByAircraftID: cameraFovByAircraftID,
                 clues: clueStore.records,
                 artifacts: renderedArtifacts,
                 airspaceState: airspace.enabled ? airspace.state : OperationalAirspaceState(),
@@ -1080,7 +1186,8 @@ struct RIDTrackMapView: View {
                 remoteRequesterEmail: peerCoordinator.activeRemoteVideoRequesterEmail,
                 coordinateDisplayFormat: coordinateDisplayFormat,
                 onCoordinateDisplayFormatChange: { coordinateDisplayFormat = $0 },
-                telemetryPairingState: streamTelemetryPairingState
+                telemetryPairingState: streamTelemetryPairingState,
+                centerpointElevationFeet: centerpointElevationFeet
             )
             VStack {
                 Spacer()
@@ -1097,6 +1204,8 @@ struct RIDTrackMapView: View {
                     .clipShape(Circle())
                     .disabled(capturingSnapshot || model.tracks.isEmpty || videoModel.frameCount == 0)
                     .accessibilityLabel("Capture clue snapshot")
+                    // Keep the camera control clear of the enlarged divider grab area.
+                    .padding(.trailing, 56)
                 }
                 Spacer()
             }
@@ -1153,7 +1262,7 @@ struct RIDTrackMapView: View {
     }
 
     private func aircraftID(for streamID: String) -> String? {
-        if let bound = streamAircraftBindings[streamID],
+        if let bound = streamRegistry.boundAircraftID(for: streamID),
            model.tracks.contains(where: { $0.aircraftID == bound }) {
             return bound
         }
@@ -1165,6 +1274,26 @@ struct RIDTrackMapView: View {
         }
         if exact.count == 1 { return exact[0].aircraftID }
         return nil
+    }
+
+    private var cameraFovByAircraftID: [String: CameraFovBoundaryBearings] {
+        _ = cameraTelemetryRefreshToken
+        var result: [String: CameraFovBoundaryBearings] = [:]
+        for session in streamRegistry.sessions {
+            guard let aircraftID = aircraftID(for: session.id),
+                  let telemetry = session.model.freshDJICameraTelemetry(),
+                  let azimuth = OperationalClueGeometry.djiClockwiseFovAzimuthDegrees(
+                    seiCameraAzimuthDegrees: telemetry.rawAzimuthCandidateDegrees,
+                    magneticDeclinationDegrees: AppleMagneticNorth.declinationDegrees
+                  ),
+                  let boundaries = OperationalMapGeometry.cameraFovBoundaryBearings(
+                    cameraAzimuthDegrees: azimuth,
+                    horizontalFovDegrees: telemetry.horizontalFovDegrees
+                  )
+            else { continue }
+            result[aircraftID] = boundaries
+        }
+        return result
     }
 
     private func streamTelemetryText(_ streamID: String) -> String? {
@@ -1190,7 +1319,7 @@ struct RIDTrackMapView: View {
     }
 
     private var coordinateDisplayFormat: OperationalCoordinateDisplayFormat {
-        get { OperationalCoordinateDisplayFormat(rawValue: coordinateDisplayFormatRaw) ?? .decimal }
+        get { OperationalCoordinateDisplayFormat.restored(from: coordinateDisplayFormatRaw) }
         nonmutating set { coordinateDisplayFormatRaw = newValue.rawValue }
     }
 
@@ -1208,6 +1337,31 @@ struct RIDTrackMapView: View {
     private func streamTelemetryPairingState(_ streamID: String) -> AppleStreamTelemetryPairingState {
         if aircraftID(for: streamID) != nil { return .paired }
         return model.tracks.isEmpty ? .noTelemetry : .available
+    }
+
+    private func centerpointElevationFeet(
+        _ streamID: String
+    ) async -> OperationalCenterpointElevation.Sample? {
+        guard let aircraftID = aircraftID(for: streamID),
+              let observation = model.tracks
+                .first(where: { $0.aircraftID == aircraftID })?
+                .lastObservation,
+              let aglFeet = model.altitudeDisplayByAircraftID[aircraftID]?.aglFeet,
+              aglFeet.isFinite,
+              let session = streamRegistry.sessions.first(where: { $0.id == streamID }),
+              let camera = session.model.freshDJICameraTelemetry(),
+              let bearing = OperationalClueGeometry.djiClockwiseFovAzimuthDegrees(
+                seiCameraAzimuthDegrees: camera.rawAzimuthCandidateDegrees,
+                magneticDeclinationDegrees: AppleMagneticNorth.declinationDegrees
+              )
+        else { return nil }
+        return await model.centerpointElevationFeet(
+            streamID: streamID,
+            observation: observation,
+            headingDegrees: bearing,
+            aglMeters: aglFeet / 3.28084,
+            gimbalAngleDegrees: camera.tiltDegrees
+        )
     }
 
     private func beginSnapshotCapture(
@@ -1520,13 +1674,6 @@ struct RIDTrackMapView: View {
                     videoPipEnabled.toggle()
                     if !videoPipEnabled { pipEditorMode = false }
                     applyPipPreference()
-                }
-                if layout != .split {
-                    Button("Split") {
-                        videoPipEnabled = false
-                        pipEditorMode = false
-                        layout = .split
-                    }
                 }
                 BridgeSignalIndicator(rssi: bridgeSignalStrengthDbm)
             }
@@ -2522,6 +2669,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     let tracks: [RidAircraftTrack]
     let aircraftDisplay: [String: AircraftMapDisplay]
     let altitudeDisplay: [String: OperationalAircraftAltitudeDisplay]
+    let cameraFovByAircraftID: [String: CameraFovBoundaryBearings]
     let clues: [OperationalClueRecord]
     let artifacts: CaltopoArtifactSnapshot
     let airspaceState: OperationalAirspaceState
@@ -2662,6 +2810,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             tracks: tracks,
             aircraftDisplay: aircraftDisplay,
             altitudeDisplay: altitudeDisplay,
+            cameraFovByAircraftID: cameraFovByAircraftID,
             clues: clues,
             artifacts: artifacts,
             airspaceState: airspaceState,
@@ -2912,6 +3061,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             tracks: [RidAircraftTrack],
             aircraftDisplay: [String: AircraftMapDisplay],
             altitudeDisplay: [String: OperationalAircraftAltitudeDisplay],
+            cameraFovByAircraftID: [String: CameraFovBoundaryBearings],
             clues: [OperationalClueRecord],
             artifacts: CaltopoArtifactSnapshot,
             airspaceState: OperationalAirspaceState,
@@ -2953,6 +3103,9 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
             let now = Date()
             let region = map.region
+            // Camera FOV is intentionally excluded from this state. SEI changes
+            // several times per second and is updated on the existing annotation
+            // below so the aircraft icon and labels do not flash.
             let nextAircraftState = AircraftMapRenderState(
                 tracks: tracks.map(AircraftTrackRenderInput.init),
                 display: aircraftDisplay,
@@ -3101,6 +3254,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
                         coordinate: aircraftCoordinate,
                         title: display.title,
                         heading: travelBearingDegrees,
+                        cameraFov: cameraFovByAircraftID[track.aircraftID],
                         color: iconColor,
                         inset: inset,
                         labelSide: index.isMultiple(of: 2) ? -1 : 1,
@@ -3132,6 +3286,11 @@ private struct OperationalMKMapView: UIViewRepresentable {
                 setCenterAndPersist(coordinate, on: map)
             }
             }
+
+            updateCameraFov(
+                on: map,
+                cameraFovByAircraftID: cameraFovByAircraftID
+            )
 
             if staticChanged {
             for artifact in artifacts.points {
@@ -3189,6 +3348,19 @@ private struct OperationalMKMapView: UIViewRepresentable {
             for clue in clues {
                 map.addAnnotation(ClueAnnotation(clue: clue))
             }
+            }
+        }
+
+        private func updateCameraFov(
+            on map: MKMapView,
+            cameraFovByAircraftID: [String: CameraFovBoundaryBearings]
+        ) {
+            for annotation in map.annotations.compactMap({ $0 as? AircraftAnnotation }) {
+                let next = cameraFovByAircraftID[annotation.remoteID]
+                guard annotation.cameraFov != next else { continue }
+                annotation.cameraFov = next
+                (map.view(for: annotation) as? AircraftAnnotationView)?
+                    .updateCameraFov(next)
             }
         }
 
@@ -3623,12 +3795,24 @@ private final class AircraftAnnotationView: MKAnnotationView {
     private let nameLabel = UILabel()
     private let statusLabel = UILabel()
     private let leaderLayer = CAShapeLayer()
+    private let cameraFovHaloLayer = CAShapeLayer()
+    private let cameraFovRayLayer = CAShapeLayer()
 
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         frame = CGRect(x: 0, y: 0, width: 800, height: 360)
         centerOffset = .zero
         canShowCallout = false
+        cameraFovHaloLayer.strokeColor = UIColor.black.withAlphaComponent(0.7).cgColor
+        cameraFovHaloLayer.fillColor = UIColor.clear.cgColor
+        cameraFovHaloLayer.lineWidth = 3
+        cameraFovHaloLayer.lineCap = .round
+        layer.addSublayer(cameraFovHaloLayer)
+        cameraFovRayLayer.strokeColor = UIColor(red: 0.50, green: 0.87, blue: 0.92, alpha: 1).cgColor
+        cameraFovRayLayer.fillColor = UIColor.clear.cgColor
+        cameraFovRayLayer.lineWidth = 1.25
+        cameraFovRayLayer.lineCap = .round
+        layer.addSublayer(cameraFovRayLayer)
         leaderLayer.strokeColor = UIColor.white.cgColor
         leaderLayer.lineWidth = 2
         leaderLayer.lineCap = .round
@@ -3672,6 +3856,7 @@ private final class AircraftAnnotationView: MKAnnotationView {
             focused: aircraft.focused
         )
         iconView.transform = .identity
+        configureCameraFov(aircraft.cameraFov, iconSize: iconSize)
         nameLabel.isHidden = aircraft.inset
         statusLabel.isHidden = aircraft.inset
         leaderLayer.isHidden = aircraft.inset
@@ -3697,6 +3882,40 @@ private final class AircraftAnnotationView: MKAnnotationView {
             leaderLayer.isHidden = true
         }
         leaderLayer.path = path.cgPath
+    }
+
+    func updateCameraFov(_ cameraFov: CameraFovBoundaryBearings?) {
+        configureCameraFov(cameraFov, iconSize: iconView.bounds.width)
+    }
+
+    private func configureCameraFov(
+        _ cameraFov: CameraFovBoundaryBearings?,
+        iconSize: CGFloat
+    ) {
+        guard let cameraFov else {
+            cameraFovHaloLayer.path = nil
+            cameraFovRayLayer.path = nil
+            return
+        }
+        let scale = iconSize / 50
+        let startRadius = 14 * scale
+        let endRadius = startRadius + 36 * scale
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let path = UIBezierPath()
+        for bearing in [cameraFov.leftDegrees, cameraFov.rightDegrees] {
+            let radians = CGFloat(bearing * .pi / 180)
+            let direction = CGVector(dx: sin(radians), dy: -cos(radians))
+            path.move(to: CGPoint(
+                x: center.x + direction.dx * startRadius,
+                y: center.y + direction.dy * startRadius
+            ))
+            path.addLine(to: CGPoint(
+                x: center.x + direction.dx * endRadius,
+                y: center.y + direction.dy * endRadius
+            ))
+        }
+        cameraFovHaloLayer.path = path.cgPath
+        cameraFovRayLayer.path = path.cgPath
     }
 
     private func localRect(_ rect: MapLabelRect, anchor: MapScreenPoint) -> CGRect {
@@ -4111,6 +4330,7 @@ private final class AircraftAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
     dynamic let coordinate: CLLocationCoordinate2D
     let title: String?
     let heading: Double?
+    var cameraFov: CameraFovBoundaryBearings?
     let color: UIColor
     let inset: Bool
     let labelSide: Int
@@ -4124,6 +4344,7 @@ private final class AircraftAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
         coordinate: CLLocationCoordinate2D,
         title: String,
         heading: Double?,
+        cameraFov: CameraFovBoundaryBearings?,
         color: UIColor,
         inset: Bool,
         labelSide: Int,
@@ -4136,6 +4357,7 @@ private final class AircraftAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
         self.coordinate = coordinate
         self.title = title
         self.heading = heading
+        self.cameraFov = cameraFov
         self.color = color
         self.inset = inset
         self.labelSide = labelSide

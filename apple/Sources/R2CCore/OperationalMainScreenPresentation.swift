@@ -13,4 +13,9 @@ public enum OperationalMainScreenPresentation {
     public static func showsAircraftHeader(activeTrackCount: Int) -> Bool {
         activeTrackCount > 0
     }
+
+    public static func droneToBridgeRSSIText(_ rssiDbm: Int?) -> String? {
+        guard let rssiDbm, (-127 ... -1).contains(rssiDbm) else { return nil }
+        return "D→Bridge \(rssiDbm) dBm"
+    }
 }

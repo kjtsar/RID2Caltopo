@@ -400,9 +400,9 @@ def summarize_caltopo_camera_candidates(
     field_mappings: dict[str, dict[str, object]] = {
         "camera:azimuth": {
             "source": "tag_4_byte_3",
-            "encoding": "uint32_le_binary_angle_360_over_2_pow_32",
-            "confidence": "disputed",
-            "evidence": "tracked an early scripted sweep but failed a later four-aspect fixed-target field test",
+            "encoding": "uint32_le_binary_angle_360_over_2_pow_32_then_90_minus_raw_plus_declination",
+            "confidence": "field-validated",
+            "evidence": "tracked camera-aspect rotations; fixed-target tests established the magnetic-east axis conversion; this is not independently validated aircraft yaw",
         },
         "camera:tilt": {
             "source": "tag_4_byte_11",

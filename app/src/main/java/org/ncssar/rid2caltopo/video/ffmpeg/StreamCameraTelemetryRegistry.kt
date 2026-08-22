@@ -30,6 +30,8 @@ data class StreamCameraTelemetrySample(
     val rawCameraAzimuthDeg: Double,
     val rawTiltDeg: Double,
     val attitudeAnglesDeg: List<Double>,
+    /** Clockwise true-north camera bearing reserved for the Map Pane FOV wedge. */
+    val fovAzimuthDeg: Double? = null,
 )
 
 object StreamCameraTelemetryRegistry {
@@ -41,6 +43,7 @@ object StreamCameraTelemetryRegistry {
     private val lock = Any()
     private val samples = mutableMapOf<String, StreamCameraTelemetrySample>()
     private val courseStates = mutableMapOf<String, CourseState>()
+    private val positionValidated = mutableSetOf<String>()
 
     private data class CourseState(
         var anchorNorthMm: Int,
@@ -78,6 +81,7 @@ object StreamCameraTelemetryRegistry {
             ).declination.toDouble()
         } else null
         val absoluteAzimuth = DjiCameraOrientation.trueAzimuthDeg(rawAzimuth, declination) ?: return
+        val fovAzimuth = DjiCameraOrientation.clockwiseFovAzimuthDeg(rawAzimuth, declination) ?: return
         val northMm = telemetry.djiNorthMm
         val eastMm = telemetry.djiEastMm
         val downMm = telemetry.djiDownMm
@@ -90,6 +94,7 @@ object StreamCameraTelemetryRegistry {
                     telemetry.sourceTimestampUs?.let { current -> current + 1_000_000L < previous } ?: false
                 } ?: false
                 if (prior == null || sourceRestarted) {
+                    if (sourceRestarted) positionValidated.remove(key)
                     CourseState(northMm, eastMm, telemetry.sourceTimestampUs).also {
                         courseStates[key] = it
                     }
@@ -132,6 +137,7 @@ object StreamCameraTelemetryRegistry {
                 rawTiltDeg = rawTilt,
                 attitudeAnglesDeg = telemetry.djiAttitudeAnglesDeg.takeIf { it.size == 9 }
                     ?: List(9) { Double.NaN },
+                fovAzimuthDeg = fovAzimuth,
             )
         }
     }
@@ -181,6 +187,11 @@ object StreamCameraTelemetryRegistry {
                 kotlin.math.abs(it - targetUp) <= MAX_RID_VERTICAL_RESIDUAL_METERS
             }
         } else sample.relativeUpMeters
+        if (anchoredHorizontal != null) {
+            synchronized(lock) {
+                positionValidated.add(designator.trim().uppercase())
+            }
+        }
         return sample.copy(
             latitudeDeg = sample.latitudeDeg.takeIf { anchoredHorizontal != null },
             longitudeDeg = sample.longitudeDeg.takeIf { anchoredHorizontal != null },
@@ -190,11 +201,52 @@ object StreamCameraTelemetryRegistry {
         )
     }
 
+    /**
+     * Returns fresh DJI telemetry, allowing its independently reconstructed position to
+     * continue after RID reception stops only after the two sources have agreed once during
+     * the current stream session. Camera orientation remains available before validation.
+     */
+    @JvmStatic
+    fun freshPositionAfterRidValidation(
+        designator: String,
+        anchorLatitudeDeg: Double,
+        anchorLongitudeDeg: Double,
+        nowMs: Long = System.currentTimeMillis(),
+        maxAgeMs: Long = DEFAULT_MAX_AGE_MS,
+    ): StreamCameraTelemetrySample? {
+        val key = designator.trim().uppercase()
+        val sample = fresh(key, nowMs, maxAgeMs) ?: return null
+        if (sample.latitudeDeg == null || sample.longitudeDeg == null) return sample
+
+        synchronized(lock) {
+            if (!positionValidated.contains(key) &&
+                anchorLatitudeDeg.isFinite() && anchorLatitudeDeg in -90.0..90.0 &&
+                anchorLongitudeDeg.isFinite() && anchorLongitudeDeg in -180.0..180.0 &&
+                !(anchorLatitudeDeg == 0.0 && anchorLongitudeDeg == 0.0)
+            ) {
+                val latitudeRadians = Math.toRadians(sample.latitudeDeg)
+                val residualNorth = Math.toRadians(anchorLatitudeDeg - sample.latitudeDeg) * EARTH_RADIUS_METERS
+                val residualEast = Math.toRadians(anchorLongitudeDeg - sample.longitudeDeg) *
+                    EARTH_RADIUS_METERS * cos(latitudeRadians)
+                if (hypot(residualNorth, residualEast) <= MAX_RID_ANCHOR_RESIDUAL_METERS) {
+                    positionValidated.add(key)
+                }
+            }
+            return if (positionValidated.contains(key)) sample else sample.copy(
+                latitudeDeg = null,
+                longitudeDeg = null,
+                northMeters = null,
+                eastMeters = null,
+            )
+        }
+    }
+
     fun clear(designator: String) {
         synchronized(lock) {
             val key = designator.trim().uppercase()
             samples.remove(key)
             courseStates.remove(key)
+            positionValidated.remove(key)
         }
     }
 }

@@ -10,6 +10,13 @@ enum AppleCaltopoPublisherEvent: Sendable, Equatable {
     case failed(String)
 }
 
+struct AppleArchivedCaltopoTrack: Sendable {
+    let liveTrackID: String
+    let label: String
+    let observations: [RidObservation]
+    let folderID: String
+}
+
 actor AppleCaltopoPublisher {
     nonisolated let events: AsyncStream<AppleCaltopoPublisherEvent>
     private nonisolated let continuation: AsyncStream<AppleCaltopoPublisherEvent>.Continuation
@@ -322,7 +329,7 @@ actor AppleCaltopoPublisher {
         }
     }
 
-    func finish(remoteID: String, description: String = "") async {
+    func finish(remoteID: String, description: String = "") async -> AppleArchivedCaltopoTrack? {
         finishingRemoteIDs.insert(remoteID)
         defer { finishingRemoteIDs.remove(remoteID) }
         guard let client else {
@@ -330,7 +337,7 @@ actor AppleCaltopoPublisher {
             liveTrackIDs.removeValue(forKey: remoteID)
             labels.removeValue(forKey: remoteID)
             observations.removeValue(forKey: remoteID)
-            return
+            return nil
         }
         do {
             let liveTrackID: String?
@@ -342,7 +349,7 @@ actor AppleCaltopoPublisher {
             } else {
                 liveTrackID = nil
             }
-            guard let liveTrackID else { return }
+            guard let liveTrackID else { return nil }
             await persistInterruptedPublication(remoteID: remoteID, description: description, force: true)
             try await ensureFolders(client: client)
             guard let archiveFolderID else {
@@ -355,15 +362,50 @@ actor AppleCaltopoPublisher {
                 folderID: archiveFolderID,
                 description: description
             )
+            let archivedTrack = AppleArchivedCaltopoTrack(
+                liveTrackID: liveTrackID,
+                label: labels[remoteID] ?? remoteID,
+                observations: observations[remoteID] ?? [],
+                folderID: archiveFolderID
+            )
             liveTrackIDs.removeValue(forKey: remoteID)
             labels.removeValue(forKey: remoteID)
             observations.removeValue(forKey: remoteID)
             try await interruptedJournal.remove(liveTrackID: liveTrackID)
             continuation.yield(.trackStopped(remoteID))
+            return archivedTrack
         } catch is CancellationError {
-            return
+            return nil
         } catch {
             continuation.yield(.failed("Stop \(remoteID): \(error.localizedDescription)"))
+            return nil
+        }
+    }
+
+    func updateArchivedDescription(
+        _ archivedTrack: AppleArchivedCaltopoTrack,
+        description: String
+    ) async -> Bool {
+        guard let client else { return false }
+        do {
+            try await client.updateArchivedTrack(
+                liveTrackID: archivedTrack.liveTrackID,
+                label: archivedTrack.label,
+                observations: archivedTrack.observations,
+                folderID: archivedTrack.folderID,
+                description: description
+            )
+            AppleLog.info(
+                "CalTopo",
+                "Added deferred recording link to archived track \(archivedTrack.liveTrackID)"
+            )
+            return true
+        } catch {
+            AppleLog.warning(
+                "CalTopo",
+                "Deferred recording link update failed for \(archivedTrack.liveTrackID): \(error.localizedDescription)"
+            )
+            return false
         }
     }
 

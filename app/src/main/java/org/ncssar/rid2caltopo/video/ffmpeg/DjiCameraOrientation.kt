@@ -18,6 +18,21 @@ object DjiCameraOrientation {
     }
 
     /**
+     * Clockwise camera bearing used by the Map Pane FOV overlay. The August 21
+     * live pan test confirmed that tag-4 offset 3 increases clockwise; unlike
+     * the legacy CalTopo camera conversion, this must not reverse its motion.
+     */
+    @JvmStatic
+    fun clockwiseFovAzimuthDeg(
+        cameraAzimuthDeg: Double?,
+        magneticDeclinationDeg: Double?,
+    ): Double? {
+        val finite = cameraAzimuthDeg?.takeIf { it.isFinite() } ?: return null
+        val declination = magneticDeclinationDeg?.takeIf { it.isFinite() } ?: return null
+        return (((finite - 90.0 + declination) % 360.0) + 360.0) % 360.0
+    }
+
+    /**
      * Matrice 4TD field calibration from the controlled flight observed on 2026-08-19:
      * raw -90 = straight down (-90), and raw -14.5625 = the controller's horizontal 0.
      */

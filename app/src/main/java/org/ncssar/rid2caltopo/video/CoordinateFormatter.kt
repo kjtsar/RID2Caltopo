@@ -20,6 +20,17 @@ enum class CoordinateDisplayFormat(val storageValue: String, val label: String) 
     }
 }
 
+internal const val STREAM_COORDINATE_DISPLAY_FORMAT_KEY = "coordinate_display_format"
+
+internal fun restoredCoordinateDisplayFormat(
+    streamPreference: String?,
+    legacyConfigPreference: String?,
+): CoordinateDisplayFormat {
+    val stored = streamPreference?.trim()?.takeIf { it.isNotEmpty() }
+        ?: legacyConfigPreference
+    return CoordinateDisplayFormat.fromStorage(stored)
+}
+
 internal object CoordinateFormatter {
     fun format(lat: Double, lng: Double, format: CoordinateDisplayFormat): String {
         if (!lat.isFinite() || !lng.isFinite()) return "loc:unknown"

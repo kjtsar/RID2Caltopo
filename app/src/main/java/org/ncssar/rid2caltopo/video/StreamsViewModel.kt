@@ -20,6 +20,7 @@ import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.setValue
 import androidx.media3.exoplayer.ExoPlayer
 import org.ncssar.rid2caltopo.video.StreamRenderRouter
+import org.ncssar.rid2caltopo.video.StreamFlightActivityRegistry
 import org.ncssar.rid2caltopo.video.SerializedTaskQueue
 import org.ncssar.rid2caltopo.video.session.StreamSessionService
 import androidx.core.graphics.scale
@@ -81,6 +82,8 @@ import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
 import org.ncssar.rid2caltopo.video.MapArtifactRenderCache
 import org.ncssar.rid2caltopo.video.CoordinateFormatter
+import org.ncssar.rid2caltopo.video.STREAM_COORDINATE_DISPLAY_FORMAT_KEY
+import org.ncssar.rid2caltopo.video.restoredCoordinateDisplayFormat
 import org.ncssar.rid2caltopo.video.PlaybackIndicatorState
 import org.ncssar.rid2caltopo.video.LocalPlaybackAnnotationType
 import org.ncssar.rid2caltopo.video.LocalPlaybackAnnotationVerdict
@@ -133,6 +136,22 @@ data class PendingClue(
     val streamTelemetrySummary: String? = null,
     val aircraftPositionSourceLabel: String = "RID",
     val aglSourceLabel: String? = null,
+)
+
+internal data class CenterpointElevationSample(
+    val latitude: Double,
+    val longitude: Double,
+    val elevationFeet: Int,
+    val demResolutionMeters: Int?,
+)
+
+private data class CenterpointElevationInputKey(
+    val latitudeE5: Long,
+    val longitudeE5: Long,
+    val altitudeHalfMeters: Long,
+    val aglHalfMeters: Long,
+    val bearingFifths: Long,
+    val tiltFifths: Long,
 )
 
 data class LocalMapMarker(
@@ -970,6 +989,10 @@ class StreamsViewModel(
         appContext = application.applicationContext,
         droneStates = _droneStates,
     )
+    private val centerpointElevationCache = mutableMapOf<
+        String,
+        Pair<CenterpointElevationInputKey, CenterpointElevationSample>
+    >()
 
     /**
      * Register a UI consumer so the coordinator's update loop stays alive.
@@ -987,6 +1010,73 @@ class StreamsViewModel(
             pairedMappedId = pairedMappedId,
             displayStateByDesignator = altitudeCoordinator.displayStateByDesignator
         )
+    }
+
+    internal suspend fun centerpointElevationForStream(
+        streamDesignator: String,
+        nowMs: Long = System.currentTimeMillis(),
+    ): CenterpointElevationSample? {
+        val droneState = pairedDroneSpecStateFor(streamDesignator) ?: droneStates[streamDesignator]
+        val droneSpec = droneState?.source ?: return null
+        val camera = StreamCameraTelemetryRegistry.fresh(
+            designator = streamDesignator,
+            nowMs = nowMs,
+        ) ?: return null
+        val bearing = (camera.fovAzimuthDeg ?: camera.azimuthDeg)
+            ?.takeIf { it.isFinite() }
+            ?: return null
+        val tilt = camera.tiltDeg.takeIf { it.isFinite() && it < -0.1 } ?: return null
+        val displayState = streamTelemetryDisplayState(
+            streamDesignator = streamDesignator,
+            pairedMappedId = droneSpec.mappedId,
+            displayStateByDesignator = altitudeCoordinator.displayStateByDesignator,
+        )
+        val aglMeters = displayState?.aglFt
+            ?.takeIf { it.isFinite() && it >= 0.0 }
+            ?.div(METERS_TO_FEET)
+            ?: return null
+        val latitude = droneSpec.lastLat.takeIf { it.isFinite() && it in -90.0..90.0 } ?: return null
+        val longitude = droneSpec.lastLng.takeIf { it.isFinite() && it in -180.0..180.0 } ?: return null
+        val altitudeMeters = droneSpec.lastAlt.takeIf { it.isFinite() } ?: return null
+        val inputKey = CenterpointElevationInputKey(
+            latitudeE5 = kotlin.math.round(latitude * 100_000.0).toLong(),
+            longitudeE5 = kotlin.math.round(longitude * 100_000.0).toLong(),
+            altitudeHalfMeters = kotlin.math.round(altitudeMeters * 2.0).toLong(),
+            aglHalfMeters = kotlin.math.round(aglMeters * 2.0).toLong(),
+            bearingFifths = kotlin.math.round(bearing * 5.0).toLong(),
+            tiltFifths = kotlin.math.round(tilt * 5.0).toLong(),
+        )
+        centerpointElevationCache[streamDesignator]
+            ?.takeIf { it.first == inputKey }
+            ?.let { return it.second }
+
+        val projected = if (tilt <= -89.9) {
+            ClueProjection(latitude, longitude, altitudeMeters - aglMeters)
+        } else {
+            projectClueLocationWithDem(
+                demElevationService = altitudeCoordinator.demElevationService,
+                droneLat = latitude,
+                droneLng = longitude,
+                droneAlt = altitudeMeters,
+                headingDeg = bearing,
+                aglMeters = aglMeters,
+                gimbalAngleDeg = tilt,
+            )
+        }
+        val terrain = altitudeCoordinator.demElevationService.sampleElevationMeters(
+            projected.lat,
+            projected.lng,
+        ) ?: return null
+        val result = CenterpointElevationSample(
+            latitude = projected.lat,
+            longitude = projected.lng,
+            elevationFeet = kotlin.math.round(terrain.elevationMeters * METERS_TO_FEET).toInt(),
+            demResolutionMeters = terrain.horizontalResolutionMeters
+                ?.takeIf { it.isFinite() && it > 0.0 }
+                ?.let { kotlin.math.round(it).toInt().coerceAtLeast(1) },
+        )
+        centerpointElevationCache[streamDesignator] = inputKey to result
+        return result
     }
 
     /**
@@ -1083,7 +1173,10 @@ class StreamsViewModel(
     private val _proximityMapFocusTarget = MutableStateFlow<ProximityMapFocusTarget?>(null)
     val proximityMapFocusTarget: StateFlow<ProximityMapFocusTarget?> = _proximityMapFocusTarget.asStateFlow()
     private val _coordinateDisplayFormat = mutableStateOf<CoordinateDisplayFormat>(
-        CoordinateDisplayFormat.fromStorage(CaltopoClient.GetCoordinateDisplayFormat())
+        restoredCoordinateDisplayFormat(
+            streamPreference = streamPipPrefs.getString(STREAM_COORDINATE_DISPLAY_FORMAT_KEY, null),
+            legacyConfigPreference = CaltopoClient.GetCoordinateDisplayFormat(),
+        )
     )
     val coordinateDisplayFormat: CoordinateDisplayFormat
         get() = _coordinateDisplayFormat.value
@@ -1685,10 +1778,12 @@ class StreamsViewModel(
 
     fun bindStreamTelemetry(streamDesignator: String, remoteId: String) {
         bindStreamToRemoteId(runtimeStreamTelemetryBindings, streamDesignator, remoteId)
+        StreamFlightActivityRegistry.bindRuntime(streamDesignator, remoteId)
     }
 
     fun clearStreamTelemetry(streamDesignator: String) {
         clearStreamTelemetryBinding(runtimeStreamTelemetryBindings, streamDesignator)
+        StreamFlightActivityRegistry.clearRuntime(streamDesignator)
     }
 
     fun hasPairedTelemetry(streamDesignator: String): Boolean {
@@ -1740,6 +1835,16 @@ class StreamsViewModel(
         return _droneStates.values.firstOrNull { it.remoteId == remoteId }
     }
 
+    internal fun cameraTelemetryDesignatorsFor(remoteId: String, mappedId: String): List<String> =
+        buildList {
+            runtimeStreamTelemetryBindings
+                .filterValues { it == remoteId }
+                .keys
+                .forEach(::add)
+            configuredStreamDesignatorsByRemoteId[remoteId]?.let(::add)
+            mappedId.takeIf { it.isNotBlank() }?.let(::add)
+        }.distinct()
+
     private fun streamTelemetryStates(): List<StreamTelemetryState> =
         _droneStates.values.map { state ->
             StreamTelemetryState(remoteId = state.remoteId, mappedId = state.mappedId)
@@ -1756,6 +1861,7 @@ class StreamsViewModel(
         )
         configuredStreamBindings = maps.streamDesignatorToRemoteId
         configuredStreamDesignatorsByRemoteId = maps.remoteIdToStreamDesignator
+        StreamFlightActivityRegistry.replaceConfigured(maps.streamDesignatorToRemoteId)
     }
 
     fun renderDelayMsFor(designator: String): Long? {
@@ -1769,6 +1875,9 @@ class StreamsViewModel(
     fun setCoordinateDisplayFormat(format: CoordinateDisplayFormat) {
         if (_coordinateDisplayFormat.value == format) return
         _coordinateDisplayFormat.value = format
+        streamPipPrefs.edit()
+            .putString(STREAM_COORDINATE_DISPLAY_FORMAT_KEY, format.storageValue)
+            .apply()
         CaltopoClient.SetCoordinateDisplayFormat(format.storageValue)
     }
 

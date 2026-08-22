@@ -25,6 +25,9 @@ import java.util.Hashtable;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
@@ -65,6 +68,14 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
     private static final String TAG = "CaltopoLiveTrack";
     private static final long LIVE_TRACK_SIDE_EFFECT_SLOW_MS = 250L;
+    private static final long DEFERRED_VIDEO_LINK_RETRY_MS = 2_000L;
+    private static final long DEFERRED_VIDEO_LINK_WINDOW_MS = 30_000L;
+    private static final ScheduledExecutorService DeferredVideoLinkExecutor =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "CaltopoDeferredVideoLink");
+                thread.setDaemon(true);
+                return thread;
+            });
     private static final Util.SimpleMovingAverage CaltopoRttInMsec = new Util.SimpleMovingAverage(10);
     private static final Hashtable<String, CaltopoLiveTrack> LiveTrackByRemoteId = new Hashtable<>(16);
     private static final CopyOnWriteArrayList<LocalTrackListener> LocalTrackListeners = new CopyOnWriteArrayList<>();
@@ -237,13 +248,12 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 droneSpec.getRemoteId(),
                 droneSpec.trackLabel().split("_", 2)[0]
         };
-        ManagedVideoSessionRecording recording =
-                ManagedVideoSessionRecordingCatalog.findForTrack(
-                        R2CApplication.getAppCtxt(),
-                        trackObservedStartedAtMs,
-                        trackObservedEndedAtMs,
-                        candidates
-                );
+        ManagedVideoSessionRecording recording = ManagedVideoSessionRecordingCatalog.findForTrack(
+                R2CApplication.getAppCtxt(),
+                trackObservedStartedAtMs,
+                trackObservedEndedAtMs,
+                candidates
+        );
         String sessionId = recording != null
                 ? recording.getSessionId()
                 : ManagedVideoStreamPresence.matchingLiveSessionId(candidates);
@@ -252,6 +262,111 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 CaltopoClient.GetTrackerCoordinationUrlPfx(),
                 R2CActivity.MyDeviceName,
                 sessionId
+        );
+    }
+
+    private static void scheduleDeferredVideoDescriptionUpdate(
+            @NonNull JSONObject archivedFeature,
+            long trackStartedAtMs,
+            long trackEndedAtMs,
+            @NonNull String[] candidates,
+            @NonNull CalTopoSessionGateway sessionGateway
+    ) {
+        long deadlineMs = System.currentTimeMillis() + DEFERRED_VIDEO_LINK_WINDOW_MS;
+        JSONObject featureCopy;
+        try {
+            featureCopy = new JSONObject(archivedFeature.toString());
+        } catch (JSONException error) {
+            CTError(TAG, "Unable to copy archived feature for deferred video link.", error);
+            return;
+        }
+        DeferredVideoLinkExecutor.execute(() -> attemptDeferredVideoDescriptionUpdate(
+                featureCopy,
+                trackStartedAtMs,
+                trackEndedAtMs,
+                candidates,
+                deadlineMs,
+                sessionGateway
+        ));
+    }
+
+    private static void attemptDeferredVideoDescriptionUpdate(
+            @NonNull JSONObject archivedFeature,
+            long trackStartedAtMs,
+            long trackEndedAtMs,
+            @NonNull String[] candidates,
+            long deadlineMs,
+            @NonNull CalTopoSessionGateway sessionGateway
+    ) {
+        if (R2CApplication.getAppCtxt() == null) return;
+        ManagedVideoSessionRecording recording = ManagedVideoSessionRecordingCatalog.findForTrack(
+                R2CApplication.getAppCtxt(),
+                trackStartedAtMs,
+                trackEndedAtMs,
+                candidates
+        );
+        if (recording == null) {
+            retryDeferredVideoDescriptionUpdate(
+                    archivedFeature, trackStartedAtMs, trackEndedAtMs, candidates, deadlineMs,
+                    sessionGateway);
+            return;
+        }
+        String videoUrl = TrackerTabletLink.recordingShortUrl(
+                CaltopoClient.GetTrackerCoordinationUrlPfx(),
+                R2CActivity.MyDeviceName,
+                recording.getSessionId()
+        );
+        if (videoUrl == null || videoUrl.trim().isEmpty()) return;
+        String trackId = archivedFeature.optString("id", "");
+        if (trackId.isEmpty()) return;
+        try {
+            JSONObject properties = archivedFeature.optJSONObject("properties");
+            if (properties == null) {
+                properties = new JSONObject();
+                archivedFeature.put("properties", properties);
+            }
+            properties.put("description", videoUrl.trim());
+            properties.put("updated", String.valueOf(System.currentTimeMillis()));
+            properties.put("-updated-on", String.valueOf(System.currentTimeMillis()));
+        } catch (JSONException error) {
+            CTError(TAG, "Unable to add deferred video link to archived feature.", error);
+            return;
+        }
+        sessionGateway.editObjectWithId(
+                "Shape",
+                trackId,
+                archivedFeature,
+                operation -> {
+                    if (operation.success()) {
+                        CTDebug(TAG, "Added deferred recording link to archived track " + trackId);
+                        CaltopoMap.RequestMapRefreshNow();
+                    } else {
+                        retryDeferredVideoDescriptionUpdate(
+                                archivedFeature, trackStartedAtMs, trackEndedAtMs, candidates, deadlineMs,
+                                sessionGateway);
+                    }
+                }
+        );
+    }
+
+    private static void retryDeferredVideoDescriptionUpdate(
+            @NonNull JSONObject archivedFeature,
+            long trackStartedAtMs,
+            long trackEndedAtMs,
+            @NonNull String[] candidates,
+            long deadlineMs,
+            @NonNull CalTopoSessionGateway sessionGateway
+    ) {
+        if (System.currentTimeMillis() + DEFERRED_VIDEO_LINK_RETRY_MS > deadlineMs) {
+            CTWarn(TAG, "Recording did not become available before the deferred CalTopo link deadline.");
+            return;
+        }
+        DeferredVideoLinkExecutor.schedule(
+                () -> attemptDeferredVideoDescriptionUpdate(
+                        archivedFeature, trackStartedAtMs, trackEndedAtMs, candidates, deadlineMs,
+                        sessionGateway),
+                DEFERRED_VIDEO_LINK_RETRY_MS,
+                TimeUnit.MILLISECONDS
         );
     }
 
@@ -443,6 +558,13 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         String archiveFolderId = CaltopoMap.GetArchiveFolderId();
         String capturedVideoUrl = capturedVideoUrl(droneSpec);
         String archiveDescription = buildArchiveDescription(droneSpec, capturedVideoUrl);
+        long archivedTrackStartedAtMs = trackObservedStartedAtMs;
+        long archivedTrackEndedAtMs = trackObservedEndedAtMs;
+        String[] archivedTrackCandidates = new String[] {
+                droneSpec.getMappedId(),
+                droneSpec.getRemoteId(),
+                droneSpec.trackLabel().split("_", 2)[0]
+        };
         CTDebug(TAG, String.format(Locale.US, "archiveTrackOnCaltopo(%s): Archiving track with %d points.",
                 trackLabel, size));
         persistInterruptedPublication(archiveDescription, true);
@@ -472,7 +594,17 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                     System.currentTimeMillis(),
                     maxWaitInMilliseconds,
                     success -> {
-                        if (success) CaltopoInterruptedTrackJournal.remove(archivedLiveTrackId);
+                        if (!success) return;
+                        CaltopoInterruptedTrackJournal.remove(archivedLiveTrackId);
+                        if (archiveDescription.isEmpty()) {
+                            scheduleDeferredVideoDescriptionUpdate(
+                                    feature,
+                                    archivedTrackStartedAtMs,
+                                    archivedTrackEndedAtMs,
+                                    archivedTrackCandidates,
+                                    runtime.getCalTopoSessionGateway()
+                            );
+                        }
                     });
         } else {
             // for some reason, we weren't able to start the live track, so this will likely block as well

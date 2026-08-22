@@ -260,6 +260,25 @@ public actor CaltopoLiveClient {
         try await stopLiveTrack(liveTrackID: liveTrackID, now: now)
     }
 
+    public func updateArchivedTrack(
+        liveTrackID: String,
+        label: String,
+        observations: [RidObservation],
+        folderID: String,
+        description: String,
+        now: Date = Date()
+    ) async throws {
+        guard !observations.isEmpty else { return }
+        _ = try await perform(makeArchiveLiveTrackRequest(
+            liveTrackID: liveTrackID,
+            label: label,
+            observations: observations,
+            folderID: folderID,
+            description: description,
+            now: now
+        ))
+    }
+
     public func publishPhotoClue(_ clue: CaltopoPhotoClue, now: Date = Date()) async throws -> String {
         let requests = try makePhotoClueRequests(clue, now: now)
         for request in requests { _ = try await perform(request) }

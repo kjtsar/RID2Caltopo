@@ -8,8 +8,6 @@ public struct RidTrackPolicy: Sendable, Equatable {
     public var minimumDistanceMeters: Double
     public var duplicateKeepaliveInterval: TimeInterval
     public var activeTimeout: TimeInterval
-    public var remoteLossGraceDistanceMeters: Double
-    public var remoteLossGraceMultiplier: Double
     public var maximumPointsPerTrack: Int
 
     public init(
@@ -17,16 +15,12 @@ public struct RidTrackPolicy: Sendable, Equatable {
         minimumDistanceMeters: Double = 0.6096,
         duplicateKeepaliveInterval: TimeInterval = 3,
         activeTimeout: TimeInterval = 30,
-        remoteLossGraceDistanceMeters: Double = 15.24,
-        remoteLossGraceMultiplier: Double = 5,
         maximumPointsPerTrack: Int = 5_000
     ) {
         self.maximumSpeedMetersPerSecond = maximumSpeedMetersPerSecond
         self.minimumDistanceMeters = minimumDistanceMeters
         self.duplicateKeepaliveInterval = duplicateKeepaliveInterval
         self.activeTimeout = activeTimeout
-        self.remoteLossGraceDistanceMeters = remoteLossGraceDistanceMeters
-        self.remoteLossGraceMultiplier = remoteLossGraceMultiplier
         self.maximumPointsPerTrack = maximumPointsPerTrack
     }
 }
@@ -224,13 +218,21 @@ public actor RidTrackStore {
         return true
     }
 
-    public func activeSnapshot(at date: Date = Date()) -> [RidAircraftTrack] {
-        snapshot().filter { $0.isActive(at: date, timeout: effectiveTimeout(for: $0)) }
+    public func activeSnapshot(
+        at date: Date = Date(),
+        pairedVideoLastActivityAt: [String: Date] = [:]
+    ) -> [RidAircraftTrack] {
+        snapshot().filter {
+            isActive($0, at: date, pairedVideoLastActivityAt: pairedVideoLastActivityAt)
+        }
     }
 
-    public func removeInactive(at date: Date = Date()) -> [RidAircraftTrack] {
+    public func removeInactive(
+        at date: Date = Date(),
+        pairedVideoLastActivityAt: [String: Date] = [:]
+    ) -> [RidAircraftTrack] {
         let removed = tracksByAircraftID.values.filter {
-            !$0.isActive(at: date, timeout: effectiveTimeout(for: $0))
+            !isActive($0, at: date, pairedVideoLastActivityAt: pairedVideoLastActivityAt)
         }
         for track in removed {
             tracksByAircraftID.removeValue(forKey: track.aircraftID)
@@ -246,20 +248,16 @@ public actor RidTrackStore {
         value.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
     }
 
-    private func effectiveTimeout(for track: RidAircraftTrack) -> TimeInterval {
-        guard policy.remoteLossGraceMultiplier > 1,
-              let first = track.points.first,
-              let last = track.points.last
-        else { return policy.activeTimeout }
-        let displacement = Self.distanceMeters(
-            fromLatitude: first.latitude,
-            longitude: first.longitude,
-            toLatitude: last.latitude,
-            longitude: last.longitude
+    private func isActive(
+        _ track: RidAircraftTrack,
+        at date: Date,
+        pairedVideoLastActivityAt: [String: Date]
+    ) -> Bool {
+        let lastPresence = max(
+            track.lastAircraftMessageAt,
+            pairedVideoLastActivityAt[track.aircraftID] ?? .distantPast
         )
-        return displacement > policy.remoteLossGraceDistanceMeters
-            ? policy.activeTimeout * policy.remoteLossGraceMultiplier
-            : policy.activeTimeout
+        return date.timeIntervalSince(lastPresence) <= policy.activeTimeout
     }
 
     private static func distanceMeters(

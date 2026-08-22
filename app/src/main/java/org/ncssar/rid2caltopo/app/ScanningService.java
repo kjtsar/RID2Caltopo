@@ -33,6 +33,7 @@ import androidx.core.content.ContextCompat;
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.data.CaltopoClient;
 import org.ncssar.rid2caltopo.data.SimpleTimer;
+import org.ncssar.rid2caltopo.data.WifiRidScanPrefs;
 import org.opendroneid.android.bluetooth.BluetoothScanner;
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager;
 import org.opendroneid.android.bluetooth.WiFiScanner;
@@ -48,6 +49,8 @@ import java.util.Locale;
 public class ScanningService extends Service {
     private static final String TAG = "ScanningService";
     private static final String ACTION_STOP_SERVICE = "STOP_SERVICE";
+    private static final String ACTION_REFRESH_WIFI_RID_SCANNING = "REFRESH_WIFI_RID_SCANNING";
+    private static final String ACTION_REFRESH_BLUETOOTH_RID_TEST = "REFRESH_BLUETOOTH_RID_TEST";
     private static final String CHANNEL_ID = "OpenDroneIdScanner";
     private static final String CHANNEL_NAME = "OpenDroneId Scanner Service";
     private static final int NOTIFICATION_ID = 1;
@@ -76,9 +79,28 @@ public class ScanningService extends Service {
         scanning = true;
         if (null == AppContext) AppContext = R2CApplication.getAppCtxt();
         CTDebug(TAG, String.format(Locale.US, "startScanning(): ScanningService 0x%x", this.hashCode()));
-        wiFiScanner = new WiFiScanner(AppContext, DataManager);
-        wiFiScanner.startScan();
+        btScanner = new BluetoothScanner(AppContext, DataManager);
+        btScanner.startScan();
+        applyWifiRidScanningPreference();
+    }
 
+    private void applyWifiRidScanningPreference() {
+        boolean enabled = WifiRidScanPrefs.isEnabled(AppContext);
+        if (enabled && wiFiScanner == null) {
+            CTDebug(TAG, "Wi-Fi RID scanning enabled; starting Beacon and NAN discovery.");
+            wiFiScanner = new WiFiScanner(AppContext, DataManager);
+            wiFiScanner.startScan();
+        } else if (!enabled && wiFiScanner != null) {
+            CTDebug(TAG, "Wi-Fi RID scanning disabled; stopping Beacon and NAN discovery.");
+            wiFiScanner.stopScan();
+            wiFiScanner = null;
+        } else {
+            CTDebug(TAG, "Wi-Fi RID scanning remains " + (enabled ? "enabled." : "disabled."));
+        }
+    }
+
+    private void applyBluetoothRidTestPreference() {
+        if (btScanner != null) btScanner.stopScan();
         btScanner = new BluetoothScanner(AppContext, DataManager);
         btScanner.startScan();
     }
@@ -89,8 +111,14 @@ public class ScanningService extends Service {
             return;
         }
         CTDebug(TAG, String.format(Locale.US, "stopScanning(): ScanningService 0x%x", this.hashCode()));
-        wiFiScanner.stopScan();
-        btScanner.stopScan();
+        if (wiFiScanner != null) {
+            wiFiScanner.stopScan();
+            wiFiScanner = null;
+        }
+        if (btScanner != null) {
+            btScanner.stopScan();
+            btScanner = null;
+        }
         scanning = false;
     }
 
@@ -176,6 +204,16 @@ public class ScanningService extends Service {
             return START_NOT_STICKY;
         }
 
+        if (intent != null && ACTION_REFRESH_WIFI_RID_SCANNING.equals(intent.getAction())) {
+            if (scanning) applyWifiRidScanningPreference();
+            return START_STICKY;
+        }
+
+        if (intent != null && ACTION_REFRESH_BLUETOOTH_RID_TEST.equals(intent.getAction())) {
+            if (scanning) applyBluetoothRidTestPreference();
+            return START_STICKY;
+        }
+
         if (null == AppContext) {
             AppContext = R2CApplication.getAppCtxt();
             if (null == AppContext) {
@@ -218,6 +256,22 @@ public class ScanningService extends Service {
         }
         Intent stopIntent = new Intent(context, ScanningService.class);
         context.getApplicationContext().stopService(stopIntent);
+    }
+
+    public static void requestWifiRidScanningRefresh(@NonNull Context context) {
+        if (!IsRunning()) return;
+        Context appContext = context.getApplicationContext();
+        Intent refreshIntent = new Intent(appContext, ScanningService.class);
+        refreshIntent.setAction(ACTION_REFRESH_WIFI_RID_SCANNING);
+        appContext.startService(refreshIntent);
+    }
+
+    public static void requestBluetoothRidTestRefresh(@NonNull Context context) {
+        if (!IsRunning()) return;
+        Context appContext = context.getApplicationContext();
+        Intent refreshIntent = new Intent(appContext, ScanningService.class);
+        refreshIntent.setAction(ACTION_REFRESH_BLUETOOTH_RID_TEST);
+        appContext.startService(refreshIntent);
     }
     @Override
     public void onTrimMemory(int level) {

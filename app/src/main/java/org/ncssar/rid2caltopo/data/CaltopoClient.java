@@ -66,6 +66,8 @@ import org.ncssar.rid2caltopo.app.ScanningService;
 import org.ncssar.rid2caltopo.notam.NotamCenter;
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter;
 import org.ncssar.rid2caltopo.ui.ProximityAlertCenter;
+import org.ncssar.rid2caltopo.video.PairedVideoFlightActivity;
+import org.ncssar.rid2caltopo.video.StreamFlightActivityRegistry;
 import com.google.firebase.analytics.FirebaseAnalytics;
 
 import okhttp3.MediaType;
@@ -3116,14 +3118,29 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (changedFlag || currentTimeInMsec >= PreviousEarliestAgeOutInMsec) {
             DsArray.clear();
             for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+                // terminateTrack() resets the CtDroneSpec and synchronously requests another
+                // list rebuild. Never evaluate or retain that inactive shell: its cleared 0,0
+                // position otherwise appears to be millions of feet from the tablet and the
+                // distant-aircraft RID-loss exception can resurrect it as an empty row.
+                if (!ds.isActive()) continue;
                 long trackDelayInMsec = TrackDelayInMsecForDroneSpec(ds, newTrackDelayInMsec);
-                long droneSpecIdleInMsec = ds.trackTelemetryIdleTimeInMsec(currentTimeInMsec);
-                if (ds.isActive() && HasTrackAgedOut(droneSpecIdleInMsec, trackDelayInMsec)) {
+                long telemetryIdleInMsec = ds.trackTelemetryIdleTimeInMsec(currentTimeInMsec);
+                PairedVideoFlightActivity videoActivity =
+                        StreamFlightActivityRegistry.activityForRemoteId(ds.getRemoteId(), currentTimeInMsec);
+                long combinedIdleInMsec = CombinedFlightIdleTimeInMsec(
+                        telemetryIdleInMsec,
+                        currentTimeInMsec,
+                        videoActivity);
+                boolean trackAgedOut = HasTrackAgedOut(combinedIdleInMsec, trackDelayInMsec);
+                if (trackAgedOut) {
                     CaltopoClient client = (ClientMap != null) ? ClientMap.get(ds.getRemoteId()) : null;
                     String msg = String.format(Locale.US,
-                            "ProcessSortedCurrentDroneSpecArray(%s): %s idle for %.3f/%.3f seconds%s. Finishing track...",
+                            "ProcessSortedCurrentDroneSpecArray(%s): %s RID/peer idle %.3f seconds, combined RID/video idle %.3f/%.3f seconds, pairedVideoActive=%s. Finishing track...",
                             changedFlag, ds.trackLabel(),
-                            (double) droneSpecIdleInMsec / 1000.0, (double) trackDelayInMsec / 1000.0,
+                            (double) telemetryIdleInMsec / 1000.0,
+                            (double) combinedIdleInMsec / 1000.0,
+                            (double) trackDelayInMsec / 1000.0,
+                            videoActivity.getPublisherActive(),
                             TrackDelayReasonSuffix(ds));
                     CTInfo(TAG, msg);
                     if (client != null) {
@@ -3134,12 +3151,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     changedFlag = true;
                     continue;
                 }
-                long currentAgeOutInMsec = trackDelayInMsec - droneSpecIdleInMsec;
-                if (currentAgeOutInMsec <= 0) continue;
+                long currentAgeOutInMsec = trackAgedOut
+                        ? 1_000L
+                        : trackDelayInMsec - combinedIdleInMsec;
                 if (currentAgeOutInMsec < nextAgeOutInMsec) nextAgeOutInMsec = currentAgeOutInMsec;
                 if (CTDebugEnabled(TAG)) CTDebug(TAG, String.format(Locale.US,
-                        "ProcessSortedCurrentDroneSpecArray(%s): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds%s",
-                        changedFlag, ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0,
+                        "ProcessSortedCurrentDroneSpecArray(%s): RID/peer idle for %s is %.3f, combined RID/video idle %.3f, age check in %.3f seconds, next age check in %.3f seconds, pairedVideoActive=%s%s",
+                        changedFlag, ds.getMappedId(), telemetryIdleInMsec / 1000.0, combinedIdleInMsec / 1000.0,
+                        currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0,
+                        videoActivity.getPublisherActive(),
                         TrackDelayReasonSuffix(ds)));
                 DsArray.add(ds);
             }
@@ -3182,15 +3202,34 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return HasTrackAgedOut(telemetryIdleInMsec, trackDelayInMsec);
     }
 
+    static long CombinedFlightIdleTimeInMsecForTests(long telemetryIdleInMsec,
+                                                      long currentTimeInMsec,
+                                                      boolean publisherActive,
+                                                      long lastVideoActivityAtMsec) {
+        return CombinedFlightIdleTimeInMsec(
+                telemetryIdleInMsec,
+                currentTimeInMsec,
+                new PairedVideoFlightActivity(publisherActive, lastVideoActivityAtMsec));
+    }
+
     private static boolean HasTrackAgedOut(long telemetryIdleInMsec, long trackDelayInMsec) {
         return telemetryIdleInMsec >= trackDelayInMsec;
     }
 
+    private static long CombinedFlightIdleTimeInMsec(long telemetryIdleInMsec,
+                                                      long currentTimeInMsec,
+                                                      @NonNull PairedVideoFlightActivity videoActivity) {
+        if (videoActivity.getPublisherActive()) return 0L;
+        long lastVideoActivityAtMsec = videoActivity.getLastActivityAtMs();
+        if (lastVideoActivityAtMsec <= 0L) return telemetryIdleInMsec;
+        long videoIdleInMsec = Math.max(0L, currentTimeInMsec - lastVideoActivityAtMsec);
+        return Math.min(telemetryIdleInMsec, videoIdleInMsec);
+    }
+
     private static long TrackDelayInMsecForDroneSpec(@NonNull CtDroneSpec ds, long newTrackDelayInMsec) {
-        // Track retirement has one authoritative ceiling: the configured maximum idle
-        // interval. Local RID packets and peer-relayed telemetry both refresh the clock in
-        // CtDroneSpec.trackTelemetryIdleTimeInMsec(). Alert state and aircraft position must
-        // never extend this deadline, otherwise an OOR flight can remain only in memory.
+        // A paired live video publisher is a second presence source. Retirement occurs only
+        // after RID/peer telemetry and paired publisher activity have both been absent for this
+        // configured interval.
         return newTrackDelayInMsec;
     }
 

@@ -106,6 +106,43 @@ public enum OperationalMapVideoLayout: String, CaseIterable, Codable, Sendable, 
     }
 }
 
+public enum OperationalSplitSizing {
+    public static let minimumFraction = 0.0
+    public static let maximumFraction = 1.0
+    public static let edgeSnapHandleWidths = 2.0
+
+    public static func adjustedFraction(
+        current: Double,
+        dragDelta: Double,
+        available: Double
+    ) -> Double {
+        let clampedCurrent = min(maximumFraction, max(minimumFraction, current))
+        guard available > 0 else { return clampedCurrent }
+        return min(
+            maximumFraction,
+            max(minimumFraction, clampedCurrent + dragDelta / available)
+        )
+    }
+
+    public static func snappedFraction(
+        _ fraction: Double,
+        available: Double,
+        handleWidth: Double
+    ) -> Double {
+        let clamped = min(maximumFraction, max(minimumFraction, fraction))
+        guard available > 0, handleWidth > 0 else { return clamped }
+        let position = clamped * available
+        let snapDistance = edgeSnapHandleWidths * handleWidth
+        if position <= snapDistance, position <= available / 2 {
+            return minimumFraction
+        }
+        if available - position <= snapDistance, position >= available / 2 {
+            return maximumFraction
+        }
+        return clamped
+    }
+}
+
 public struct OperationalPipInsetSize: Sendable, Equatable {
     public let width: Double
     public let height: Double

@@ -107,6 +107,14 @@ public class OpenDroneIdDataManager {
         return droppedRidIngestPackets.get();
     }
 
+    public long getSlowRidIngestPacketCount() {
+        return slowRidIngestPacketsLogged.get();
+    }
+
+    public long getFailedRidIngestPacketCount() {
+        return failedRidIngestPacketsLogged.get();
+    }
+
     static long ridTimestampTenthsToUtcMsec(double locationTimestampTenths, long nowWallMsec) {
         long rawTenths = Math.round(locationTimestampTenths);
         if (rawTenths == 0xFFFFL) {

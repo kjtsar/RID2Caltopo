@@ -9,6 +9,25 @@ import org.ncssar.rid2caltopo.data.PilotDisplayPreference
 
 class MapPanePilotDisplayTest {
     @Test
+    fun cameraFovBoundaryBearings_centerOnCameraAzimuthAndWrapNorth() {
+        val east = cameraFovBoundaryBearings(90.0, 40.0)
+        assertEquals(70.0, east!!.leftBearingDeg, 0.001)
+        assertEquals(110.0, east.rightBearingDeg, 0.001)
+
+        val north = cameraFovBoundaryBearings(5.0, 30.0)
+        assertEquals(350.0, north!!.leftBearingDeg, 0.001)
+        assertEquals(20.0, north.rightBearingDeg, 0.001)
+    }
+
+    @Test
+    fun cameraFovBoundaryBearings_rejectMissingOrInvalidTelemetry() {
+        assertNull(cameraFovBoundaryBearings(null, 37.7))
+        assertNull(cameraFovBoundaryBearings(90.0, null))
+        assertNull(cameraFovBoundaryBearings(90.0, 0.0))
+        assertNull(cameraFovBoundaryBearings(90.0, 181.0))
+    }
+
+    @Test
     fun markerInfoWindowTapAction_togglesVisibleInfoWindowClosed() {
         assertEquals(MarkerInfoWindowTapAction.Show, markerInfoWindowTapAction(isInfoWindowShown = false))
         assertEquals(MarkerInfoWindowTapAction.Close, markerInfoWindowTapAction(isInfoWindowShown = true))

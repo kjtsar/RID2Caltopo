@@ -14,11 +14,15 @@ struct RIDAircraftSummaryRow: View {
                 Text(identity?.mappedID ?? track.aircraftID)
                     .font(.headline.monospaced())
                 Spacer()
-                RIDSignalStrengthBars(rssi: track.lastDirectSignalStrengthDbm)
-                    .frame(width: 38, height: 18)
-                Text(rssiText)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                if let bridgeRSSI = OperationalMainScreenPresentation.droneToBridgeRSSIText(
+                    track.lastDroneToBridgeSignalStrengthDbm
+                ) {
+                    RIDSignalStrengthBars(rssi: track.lastDroneToBridgeSignalStrengthDbm)
+                        .frame(width: 38, height: 18)
+                    Text(bridgeRSSI)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
             HStack(spacing: 8) {
                 if identity != nil {
@@ -60,15 +64,6 @@ struct RIDAircraftSummaryRow: View {
         case .wifiBeacon, .wifiNan: "wifi"
         case .trackerRelay: "arrow.triangle.2.circlepath"
         }
-    }
-
-    private var rssiText: String {
-        "D→Device \(rssiValue(track.lastDirectSignalStrengthDbm)) • "
-            + "D→Bridge \(rssiValue(track.lastDroneToBridgeSignalStrengthDbm)) dBm"
-    }
-
-    private func rssiValue(_ rssi: Int?) -> String {
-        rssi.map(String.init) ?? "—"
     }
 
     private var relativePosition: RidRelativePosition? {
@@ -228,8 +223,7 @@ final class AppleDroneConfirmationStore: ObservableObject {
     @Published private var sessionIdentities: [String: RidAircraftIdentity] = [:]
     @Published private var peerIdentities: [String: RidAircraftIdentity] = [:]
     @Published private var importedIdentities: [String: RidAircraftIdentity] = [:]
-    private var activeRemoteIDs: Set<String> = []
-    private var promptedRemoteIDs: Set<String> = []
+    private var confirmationLifecycle = CurrentFlightConfirmationLifecycle()
     private var ignoredRemoteIDs: Set<String> = []
     private let defaults = UserDefaults.standard
     private static let ignoredRemoteIDsDefaultsKey = "org.ignoredRemoteIDs"
@@ -253,8 +247,8 @@ final class AppleDroneConfirmationStore: ObservableObject {
                 return (remoteID, identity)
             })
         }
-        // Save and Ignore are scoped to this app session. They intentionally survive a
-        // temporary RID track timeout, but are not persisted across app launches.
+        // Save and Ignore are scoped to the current flight. Paired video activity keeps the
+        // flight alive through a temporary RID gap; decisions are not persisted across launches.
         defaults.removeObject(forKey: Self.ignoredRemoteIDsDefaultsKey)
     }
 
@@ -266,24 +260,26 @@ final class AppleDroneConfirmationStore: ObservableObject {
         sessionIdentities[remoteID] != nil || peerIdentities[remoteID] != nil
     }
 
-    /// Prompt once per aircraft until the operator Saves or Ignores it. A temporary RID
-    /// outage may remove an active track while matching video/SEI remains live, so an
-    /// inactive transition must not erase either operator decision.
+    /// Prompt once per current flight. RID-only gaps do not reach this method as an ended
+    /// flight until the shared 30-second RID/video activity timeout removes the track.
     func reconcileActiveFlights(_ orderedRemoteIDs: [String]) -> String? {
-        let currentRemoteIDs = Set(orderedRemoteIDs.filter { !$0.isEmpty })
-        let endedRemoteIDs = activeRemoteIDs.subtracting(currentRemoteIDs)
-        for remoteID in endedRemoteIDs {
-            promptedRemoteIDs.remove(remoteID)
+        let reconciliation = confirmationLifecycle.reconcile(
+            orderedRemoteIDs: orderedRemoteIDs,
+            confirmedRemoteIDs: Set(sessionIdentities.keys).union(peerIdentities.keys),
+            ignoredRemoteIDs: ignoredRemoteIDs
+        )
+        for remoteID in reconciliation.endedRemoteIDs {
+            sessionIdentities.removeValue(forKey: remoteID)
+            peerIdentities.removeValue(forKey: remoteID)
+            ignoredRemoteIDs.remove(remoteID)
         }
-        activeRemoteIDs = currentRemoteIDs
-
-        guard let candidate = orderedRemoteIDs.first(where: { remoteID in
-            !remoteID.isEmpty
-                && !promptedRemoteIDs.contains(remoteID)
-                && !ignoredRemoteIDs.contains(remoteID)
-                && !isCurrentFlightConfirmed(remoteID)
-        }) else { return nil }
-        promptedRemoteIDs.insert(candidate)
+        if !reconciliation.endedRemoteIDs.isEmpty {
+            AppleLog.info(
+                "DroneConfirmation",
+                "Cleared current-flight decisions remoteIds=\(reconciliation.endedRemoteIDs.sorted().joined(separator: ","))"
+            )
+        }
+        guard let candidate = reconciliation.candidateRemoteID else { return nil }
         AppleLog.info("DroneConfirmation", "Queueing confirmation for active flight remoteId=\(candidate)")
         return candidate
     }
@@ -299,7 +295,7 @@ final class AppleDroneConfirmationStore: ObservableObject {
         peerIdentities.removeValue(forKey: remoteID)
         AppleLog.info(
             "DroneConfirmation",
-            "Ignored remoteId=\(remoteID) sessionRetained=true caltopoSuppressed=true"
+            "Ignored remoteId=\(remoteID) currentFlightRetained=true caltopoSuppressed=true"
         )
     }
 
@@ -392,8 +388,7 @@ final class AppleDroneConfirmationStore: ObservableObject {
         importedIdentities.removeAll()
         sessionIdentities.removeAll()
         peerIdentities.removeAll()
-        activeRemoteIDs.removeAll()
-        promptedRemoteIDs.removeAll()
+        confirmationLifecycle.reset()
         ignoredRemoteIDs.removeAll()
         defaults.removeObject(forKey: "org.ridMappings")
         defaults.removeObject(forKey: Self.ignoredRemoteIDsDefaultsKey)

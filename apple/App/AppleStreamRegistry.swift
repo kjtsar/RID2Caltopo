@@ -58,6 +58,7 @@ final class AppleStreamRegistry: ObservableObject {
 
     private var presenceSubscriptions: [ObjectIdentifier: AnyCancellable] = [:]
     private var presenceEligibility: [ObjectIdentifier: Bool] = [:]
+    private var flightActivity = PairedVideoFlightActivityStore()
 
     let primaryModel: AppleVideoFrameSource
 
@@ -82,11 +83,15 @@ final class AppleStreamRegistry: ObservableObject {
     private static let placeholderID = LiveStreamSelectionPolicy.placeholderID
 
     func handle(_ event: MediaServerEvent) {
+        let observedAt = Date()
         switch event {
         case let .streamConnecting(path):
             admit(path: path, state: .connecting, publisherID: nil)?.model.handleMediaServerEvent(event)
         case let .streamStarted(path, publisherID), let .streamPublisherHandoff(path, publisherID):
             let session = admit(path: path, state: .live, publisherID: publisherID)
+            if let session {
+                flightActivity.publisherStarted(streamID: session.id, at: observedAt)
+            }
             session?.errorDetail = nil
             startDecoderIfNeeded(for: session)
             session?.model.handleMediaServerEvent(event)
@@ -98,7 +103,9 @@ final class AppleStreamRegistry: ObservableObject {
             session.model.handleMediaServerEvent(event)
             startDecoderIfNeeded(for: session)
         case let .streamStopped(path, publisherID), let .rtmpSessionClosed(path, publisherID, _):
-            stop(path: path, publisherID: publisherID)
+            if let stoppedSession = stop(path: path, publisherID: publisherID) {
+                flightActivity.publisherStopped(streamID: stoppedSession.id, at: observedAt)
+            }
         case let .streamError(path, publisherID, detail):
             guard let path else { return }
             if let session = matching(path) {
@@ -106,6 +113,7 @@ final class AppleStreamRegistry: ObservableObject {
                 session.state = .error
                 session.errorDetail = detail
                 session.changedAt = Date()
+                flightActivity.publisherStopped(streamID: session.id, at: observedAt)
                 session.model.handleMediaServerEvent(event)
             }
         default: break
@@ -116,6 +124,40 @@ final class AppleStreamRegistry: ObservableObject {
     func focus(_ id: String) {
         guard sessions.contains(where: { $0.id == id }) else { return }
         focusedID = id
+    }
+
+    func pair(streamID: String, aircraftID: String) {
+        flightActivity.pair(streamID: streamID, aircraftID: aircraftID)
+        objectWillChange.send()
+        AppleLog.info("Streams", "Paired stream \(streamID) to Remote ID \(aircraftID)")
+    }
+
+    @discardableResult
+    func pairIfUnbound(streamID: String, aircraftID: String) -> Bool {
+        let paired = flightActivity.pairIfUnbound(streamID: streamID, aircraftID: aircraftID)
+        if paired {
+            objectWillChange.send()
+            AppleLog.info("Streams", "Automatically paired stream \(streamID) to Remote ID \(aircraftID)")
+        }
+        return paired
+    }
+
+    func unpair(streamID: String) {
+        flightActivity.unpair(streamID: streamID)
+        objectWillChange.send()
+        AppleLog.info("Streams", "Unpaired stream \(streamID) for the current app session")
+    }
+
+    func boundAircraftID(for streamID: String) -> String? {
+        flightActivity.boundAircraftID(for: streamID)
+    }
+
+    var activePublisherStreamIDs: Set<String> {
+        flightActivity.activePublisherStreamIDs
+    }
+
+    func flightActivityByAircraftID(at date: Date = Date()) -> [String: Date] {
+        flightActivity.activityByAircraftID(at: date)
     }
 
     func close(_ id: String) {
@@ -140,6 +182,7 @@ final class AppleStreamRegistry: ObservableObject {
         presenceSubscriptions.removeAll()
         presenceEligibility.removeAll()
         rejectedPaths.removeAll()
+        flightActivity = PairedVideoFlightActivityStore()
         sessions = [AppleLiveStreamSession(path: "demo", model: primaryModel, state: .stopped)]
         focusedID = "demo"
     }
@@ -195,9 +238,9 @@ final class AppleStreamRegistry: ObservableObject {
         return session
     }
 
-    private func stop(path: String, publisherID: String?) {
-        guard let session = matching(path) else { return }
-        if let publisherID, let current = session.publisherConnectionID, publisherID != current { return }
+    private func stop(path: String, publisherID: String?) -> AppleLiveStreamSession? {
+        guard let session = matching(path) else { return nil }
+        if let publisherID, let current = session.publisherConnectionID, publisherID != current { return nil }
         session.model.handleMediaServerEvent(.streamStopped(path: session.sourcePath, publisherConnectionID: publisherID))
         if LiveStreamDecoderLifecyclePolicy.shouldResetAfterPublisherStopped(
             sessionPath: session.sourcePath,
@@ -215,6 +258,7 @@ final class AppleStreamRegistry: ObservableObject {
             if focusedID == session.id { focusedID = sessions.first?.id ?? "demo" }
         }
         rejectedPaths.remove(path)
+        return session
     }
 
     private func startDecoderIfNeeded(for session: AppleLiveStreamSession?) {
@@ -312,6 +356,7 @@ struct AppleStreamsGridView: View {
     var coordinateDisplayFormat: OperationalCoordinateDisplayFormat = .decimal
     var onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)? = nil
     var telemetryPairingState: ((String) -> AppleStreamTelemetryPairingState) = { _ in .noTelemetry }
+    var centerpointElevationFeet: ((String) async -> OperationalCenterpointElevation.Sample?)? = nil
 
     private var visibleSessions: [AppleLiveStreamSession] {
         let operational = registry.sessions.filter { $0.id != "demo" }
@@ -393,6 +438,9 @@ struct AppleStreamsGridView: View {
             remoteRequesterEmail: remoteRequesterEmail?(session.id),
             coordinateDisplayFormat: coordinateDisplayFormat,
             telemetryPairingState: telemetryPairingState(session.id),
+            centerpointElevation: centerpointElevationFeet.map { provider in
+                { await provider(session.id) }
+            },
             onCoordinateDisplayFormatChange: onCoordinateDisplayFormatChange,
             onFocus: {
                 registry.focus(session.id)
@@ -454,6 +502,8 @@ private struct AppleStreamTile: View {
     @State private var pan: CGSize = .zero
     @State private var panAtGestureStart: CGSize = .zero
     @State private var tileSize: CGSize = .zero
+    @State private var centerpointElevationEnabled = false
+    @State private var centerpointElevationSample: OperationalCenterpointElevation.Sample?
     let ingestAddress: String?
     let networkSSID: String?
     let focused: Bool
@@ -463,6 +513,7 @@ private struct AppleStreamTile: View {
     let remoteRequesterEmail: String?
     let coordinateDisplayFormat: OperationalCoordinateDisplayFormat
     let telemetryPairingState: AppleStreamTelemetryPairingState
+    let centerpointElevation: (() async -> OperationalCenterpointElevation.Sample?)?
     let onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)?
     let onFocus: () -> Void
     let onLongPress: () -> Void
@@ -481,6 +532,7 @@ private struct AppleStreamTile: View {
         remoteRequesterEmail: String?,
         coordinateDisplayFormat: OperationalCoordinateDisplayFormat,
         telemetryPairingState: AppleStreamTelemetryPairingState,
+        centerpointElevation: (() async -> OperationalCenterpointElevation.Sample?)?,
         onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)?,
         onFocus: @escaping () -> Void,
         onLongPress: @escaping () -> Void,
@@ -499,6 +551,7 @@ private struct AppleStreamTile: View {
         self.remoteRequesterEmail = remoteRequesterEmail
         self.coordinateDisplayFormat = coordinateDisplayFormat
         self.telemetryPairingState = telemetryPairingState
+        self.centerpointElevation = centerpointElevation
         self.onCoordinateDisplayFormatChange = onCoordinateDisplayFormatChange
         self.onFocus = onFocus
         self.onLongPress = onLongPress
@@ -642,6 +695,10 @@ private struct AppleStreamTile: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 .padding(6)
             }
+            if centerpointElevationEnabled, focused {
+                AppleCenterpointElevationOverlay(sample: centerpointElevationSample)
+                    .allowsHitTesting(false)
+            }
         }
         .modifier(StreamTileSizing(
             fillsAvailableSpace: fillsAvailableSpace,
@@ -693,8 +750,44 @@ private struct AppleStreamTile: View {
                 )
             )
         }
-        .onTapGesture(perform: onFocus)
+        .onTapGesture { location in
+            let minimumDimension = min(tileSize.width, tileSize.height)
+            let radius = min(96, max(48, minimumDimension * 0.20))
+            if focused, OperationalCenterpointElevation.isNearCenter(
+                x: location.x,
+                y: location.y,
+                width: tileSize.width,
+                height: tileSize.height,
+                radius: radius
+            ) {
+                centerpointElevationEnabled.toggle()
+                if centerpointElevationEnabled {
+                    centerpointElevationSample = nil
+                    zoom = 1
+                    zoomAtGestureStart = 1
+                    pan = .zero
+                    panAtGestureStart = .zero
+                }
+            } else {
+                onFocus()
+            }
+        }
         .onLongPressGesture(minimumDuration: 0.5, perform: onLongPress)
+        .onChange(of: focused) { _, isFocused in
+            if !isFocused {
+                centerpointElevationEnabled = false
+                centerpointElevationSample = nil
+            }
+        }
+        .task(id: centerpointElevationEnabled && focused) {
+            guard centerpointElevationEnabled, focused, let centerpointElevation else { return }
+            while !Task.isCancelled {
+                if let updated = await centerpointElevation(), updated != centerpointElevationSample {
+                    centerpointElevationSample = updated
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
         .sheet(isPresented: $showAnomalySettings) {
             NavigationStack {
                 AppleAnomalySettingsView(model: model)
@@ -763,6 +856,69 @@ private struct AppleStreamTile: View {
             width: min(maximumX, max(-maximumX, candidate.width)),
             height: min(maximumY, max(-maximumY, candidate.height))
         )
+    }
+}
+
+private struct AppleCenterpointElevationOverlay: View {
+    let sample: OperationalCenterpointElevation.Sample?
+    private let turquoise = Color(red: 64 / 255, green: 224 / 255, blue: 208 / 255)
+
+    var body: some View {
+        GeometryReader { geometry in
+            let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+            Canvas { context, _ in
+                let arm: CGFloat = 18
+                let gap: CGFloat = 4
+                let segments = [
+                    (CGPoint(x: center.x - arm, y: center.y), CGPoint(x: center.x - gap, y: center.y)),
+                    (CGPoint(x: center.x + gap, y: center.y), CGPoint(x: center.x + arm, y: center.y)),
+                    (CGPoint(x: center.x, y: center.y - arm), CGPoint(x: center.x, y: center.y - gap)),
+                    (CGPoint(x: center.x, y: center.y + gap), CGPoint(x: center.x, y: center.y + arm)),
+                ]
+                for (start, end) in segments {
+                    var path = Path()
+                    path.move(to: start)
+                    path.addLine(to: end)
+                    context.stroke(path, with: .color(.black), lineWidth: 4)
+                    context.stroke(path, with: .color(turquoise), lineWidth: 1.5)
+                }
+                let circle = Path(ellipseIn: CGRect(
+                    x: center.x - 3.5,
+                    y: center.y - 3.5,
+                    width: 7,
+                    height: 7
+                ))
+                context.stroke(circle, with: .color(.black), lineWidth: 2.5)
+                context.stroke(circle, with: .color(turquoise), lineWidth: 1)
+            }
+            OutlinedCenterpointText(text: OperationalCenterpointElevation.displayText(sample), color: turquoise)
+                .position(x: center.x + 84, y: center.y + 30)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(sample.map {
+            let resolution = $0.demResolutionMeters.map { ", \($0) meter DEM" } ?? ", USGS DEM"
+            return "Centerpoint elevation \($0.elevationFeet) feet\(resolution)"
+        } ?? "Centerpoint elevation unavailable")
+    }
+}
+
+private struct OutlinedCenterpointText: View {
+    let text: String
+    let color: Color
+    private let offsets: [CGSize] = [
+        .init(width: -1, height: -1), .init(width: 0, height: -1), .init(width: 1, height: -1),
+        .init(width: -1, height: 0), .init(width: 1, height: 0),
+        .init(width: -1, height: 1), .init(width: 0, height: 1), .init(width: 1, height: 1),
+    ]
+
+    var body: some View {
+        ZStack {
+            ForEach(Array(offsets.enumerated()), id: \.offset) { _, offset in
+                Text(text).offset(offset).foregroundStyle(.black)
+            }
+            Text(text).foregroundStyle(color)
+        }
+        .font(.system(size: 17, weight: .bold, design: .rounded))
     }
 }
 

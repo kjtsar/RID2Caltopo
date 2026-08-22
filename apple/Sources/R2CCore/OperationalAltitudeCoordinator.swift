@@ -4,11 +4,18 @@ public struct OperationalTerrainSample: Sendable, Equatable {
     public let elevationMeters: Double
     public let stale: Bool
     public let source: String?
+    public let horizontalResolutionMeters: Double?
 
-    public init(elevationMeters: Double, stale: Bool = false, source: String? = nil) {
+    public init(
+        elevationMeters: Double,
+        stale: Bool = false,
+        source: String? = nil,
+        horizontalResolutionMeters: Double? = nil
+    ) {
         self.elevationMeters = elevationMeters
         self.stale = stale
         self.source = source
+        self.horizontalResolutionMeters = horizontalResolutionMeters
     }
 }
 

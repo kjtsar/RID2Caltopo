@@ -161,6 +161,8 @@ internal data class DroneMapPoint(
     val timestampMsec: Long,
     val receivedAtMsec: Long? = null,
     val headingDeg: Double? = null,
+    val cameraAzimuthDeg: Double? = null,
+    val horizontalCameraFovDeg: Double? = null,
     val droneSpec: CtDroneSpec? = null
 )
 

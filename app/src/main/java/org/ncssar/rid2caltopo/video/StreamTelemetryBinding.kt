@@ -1,5 +1,7 @@
 package org.ncssar.rid2caltopo.video
 
+import java.util.Locale
+
 data class StreamTelemetryState(
     val remoteId: String,
     val mappedId: String
@@ -33,6 +35,87 @@ data class ConfiguredStreamTelemetryBindingMaps(
     val streamDesignatorToRemoteId: Map<String, String>,
     val remoteIdToStreamDesignator: Map<String, String>
 )
+
+data class PairedVideoFlightActivity(
+    val publisherActive: Boolean,
+    val lastActivityAtMs: Long,
+)
+
+/**
+ * Session-scoped stream-to-aircraft bindings plus authoritative MediaMTX publisher presence.
+ * A publisher connection may rotate during an RTMP/RTP restart; the stable stream designator
+ * keeps the pairing attached to the same Remote ID across those connection changes.
+ */
+object StreamFlightActivityRegistry {
+    private val lock = Any()
+    private val runtimeBindings = mutableMapOf<String, String>()
+    private var configuredBindings: Map<String, String> = emptyMap()
+    private var livePublishers: Set<String> = emptySet()
+    private val lastPublisherActivityAtMs = mutableMapOf<String, Long>()
+
+    @JvmStatic
+    fun bindRuntime(streamDesignator: String, remoteId: String) {
+        val designator = normalizeDesignator(streamDesignator)
+        val remote = remoteId.trim()
+        if (designator.isEmpty() || remote.isEmpty()) return
+        synchronized(lock) { runtimeBindings[designator] = remote }
+    }
+
+    @JvmStatic
+    fun clearRuntime(streamDesignator: String) {
+        val designator = normalizeDesignator(streamDesignator)
+        if (designator.isEmpty()) return
+        synchronized(lock) { runtimeBindings.remove(designator) }
+    }
+
+    @JvmStatic
+    fun replaceConfigured(bindings: Map<String, String>) {
+        val normalized = bindings.mapNotNull { (designator, remoteId) ->
+            val key = normalizeDesignator(designator)
+            val remote = remoteId.trim()
+            if (key.isEmpty() || remote.isEmpty()) null else key to remote
+        }.toMap()
+        synchronized(lock) { configuredBindings = normalized }
+    }
+
+    @JvmStatic
+    fun replaceLivePublishers(designators: Collection<String>, observedAtMs: Long) {
+        val normalized = designators.map(::normalizeDesignator).filter(String::isNotEmpty).toSet()
+        synchronized(lock) {
+            (livePublishers - normalized).forEach { lastPublisherActivityAtMs[it] = observedAtMs }
+            normalized.forEach { lastPublisherActivityAtMs[it] = observedAtMs }
+            livePublishers = normalized
+        }
+    }
+
+    @JvmStatic
+    fun activityForRemoteId(remoteId: String, nowMs: Long): PairedVideoFlightActivity {
+        val remote = remoteId.trim()
+        if (remote.isEmpty()) return PairedVideoFlightActivity(false, 0L)
+        synchronized(lock) {
+            val designators = (configuredBindings.keys + runtimeBindings.keys).filter { designator ->
+                (runtimeBindings[designator] ?: configuredBindings[designator]) == remote
+            }
+            val active = designators.any { it in livePublishers }
+            val lastActivity = if (active) nowMs else designators.maxOfOrNull {
+                lastPublisherActivityAtMs[it] ?: 0L
+            } ?: 0L
+            return PairedVideoFlightActivity(active, lastActivity)
+        }
+    }
+
+    internal fun resetForTests() {
+        synchronized(lock) {
+            runtimeBindings.clear()
+            configuredBindings = emptyMap()
+            livePublishers = emptySet()
+            lastPublisherActivityAtMs.clear()
+        }
+    }
+
+    private fun normalizeDesignator(value: String): String =
+        value.trim().uppercase(Locale.US)
+}
 
 enum class StreamTelemetryPairingControlAction {
     ShowPicker,

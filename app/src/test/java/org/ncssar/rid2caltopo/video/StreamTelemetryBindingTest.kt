@@ -1,10 +1,22 @@
 package org.ncssar.rid2caltopo.video
 
 import org.junit.Assert.assertEquals
+import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class StreamTelemetryBindingTest {
+    @Before
+    fun setUpFlightActivityRegistry() {
+        StreamFlightActivityRegistry.resetForTests()
+    }
+
+    @After
+    fun tearDownFlightActivityRegistry() {
+        StreamFlightActivityRegistry.resetForTests()
+    }
+
     @Test
     fun manualPairingBindsStreamToRemoteIdWithoutChangingMappedId() {
         val telemetry = testTelemetry(remoteId = "1581F8", mappedId = "1SAR138DjMtrc4td")
@@ -216,6 +228,44 @@ class StreamTelemetryBindingTest {
         assertNull(bindings["NCSSAR_MTRC4TD"])
         assertEquals("1SAR138DjMtrc4td", telemetry.mappedId)
         assertEquals(StreamTelemetryBindingStatus.UNPAIRED_WITH_CANDIDATES, resolved.status)
+    }
+
+    @Test
+    fun pairedPublisherKeepsFlightActiveWithoutSei() {
+        StreamFlightActivityRegistry.bindRuntime("RC2/Red1", "RID-1")
+        StreamFlightActivityRegistry.replaceLivePublishers(listOf("RC2/Red1"), 10_000L)
+
+        val activity = StreamFlightActivityRegistry.activityForRemoteId("RID-1", 20_000L)
+
+        assertEquals(true, activity.publisherActive)
+        assertEquals(20_000L, activity.lastActivityAtMs)
+    }
+
+    @Test
+    fun publisherStopStartsGraceClockAndRestartKeepsPairing() {
+        StreamFlightActivityRegistry.bindRuntime("Red1", "RID-1")
+        StreamFlightActivityRegistry.replaceLivePublishers(listOf("Red1"), 10_000L)
+        StreamFlightActivityRegistry.replaceLivePublishers(emptyList(), 15_000L)
+
+        val stopped = StreamFlightActivityRegistry.activityForRemoteId("RID-1", 20_000L)
+        assertEquals(false, stopped.publisherActive)
+        assertEquals(15_000L, stopped.lastActivityAtMs)
+
+        StreamFlightActivityRegistry.replaceLivePublishers(listOf("red1"), 25_000L)
+        val restarted = StreamFlightActivityRegistry.activityForRemoteId("RID-1", 26_000L)
+        assertEquals(true, restarted.publisherActive)
+        assertEquals(26_000L, restarted.lastActivityAtMs)
+    }
+
+    @Test
+    fun configuredBindingTracksCaseInsensitivePublisherReconnect() {
+        StreamFlightActivityRegistry.replaceConfigured(mapOf("NCSSAR_MTRC4TD" to "RID-1"))
+        StreamFlightActivityRegistry.replaceLivePublishers(listOf("ncssar_mtrc4td"), 10_000L)
+
+        assertEquals(
+            true,
+            StreamFlightActivityRegistry.activityForRemoteId("RID-1", 11_000L).publisherActive,
+        )
     }
 
     private fun testTelemetry(remoteId: String, mappedId: String): StreamTelemetryState {

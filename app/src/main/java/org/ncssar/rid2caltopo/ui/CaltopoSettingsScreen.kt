@@ -55,6 +55,7 @@ fun CaltopoSettingsScreen(
     val alarmVolumePercent by settingsViewModel.alarmVolumePercent.collectAsState()
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
+    val wifiRidScanningEnabled by settingsViewModel.wifiRidScanningEnabled.collectAsState()
     val remoteVideoControlEnabled by settingsViewModel.remoteVideoControlEnabled.collectAsState()
     val standaloneR2cCoordinationEnabled by settingsViewModel.standaloneR2cCoordinationEnabled.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
@@ -295,6 +296,19 @@ fun CaltopoSettingsScreen(
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.fillMaxWidth()
                 )
+                LabeledSwitch(
+                    label = "Wi-Fi RID scanning",
+                    checked = wifiRidScanningEnabled,
+                    onCheckedChange = settingsViewModel::onWifiRidScanningEnabledChanged
+                )
+                Text(
+                    "Controls Android Wi-Fi Beacon and Wi-Fi NAN RID discovery only. " +
+                        "Bluetooth RID, DS100 bridge reception, and normal Wi-Fi remain active.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
                     value = minDistance,
                     onValueChange = { settingsViewModel.onMinDistanceChanged(it) },

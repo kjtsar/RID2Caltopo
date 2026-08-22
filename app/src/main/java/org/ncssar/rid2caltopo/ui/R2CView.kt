@@ -252,7 +252,7 @@ fun RidmapHeader() {
             modifier = Modifier.width(R2CViewColumnLayout.remoteIdColumnWidthDp.dp)
         ) {
             Text(
-                text = "RSSI: D→Device / D→Bridge",
+                text = "Drone→Bridge RSSI",
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)

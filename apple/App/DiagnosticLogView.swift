@@ -6,7 +6,7 @@ struct DiagnosticLogView: View {
     var body: some View {
         List {
             Section {
-                Text("Select the same way you would on Android. Today is selected automatically; the resulting compressed ZIP includes device and app details plus each selected log.")
+                Text("Select the same way you would on Android. Today is selected automatically; the resulting compressed ZIP includes device and app details, each selected log, and matching JSON track archives.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text("You choose where to send it. The bundle can contain Remote IDs, aircraft positions, the app-install coordination identifier, local network addresses, and operational status. It never includes the CalTopo credential secret.")
@@ -90,6 +90,6 @@ struct DiagnosticLogView: View {
             }
         }
         .navigationTitle("Send App Logs")
-        .task { await diagnostics.refreshDays() }
+        .task { await diagnostics.beginPackagingSession() }
     }
 }

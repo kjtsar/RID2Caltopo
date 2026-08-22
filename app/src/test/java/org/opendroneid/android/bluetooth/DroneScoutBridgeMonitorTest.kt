@@ -39,6 +39,19 @@ class DroneScoutBridgeMonitorTest {
     }
 
     @Test
+    fun newerSignalThanDisplayClockRemainsVisible() {
+        val signal = DroneScoutBridgeSignal(-52, 2_000L, 1L)
+
+        assertEquals(-52, DroneScoutBridgeMonitor.currentRssi(signal, 1_001L))
+
+        val gate = DroneScoutBridgeStatusLogGate()
+        val visible = gate.transitionMessage("main", signal, 1_001L)
+        assertTrue(visible!!.contains("state=visible"))
+        assertTrue(visible.contains("reason=fresh"))
+        assertTrue(visible.contains("ageMs=0"))
+    }
+
+    @Test
     fun relayedAircraftPacketsRefreshBridgeAndIncrementCounter() {
         DroneScoutBridgeMonitor.noteCandidate("DroneScout Bridge", -51, 1_000L)
         DroneScoutBridgeMonitor.noteRelayedPacket(-63, 2_000L)
@@ -47,6 +60,35 @@ class DroneScoutBridgeMonitorTest {
         assertEquals(-63, signal?.rssiDbm)
         assertEquals(2_000L, signal?.lastSeenMonotonicMs)
         assertEquals(2L, signal?.eventCount)
+    }
+
+    @Test
+    fun bridgeStatusLogGateReportsOnlyAvailabilityTransitions() {
+        val gate = DroneScoutBridgeStatusLogGate()
+
+        assertTrue(gate.transitionMessage("main", null, 1_000L)!!.contains("state=blank"))
+        assertNull(gate.transitionMessage("main", null, 2_000L))
+
+        val firstSignal = DroneScoutBridgeSignal(-52, 3_000L, 1L)
+        val visible = gate.transitionMessage("main", firstSignal, 3_001L)
+        assertTrue(visible!!.contains("state=visible"))
+        assertTrue(visible.contains("rssi=-52"))
+        assertTrue(visible.contains("eventCount=1"))
+
+        val changedRssi = DroneScoutBridgeSignal(-53, 4_000L, 2L)
+        assertNull(gate.transitionMessage("main", changedRssi, 4_001L))
+
+        val blank = gate.transitionMessage(
+            "main",
+            changedRssi,
+            4_000L + DroneScoutBridgeMonitor.SIGNAL_STALE_AFTER_MS + 1L,
+        )
+        assertTrue(blank!!.contains("state=blank"))
+        assertTrue(blank.contains("reason=stale"))
+        assertTrue(blank.contains("ageMs=32001"))
+
+        gate.reset()
+        assertTrue(gate.transitionMessage("main", changedRssi, 4_001L)!!.contains("state=visible"))
     }
 
     @Test

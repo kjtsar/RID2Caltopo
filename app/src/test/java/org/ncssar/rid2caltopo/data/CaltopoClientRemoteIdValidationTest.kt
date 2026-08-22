@@ -75,4 +75,22 @@ class CaltopoClientRemoteIdValidationTest {
             pendingField.setBoolean(null, false)
         }
     }
+
+    @Test
+    fun currentDroneListDoesNotRetainResetInactiveDroneShell() {
+        val remoteId = "RID123"
+        CaltopoClient.ClientForRemoteId(remoteId)
+        assertFalse(CaltopoClient.GetDroneSpec(remoteId)!!.isActive)
+
+        val processMethod = CaltopoClient::class.java
+            .getDeclaredMethod("ProcessSortedCurrentDroneSpecArray", Boolean::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        val displayArray = CaltopoClient::class.java
+            .getDeclaredField("DsArray")
+            .apply { isAccessible = true }
+
+        processMethod.invoke(null, true)
+
+        assertTrue((displayArray.get(null) as List<*>).isEmpty())
+    }
 }

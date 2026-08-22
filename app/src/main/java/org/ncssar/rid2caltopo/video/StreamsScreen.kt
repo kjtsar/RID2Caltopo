@@ -16,6 +16,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
@@ -73,6 +75,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -476,19 +482,6 @@ fun StreamsScreen(
                                 )
                                 Spacer(Modifier.width(6.dp))
                             }
-                            if (layoutMode != StreamsLayoutMode.Both) {
-                                LayoutToggleChip(
-                                    label = "Split",
-                                    selected = false,
-                                    onClick = {
-                                        viewModel.setLayoutMode(StreamsLayoutMode.Both)
-                                        if (splitFraction !in 0.1f..0.9f) {
-                                            splitFraction = 0.5f
-                                        }
-                                    }
-                                )
-                                Spacer(Modifier.width(6.dp))
-                            }
                             BridgeSignalIndicator(rssi = bridgeRssi)
                         }
                     }
@@ -589,35 +582,63 @@ fun StreamsScreen(
             }
 
             Box(Modifier.fillMaxSize()) {
-                when (layoutMode) {
-                    StreamsLayoutMode.Both -> {
-                        SplitStreamsAndMap(
-                            viewModel = viewModel,
-                            allowCapturedVideoPicker = allowModalDialogs,
-                            splitFraction = splitFraction,
-                            onSplitFractionChange = { splitFraction = it },
-                            onMapStatusTap = onMapStatusTap,
-                            onStreamsPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Streams) },
-                            onMapPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Map) },
-                            remoteVideoDesignator = remoteVideoDesignator,
-                            remoteRequesterEmail = remoteRequesterEmail,
-                        )
+                if (externalContentMode == null) {
+                    val effectiveSplitFraction = when (layoutMode) {
+                        StreamsLayoutMode.Streams -> MAX_SPLIT_FRACTION
+                        StreamsLayoutMode.Map -> MIN_SPLIT_FRACTION
+                        StreamsLayoutMode.Both -> splitFraction
                     }
+                    SplitStreamsAndMap(
+                        viewModel = viewModel,
+                        allowCapturedVideoPicker = allowModalDialogs,
+                        splitFraction = effectiveSplitFraction,
+                        onSplitFractionChange = { next ->
+                            splitFraction = next
+                            viewModel.setLayoutMode(layoutModeForSplitFraction(next))
+                        },
+                        onMapStatusTap = onMapStatusTap,
+                        onStreamsPaneTap = {
+                            splitFraction = MAX_SPLIT_FRACTION
+                            viewModel.setLayoutMode(StreamsLayoutMode.Streams)
+                        },
+                        onMapPaneTap = {
+                            splitFraction = MIN_SPLIT_FRACTION
+                            viewModel.setLayoutMode(StreamsLayoutMode.Map)
+                        },
+                        remoteVideoDesignator = remoteVideoDesignator,
+                        remoteRequesterEmail = remoteRequesterEmail,
+                    )
+                } else {
+                    when (layoutMode) {
+                        StreamsLayoutMode.Both -> {
+                            SplitStreamsAndMap(
+                                viewModel = viewModel,
+                                allowCapturedVideoPicker = allowModalDialogs,
+                                splitFraction = splitFraction,
+                                onSplitFractionChange = { splitFraction = it },
+                                onMapStatusTap = onMapStatusTap,
+                                onStreamsPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Streams) },
+                                onMapPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Map) },
+                                remoteVideoDesignator = remoteVideoDesignator,
+                                remoteRequesterEmail = remoteRequesterEmail,
+                            )
+                        }
 
-                    StreamsLayoutMode.Streams -> {
-                        StreamsGrid(
-                            viewModel = viewModel,
-                            allowCapturedVideoPicker = allowModalDialogs,
-                            onMapStatusTap = onMapStatusTap,
-                            fullScreenContent = fullScreenChrome.showExitChip,
-                            remoteVideoDesignator = remoteVideoDesignator,
-                            remoteRequesterEmail = remoteRequesterEmail,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
+                        StreamsLayoutMode.Streams -> {
+                            StreamsGrid(
+                                viewModel = viewModel,
+                                allowCapturedVideoPicker = allowModalDialogs,
+                                onMapStatusTap = onMapStatusTap,
+                                fullScreenContent = fullScreenChrome.showExitChip,
+                                remoteVideoDesignator = remoteVideoDesignator,
+                                remoteRequesterEmail = remoteRequesterEmail,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
 
-                    StreamsLayoutMode.Map -> {
+                        StreamsLayoutMode.Map -> {
                         SplitMapPane(viewModel = viewModel, modifier = Modifier.fillMaxSize())
+                        }
                     }
                 }
 
@@ -674,23 +695,23 @@ fun StreamsScreen(
 
                 if (fullScreenChrome.showExitChip) {
                     val exitLayout = fullScreenExitChipLayout()
-                    BridgeSignalIndicator(
-                        rssi = bridgeRssi,
-                        overlay = true,
+                    Row(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(
-                                top = 16.dp,
-                                end = (exitLayout.endPaddingDp + exitLayout.minWidthDp + 8f).dp,
-                            )
+                            .padding(top = 8.dp, end = exitLayout.endPaddingDp.dp)
                             .zIndex(10f),
-                    )
-                    FullScreenExitChip(
-                        onClick = { streamsFullScreen = false },
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .zIndex(10f)
-                    )
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        FullScreenExitChip(onClick = { streamsFullScreen = false })
+                        FullScreenPipChip(
+                            enabled = streamPipUiState.enabled,
+                            onClick = {
+                                viewModel.setStreamPipEnabled(!streamPipUiState.enabled)
+                            },
+                        )
+                        BridgeSignalIndicator(rssi = bridgeRssi, overlay = true)
+                    }
                 }
 
                 if (allowModalDialogs) viewModel.pendingClue?.let {
@@ -821,7 +842,6 @@ private fun FullScreenExitChip(
     val layout = fullScreenExitChipLayout()
     Box(
         modifier = modifier
-            .padding(top = 8.dp, end = layout.endPaddingDp.dp)
             .widthIn(min = layout.minWidthDp.dp)
             .heightIn(min = layout.minHeightDp.dp)
             .border(1.dp, Color.White, RoundedCornerShape(12.dp))
@@ -832,6 +852,32 @@ private fun FullScreenExitChip(
     ) {
         OutlinedOverlayText(
             text = "Exit FS",
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+}
+
+@Composable
+private fun FullScreenPipChip(
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .widthIn(min = 76.dp)
+            .heightIn(min = 48.dp)
+            .border(
+                width = 1.dp,
+                color = if (enabled) MaterialTheme.colorScheme.primary else Color.White,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        OutlinedOverlayText(
+            text = if (enabled) "PiP:On" else "PiP:Off",
             style = MaterialTheme.typography.titleMedium,
         )
     }
@@ -974,6 +1020,61 @@ private fun complianceAlertSummary(drone: OverLimitDroneUiState): String {
     }
 }
 
+internal const val MIN_SPLIT_FRACTION = 0f
+internal const val MAX_SPLIT_FRACTION = 1f
+internal const val SPLIT_EDGE_SNAP_HANDLE_WIDTHS = 2f
+internal const val SPLIT_DIVIDER_TOUCH_SIZE_DP = 96
+internal const val SPLIT_DIVIDER_SNAP_WIDTH_DP = 48
+
+internal fun layoutModeForSplitFraction(fraction: Float): StreamsLayoutMode =
+    when {
+        fraction <= MIN_SPLIT_FRACTION -> StreamsLayoutMode.Map
+        fraction >= MAX_SPLIT_FRACTION -> StreamsLayoutMode.Streams
+        else -> StreamsLayoutMode.Both
+    }
+
+internal fun splitDividerOffsetPx(
+    fraction: Float,
+    availablePx: Float,
+    dividerThicknessPx: Float,
+): Float = fraction.coerceIn(MIN_SPLIT_FRACTION, MAX_SPLIT_FRACTION) * availablePx -
+    dividerThicknessPx / 2f
+
+internal fun splitDividerTouchOffsetPx(
+    fraction: Float,
+    availablePx: Float,
+    dividerThicknessPx: Float,
+): Float = splitDividerOffsetPx(fraction, availablePx, dividerThicknessPx)
+    .coerceIn(0f, (availablePx - dividerThicknessPx).coerceAtLeast(0f))
+
+internal fun adjustedSplitFraction(
+    currentFraction: Float,
+    dragDeltaPx: Float,
+    availablePx: Float,
+): Float {
+    val clampedCurrent = currentFraction.coerceIn(MIN_SPLIT_FRACTION, MAX_SPLIT_FRACTION)
+    if (availablePx <= 0f) return clampedCurrent
+    return (clampedCurrent + dragDeltaPx / availablePx)
+        .coerceIn(MIN_SPLIT_FRACTION, MAX_SPLIT_FRACTION)
+}
+
+internal fun snappedSplitFraction(
+    fraction: Float,
+    availablePx: Float,
+    dividerThicknessPx: Float,
+): Float {
+    val clamped = fraction.coerceIn(MIN_SPLIT_FRACTION, MAX_SPLIT_FRACTION)
+    if (availablePx <= 0f || dividerThicknessPx <= 0f) return clamped
+    val positionPx = clamped * availablePx
+    val snapDistancePx = SPLIT_EDGE_SNAP_HANDLE_WIDTHS * dividerThicknessPx
+    return when {
+        positionPx <= snapDistancePx && positionPx <= availablePx / 2f -> MIN_SPLIT_FRACTION
+        availablePx - positionPx <= snapDistancePx && positionPx >= availablePx / 2f ->
+            MAX_SPLIT_FRACTION
+        else -> clamped
+    }
+}
+
 @Composable
 private fun SplitStreamsAndMap(
     viewModel: StreamsViewModel,
@@ -988,20 +1089,28 @@ private fun SplitStreamsAndMap(
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val isPortrait = maxHeight > maxWidth
-        val dividerThickness = 24.dp
+        val dividerTouchSize = SPLIT_DIVIDER_TOUCH_SIZE_DP.dp
+        val dividerSnapWidth = SPLIT_DIVIDER_SNAP_WIDTH_DP.dp
         val dividerLineThickness = 4.dp
-        val clamped = splitFraction.coerceIn(0f, 1f)
-        val maxHeightPx = maxHeight.value
-        val maxWidthPx = maxWidth.value
+        val clamped = splitFraction.coerceIn(MIN_SPLIT_FRACTION, MAX_SPLIT_FRACTION)
         val density = LocalDensity.current
-        val dividerThicknessDp = dividerThickness
-        val dividerHalfDp = dividerThicknessDp / 2
-        val dividerLineDp = dividerLineThickness
+        val maxHeightPx = with(density) { maxHeight.toPx() }
+        val maxWidthPx = with(density) { maxWidth.toPx() }
+        val dividerTouchSizePx = with(density) { dividerTouchSize.toPx() }
+        val dividerSnapWidthPx = with(density) { dividerSnapWidth.toPx() }
+        val dividerLinePx = with(density) { dividerLineThickness.toPx() }
+        val currentSplitFraction by rememberUpdatedState(clamped)
+        val currentOnSplitFractionChange by rememberUpdatedState(onSplitFractionChange)
 
         if (isPortrait) {
-            val dividerOffsetDp = with(density) { (clamped * maxHeightPx).dp - dividerHalfDp }
+            val dividerOffsetDp = with(density) {
+                splitDividerTouchOffsetPx(clamped, maxHeightPx, dividerTouchSizePx).toDp()
+            }
+            val dividerLineOffsetDp = with(density) {
+                (clamped * maxHeightPx - dividerLinePx / 2f).toDp()
+            }
             Box(modifier = Modifier.fillMaxSize()) {
-                Box(
+                if (clamped > MIN_SPLIT_FRACTION) Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .fillMaxHeight(clamped.coerceIn(0f, 1f))
@@ -1020,7 +1129,7 @@ private fun SplitStreamsAndMap(
                         modifier = Modifier.fillMaxSize()
                     )
                 }
-                Box(
+                if (clamped < MAX_SPLIT_FRACTION) Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .fillMaxHeight((1f - clamped).coerceIn(0f, 1f))
@@ -1034,30 +1143,75 @@ private fun SplitStreamsAndMap(
                 }
                 Box(
                     modifier = Modifier
-                        .offset(y = dividerOffsetDp)
+                        .offset(y = dividerLineOffsetDp)
                         .fillMaxWidth()
-                        .height(dividerThicknessDp)
+                        .height(dividerLineThickness)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .offset(y = dividerOffsetDp)
+                        .size(dividerTouchSize)
                         .background(Color.Transparent)
-                        .pointerInput(Unit) {
-                            detectDragGestures { _, dragAmount ->
-                                val delta = if (maxHeightPx > 0f) dragAmount.y / maxHeightPx else 0f
-                                onSplitFractionChange((splitFraction + delta).coerceIn(0f, 1f))
-                            }
+                        .semantics {
+                            contentDescription = "Resize video and map panes"
+                            progressBarRangeInfo = ProgressBarRangeInfo(
+                                current = clamped,
+                                range = MIN_SPLIT_FRACTION..MAX_SPLIT_FRACTION,
+                            )
+                        }
+                        .pointerInput(maxHeightPx) {
+                            var rawDragFraction = currentSplitFraction
+                            detectDragGestures(
+                                onDragStart = { rawDragFraction = currentSplitFraction },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    rawDragFraction = adjustedSplitFraction(
+                                        currentFraction = rawDragFraction,
+                                        dragDeltaPx = dragAmount.y,
+                                        availablePx = maxHeightPx,
+                                    )
+                                    currentOnSplitFractionChange(
+                                        snappedSplitFraction(
+                                            fraction = rawDragFraction,
+                                            availablePx = maxHeightPx,
+                                            dividerThicknessPx = dividerSnapWidthPx,
+                                        )
+                                    )
+                                },
+                            )
                         }
                 ) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.Center)
-                            .fillMaxWidth()
-                            .height(dividerLineDp)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                            .matchParentSize()
+                            .systemGestureExclusion()
+                    )
+                    SplitDragHandle(
+                        horizontalDivider = true,
+                        modifier = when {
+                            clamped <= MIN_SPLIT_FRACTION -> Modifier
+                                .align(Alignment.TopCenter)
+                                .offset(y = (-14).dp)
+                            clamped >= MAX_SPLIT_FRACTION -> Modifier
+                                .align(Alignment.BottomCenter)
+                                .offset(y = 14.dp)
+                            else -> Modifier.align(Alignment.Center)
+                        },
                     )
                 }
             }
         } else {
-            val dividerOffsetDp = with(density) { (clamped * maxWidthPx).dp - dividerHalfDp }
+            val dividerOffsetDp = with(density) {
+                splitDividerTouchOffsetPx(clamped, maxWidthPx, dividerTouchSizePx).toDp()
+            }
+            val dividerLineOffsetDp = with(density) {
+                (clamped * maxWidthPx - dividerLinePx / 2f).toDp()
+            }
             Box(modifier = Modifier.fillMaxSize()) {
-                Box(
+                if (clamped > MIN_SPLIT_FRACTION) Box(
                     modifier = Modifier
                         .fillMaxHeight()
                         .fillMaxWidth(clamped.coerceIn(0f, 1f))
@@ -1076,7 +1230,7 @@ private fun SplitStreamsAndMap(
                         modifier = Modifier.fillMaxSize()
                     )
                 }
-                Box(
+                if (clamped < MAX_SPLIT_FRACTION) Box(
                     modifier = Modifier
                         .fillMaxHeight()
                         .fillMaxWidth((1f - clamped).coerceIn(0f, 1f))
@@ -1090,26 +1244,96 @@ private fun SplitStreamsAndMap(
                 }
                 Box(
                     modifier = Modifier
-                        .offset(x = dividerOffsetDp)
+                        .offset(x = dividerLineOffsetDp)
                         .fillMaxHeight()
-                        .width(dividerThicknessDp)
+                        .width(dividerLineThickness)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset(x = dividerOffsetDp)
+                        .size(dividerTouchSize)
                         .background(Color.Transparent)
-                        .pointerInput(Unit) {
-                            detectDragGestures { _, dragAmount ->
-                                val delta = if (maxWidthPx > 0f) dragAmount.x / maxWidthPx else 0f
-                                onSplitFractionChange((splitFraction + delta).coerceIn(0f, 1f))
-                            }
+                        .semantics {
+                            contentDescription = "Resize video and map panes"
+                            progressBarRangeInfo = ProgressBarRangeInfo(
+                                current = clamped,
+                                range = MIN_SPLIT_FRACTION..MAX_SPLIT_FRACTION,
+                            )
+                        }
+                        .pointerInput(maxWidthPx) {
+                            var rawDragFraction = currentSplitFraction
+                            detectDragGestures(
+                                onDragStart = { rawDragFraction = currentSplitFraction },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    rawDragFraction = adjustedSplitFraction(
+                                        currentFraction = rawDragFraction,
+                                        dragDeltaPx = dragAmount.x,
+                                        availablePx = maxWidthPx,
+                                    )
+                                    currentOnSplitFractionChange(
+                                        snappedSplitFraction(
+                                            fraction = rawDragFraction,
+                                            availablePx = maxWidthPx,
+                                            dividerThicknessPx = dividerSnapWidthPx,
+                                        )
+                                    )
+                                },
+                            )
                         }
                 ) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.Center)
-                            .fillMaxHeight()
-                            .width(dividerLineDp)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                            .matchParentSize()
+                            .systemGestureExclusion()
+                    )
+                    SplitDragHandle(
+                        horizontalDivider = false,
+                        modifier = when {
+                            clamped <= MIN_SPLIT_FRACTION -> Modifier
+                                .align(Alignment.CenterStart)
+                                .offset(x = (-14).dp)
+                            clamped >= MAX_SPLIT_FRACTION -> Modifier
+                                .align(Alignment.CenterEnd)
+                                .offset(x = 14.dp)
+                            else -> Modifier.align(Alignment.Center)
+                        },
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SplitDragHandle(
+    horizontalDivider: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val handleColor = MaterialTheme.colorScheme.primary
+    val gripColor = MaterialTheme.colorScheme.onPrimary
+    Canvas(
+        modifier = modifier
+            .width(if (horizontalDivider) 48.dp else 28.dp)
+            .height(if (horizontalDivider) 28.dp else 48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(handleColor)
+    ) {
+        val spacing = 7.dp.toPx()
+        val radius = 2.dp.toPx()
+        for (index in -1..1) {
+            drawCircle(
+                color = gripColor,
+                radius = radius,
+                center = if (horizontalDivider) {
+                    Offset(center.x + index * spacing, center.y)
+                } else {
+                    Offset(center.x, center.y + index * spacing)
+                },
+            )
         }
     }
 }

@@ -184,6 +184,74 @@ internal data class DroneLabelDrawSpec(
     val statusDrawable: Drawable
 )
 
+internal data class CameraFovBoundaryBearings(
+    val leftBearingDeg: Double,
+    val rightBearingDeg: Double
+)
+
+internal fun cameraFovBoundaryBearings(
+    cameraAzimuthDeg: Double?,
+    horizontalFovDeg: Double?
+): CameraFovBoundaryBearings? {
+    val azimuth = cameraAzimuthDeg?.takeIf { it.isFinite() } ?: return null
+    val fov = horizontalFovDeg?.takeIf { it.isFinite() && it > 0.0 && it <= 180.0 } ?: return null
+    val halfFov = fov / 2.0
+    return CameraFovBoundaryBearings(
+        leftBearingDeg = normalizeDegrees(azimuth - halfFov),
+        rightBearingDeg = normalizeDegrees(azimuth + halfFov)
+    )
+}
+
+internal data class CameraFovDrawSpec(
+    val position: GeoPoint,
+    val leftBearingDeg: Double,
+    val rightBearingDeg: Double,
+    val scale: Float
+)
+
+/** Screen-sized camera field-of-view rays that remain legible at every map zoom. */
+internal class CameraFovOverlay(
+    private val cameras: List<CameraFovDrawSpec>,
+    resources: Resources
+) : Overlay() {
+    private val density = resources.displayMetrics.density
+    private val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#B3000000")
+        style = Paint.Style.STROKE
+        strokeWidth = 3.0f * density
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val rayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#FF80DEEA")
+        style = Paint.Style.STROKE
+        strokeWidth = 1.25f * density
+        strokeCap = Paint.Cap.ROUND
+    }
+
+    override fun draw(canvas: Canvas, mapView: MapView, shadow: Boolean) {
+        if (shadow || cameras.isEmpty()) return
+        val projection = mapView.projection
+        cameras.forEach { camera ->
+            val anchor = projection.toPixels(camera.position, null)
+            val safeScale = camera.scale.takeIf { it.isFinite() && it > 0f } ?: 1f
+            // The visible drone glyph is approximately 18 dp wide. Start outside its halo,
+            // then extend each boundary ray by two glyph widths.
+            val startRadiusPx = 14f * density * safeScale
+            val rayLengthPx = 36f * density * safeScale
+            listOf(camera.leftBearingDeg, camera.rightBearingDeg).forEach { bearing ->
+                val (startX, startY) = polarPoint(
+                    anchor.x.toFloat(), anchor.y.toFloat(), startRadiusPx, bearing
+                )
+                val (endX, endY) = polarPoint(
+                    anchor.x.toFloat(), anchor.y.toFloat(), startRadiusPx + rayLengthPx, bearing
+                )
+                canvas.drawLine(startX, startY, endX, endY, haloPaint)
+                canvas.drawLine(startX, startY, endX, endY, rayPaint)
+            }
+        }
+    }
+}
+
 internal class DroneLabelOverlay(
     private val labels: List<DroneLabelDrawSpec>
 ) : Overlay() {

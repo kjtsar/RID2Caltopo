@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CApplication
+import org.ncssar.rid2caltopo.app.ScanningService
 import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoCredentials
@@ -20,6 +21,7 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.data.RemoteVideoControlPrefs
+import org.ncssar.rid2caltopo.data.WifiRidScanPrefs
 import org.ncssar.rid2caltopo.notam.NotamAuthManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
@@ -72,6 +74,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     private val _captureIncomingVideo = MutableStateFlow(CaltopoClient.GetCaptureVideoStreamsFlag())
     val captureIncomingVideo = _captureIncomingVideo.asStateFlow()
+    private val _wifiRidScanningEnabled = MutableStateFlow(
+        WifiRidScanPrefs.isEnabled(R2CApplication.getAppCtxt())
+    )
+    val wifiRidScanningEnabled = _wifiRidScanningEnabled.asStateFlow()
     private val _remoteVideoControlEnabled = MutableStateFlow(
         RemoteVideoControlPrefs.isEnabled(R2CApplication.getAppCtxt())
     )
@@ -176,6 +182,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _usePeers.value = CaltopoClient.GetUsePeersFlag()
         _standaloneR2cCoordinationEnabled.value = CaltopoClient.GetStandaloneR2cCoordinationEnabled()
         _captureIncomingVideo.value = CaltopoClient.GetCaptureVideoStreamsFlag()
+        _wifiRidScanningEnabled.value = WifiRidScanPrefs.isEnabled(R2CApplication.getAppCtxt())
         _predictiveHeadEnabled.value = CaltopoClient.GetPredictiveHeadEnabled()
         _proximityAlertSpacingFeet.value = CaltopoClient.GetProximityAlertSpacingFeet().toString()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
@@ -282,6 +289,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     }
     fun onCaptureIncomingVideoChanged(enabled: Boolean) {
         _captureIncomingVideo.value = enabled
+    }
+    fun onWifiRidScanningEnabledChanged(enabled: Boolean) {
+        _wifiRidScanningEnabled.value = enabled
     }
     fun onPredictiveHeadEnabledChanged(enabled: Boolean) {
         _predictiveHeadEnabled.value = enabled
@@ -414,6 +424,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetStandaloneR2cCoordinationEnabled(_standaloneR2cCoordinationEnabled.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)
+        R2CApplication.getAppCtxt()?.let { context ->
+            WifiRidScanPrefs.setEnabled(context, _wifiRidScanningEnabled.value)
+            ScanningService.requestWifiRidScanningRefresh(context)
+        }
         RemoteVideoControlPrefs.setEnabled(
             R2CApplication.getAppCtxt(),
             _remoteVideoControlEnabled.value,

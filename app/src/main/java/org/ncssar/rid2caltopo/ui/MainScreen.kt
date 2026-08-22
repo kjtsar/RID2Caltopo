@@ -69,11 +69,13 @@ import org.ncssar.rid2caltopo.app.ArchiveCleanupDirectoryOption
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.LogArchiveDayOption
 import org.ncssar.rid2caltopo.app.R2CActivity
+import org.ncssar.rid2caltopo.app.ScanningService
 import org.ncssar.rid2caltopo.app.canDeleteArchiveCleanupSelection
 import org.ncssar.rid2caltopo.app.defaultSelectedArchiveCleanupDirectories
 import org.ncssar.rid2caltopo.app.formatArchiveSize
 import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.data.AppUpdateAdvisory
+import org.ncssar.rid2caltopo.data.BluetoothRidTestPrefs
 import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
@@ -100,6 +102,7 @@ import org.ncssar.rid2caltopo.video.ComplianceAlertBell
 import org.ncssar.rid2caltopo.video.ComplianceAlertDialog
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge
 import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
+import org.opendroneid.android.bluetooth.DroneScoutBridgeStatusLogGate
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -379,6 +382,12 @@ fun MainScreen(
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
     var djiSeiHexDumpEnabled by remember { mutableStateOf(FfmpegBridge.isDjiSeiHexDumpEnabled()) }
     val context =  LocalContext.current
+    var bluetoothRidTestVariant by remember {
+        mutableStateOf(BluetoothRidTestPrefs.getVariant(context))
+    }
+    var bluetoothRidPeriodicRestart by remember {
+        mutableStateOf(BluetoothRidTestPrefs.isPeriodicRestartEnabled(context))
+    }
     var pendingDriveAction by remember { mutableStateOf<DriveSyncAction?>(null) }
     var pendingOrgExport by remember { mutableStateOf(false) }
     var pendingFaaExport by remember { mutableStateOf(false) }
@@ -443,6 +452,21 @@ fun MainScreen(
         signal = bridgeSignal,
         nowMonotonicMs = bridgeSignalClockMs,
     )
+    val bridgeStatusLogGate = remember { DroneScoutBridgeStatusLogGate() }
+    LaunchedEffect(
+        bridgeRssi,
+        bluetoothRidTestVariant.diagnosticsEnabled,
+    ) {
+        if (!bluetoothRidTestVariant.diagnosticsEnabled) {
+            bridgeStatusLogGate.reset()
+            return@LaunchedEffect
+        }
+        bridgeStatusLogGate.transitionMessage(
+            surface = "main",
+            signal = bridgeSignal,
+            nowMonotonicMs = bridgeSignalClockMs,
+        )?.let { CTDebug("BridgeStatus", it) }
+    }
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
     val appUpdateAdvisory by AppUpdateAdvisory.state.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
@@ -1560,6 +1584,11 @@ fun MainScreen(
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                 ) {
+                    Text(
+                        "Each selected day includes its text logs, matching JSON track archives, and any captured Android ANR traces.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
                     if (loadingLogArchiveDays) {
                         Row(modifier = Modifier.fillMaxWidth()) {
                             CircularProgressIndicator(modifier = Modifier.padding(end = 12.dp))
@@ -1966,6 +1995,47 @@ fun MainScreen(
                         "Research capture only. Logs every type-245 payload and can fill the diagnostic log quickly.",
                         style = MaterialTheme.typography.bodySmall
                     )
+                    if (BuildConfig.DEBUG) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                val variants = BluetoothRidTestPrefs.ScanVariant.values()
+                                bluetoothRidTestVariant = variants[
+                                    (bluetoothRidTestVariant.ordinal + 1) % variants.size
+                                ]
+                                BluetoothRidTestPrefs.setVariant(context, bluetoothRidTestVariant)
+                                if (!bluetoothRidTestVariant.diagnosticsEnabled) {
+                                    bluetoothRidPeriodicRestart = false
+                                    BluetoothRidTestPrefs.setPeriodicRestartEnabled(context, false)
+                                }
+                                ScanningService.requestBluetoothRidTestRefresh(context)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Bluetooth RID Test: ${bluetoothRidTestVariant.label}")
+                        }
+                        Button(
+                            onClick = {
+                                bluetoothRidPeriodicRestart = !bluetoothRidPeriodicRestart
+                                BluetoothRidTestPrefs.setPeriodicRestartEnabled(
+                                    context,
+                                    bluetoothRidPeriodicRestart
+                                )
+                                ScanningService.requestBluetoothRidTestRefresh(context)
+                            },
+                            enabled = bluetoothRidTestVariant.diagnosticsEnabled,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "2-minute scan restart: " +
+                                    if (bluetoothRidPeriodicRestart) "On" else "Off"
+                            )
+                        }
+                        Text(
+                            "Debug builds only. Each mode logs Bluetooth callback, message-type, PHY, and ingest counters every 5 seconds. Off restores the release scan.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = {

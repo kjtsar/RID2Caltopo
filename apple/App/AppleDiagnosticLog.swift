@@ -16,6 +16,7 @@ actor AppleDiagnosticLogStore {
     private var handle: FileHandle?
     private var currentURL: URL?
     private var rootURL: URL?
+    private var trackRootURL: URL?
     private var pendingLines: [String] = []
 
     func start(metadata: String) throws -> URL {
@@ -26,9 +27,11 @@ actor AppleDiagnosticLogStore {
         ).first else {
             throw CocoaError(.fileNoSuchFile)
         }
-        let root = documents
+        let appRoot = documents
             .appendingPathComponent("RID2Caltopo", isDirectory: true)
+        let root = appRoot
             .appendingPathComponent("Logs", isDirectory: true)
+        let trackRoot = appRoot.appendingPathComponent("Tracks", isDirectory: true)
         let day = Self.dayName(for: Date())
         let directory = root.appendingPathComponent(day, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -36,6 +39,7 @@ actor AppleDiagnosticLogStore {
         FileManager.default.createFile(atPath: destination.path, contents: nil)
         let handle = try FileHandle(forWritingTo: destination)
         self.rootURL = root
+        self.trackRootURL = trackRoot
         self.currentURL = destination
         self.handle = handle
 
@@ -116,6 +120,21 @@ actor AppleDiagnosticLogStore {
                     path: "\(day)/\(log.lastPathComponent)",
                     data: try Data(contentsOf: log)
                 ))
+            }
+            if let trackRootURL {
+                let trackDirectory = trackRootURL.appendingPathComponent(day, isDirectory: true)
+                let tracks = ((try? FileManager.default.contentsOfDirectory(
+                    at: trackDirectory,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                )) ?? []).filter { $0.pathExtension.lowercased() == "json" }
+                    .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                for track in tracks {
+                    entries.append(.init(
+                        path: "Tracks/\(day)/\(track.lastPathComponent)",
+                        data: try Data(contentsOf: track)
+                    ))
+                }
             }
         }
         guard entries.count > 1 else { throw CocoaError(.fileNoSuchFile) }
@@ -220,6 +239,12 @@ final class AppleDiagnosticsCenter: ObservableObject {
         } catch {
             status = "Log scan failed: \(error.localizedDescription)"
         }
+    }
+
+    func beginPackagingSession() async {
+        bundleURL = nil
+        status = "Select log days, then package a fresh bundle."
+        await refreshDays()
     }
 
     func prepareSelectedBundle() async {

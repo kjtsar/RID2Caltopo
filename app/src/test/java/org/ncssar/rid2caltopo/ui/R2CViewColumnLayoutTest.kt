@@ -21,4 +21,11 @@ class R2CViewColumnLayoutTest {
             R2CViewColumnLayout.waypointsReceivedHeaderWidthDp
         )
     }
+
+    @Test
+    fun ridStatusShowsOnlyAvailableDroneToBridgeRssi() {
+        assertEquals("D→Bridge -74 dBm", droneToBridgeRssiText(-74))
+        assertEquals(null, droneToBridgeRssiText(0))
+        assertEquals(null, droneToBridgeRssiText(-128))
+    }
 }

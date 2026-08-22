@@ -36,7 +36,8 @@ actor AppleTerrainElevationService {
         }).value {
             return OperationalTerrainSample(
                 elevationMeters: localSample.elevationMeters,
-                source: "usgs-geotiff-local-\(Int(localSample.horizontalResolutionMeters.rounded()))m"
+                source: "usgs-geotiff-local-\(Int(localSample.horizontalResolutionMeters.rounded()))m",
+                horizontalResolutionMeters: localSample.horizontalResolutionMeters
             )
         }
         let cached = load(key: key)

@@ -4,6 +4,8 @@ import R2CCore
 
 @MainActor
 final class RIDTrackViewModel: ObservableObject {
+    private static let deferredVideoLinkRetryNanoseconds: UInt64 = 2_000_000_000
+    private static let deferredVideoLinkRetryCount = 15
     @Published private(set) var tracks: [RidAircraftTrack] = []
     @Published private(set) var acceptedObservationCount = 0
     @Published private(set) var filteredObservationCount = 0
@@ -30,6 +32,7 @@ final class RIDTrackViewModel: ObservableObject {
     private var terrainTasks: [String: Task<Void, Never>] = [:]
     private var terrainRequestKeyByAircraftID: [String: String] = [:]
     private var terrainResolvedKeyByAircraftID: [String: String] = [:]
+    private var centerpointElevationCache: [String: (inputKey: String, sample: OperationalCenterpointElevation.Sample)] = [:]
     private var lastHorizontalAccuracyCodeByAircraftID: [String: UInt8] = [:]
     private var observationTasks: [String: Task<Void, Never>] = [:]
     private var aircraftMessageTasks: [String: Task<Void, Never>] = [:]
@@ -43,6 +46,7 @@ final class RIDTrackViewModel: ObservableObject {
     private var publicationSuppressionProvider: ((String) -> Bool)?
     private var peerConfirmationConsumer: ((TrackerCoordinationIdentity) -> Void)?
     private var peerConfirmationClearer: ((String) -> Void)?
+    private var pairedVideoActivityProvider: (() -> [String: Date])?
     private var pendingPublication: [String: [RidAircraftTrack]] = [:]
     private var publicationChains: [String: Task<Void, Never>] = [:]
     private var ownershipActivationTasks: [String: Task<Void, Never>] = [:]
@@ -64,7 +68,9 @@ final class RIDTrackViewModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled, let self else { return }
-                let inactive = await self.store.removeInactive()
+                let inactive = await self.store.removeInactive(
+                    pairedVideoLastActivityAt: self.pairedVideoActivityProvider?() ?? [:]
+                )
                 for track in inactive {
                     await self.archive(track)
                     self.peerCoordinator?.droneLost(remoteID: track.aircraftID)
@@ -219,6 +225,10 @@ final class RIDTrackViewModel: ObservableObject {
         }
     }
 
+    func configurePairedVideoActivity(_ provider: @escaping () -> [String: Date]) {
+        pairedVideoActivityProvider = provider
+    }
+
     private func noteRIDMessage(receivedAt: Date) {
         lastRIDMessageAt = max(lastRIDMessageAt ?? receivedAt, receivedAt)
         AppleApplicationCleanupCenter.shared.noteRIDMessage(receivedAt: receivedAt)
@@ -273,6 +283,49 @@ final class RIDTrackViewModel: ObservableObject {
                 await terrainService.sample(latitude: latitude, longitude: longitude)?.elevationMeters
             }
         )
+    }
+
+    func centerpointElevationFeet(
+        streamID: String,
+        observation: RidObservation,
+        headingDegrees: Double,
+        aglMeters: Double,
+        gimbalAngleDegrees: Double
+    ) async -> OperationalCenterpointElevation.Sample? {
+        guard headingDegrees.isFinite, aglMeters.isFinite, aglMeters >= 0,
+              gimbalAngleDegrees.isFinite, gimbalAngleDegrees < -0.1,
+              let altitudeMeters = observation.altitudeMeters, altitudeMeters.isFinite
+        else { return nil }
+        let latitudeKey = Int64((observation.latitude * 100_000).rounded())
+        let longitudeKey = Int64((observation.longitude * 100_000).rounded())
+        let altitudeKey = Int64((altitudeMeters * 2).rounded())
+        let aglKey = Int64((aglMeters * 2).rounded())
+        let headingKey = Int64((headingDegrees * 5).rounded())
+        let gimbalKey = Int64((gimbalAngleDegrees * 5).rounded())
+        let inputKey = "\(latitudeKey)|\(longitudeKey)|\(altitudeKey)|\(aglKey)|\(headingKey)|\(gimbalKey)"
+        if let cached = centerpointElevationCache[streamID], cached.inputKey == inputKey {
+            return cached.sample
+        }
+        let projection = await projectClueWithTerrain(
+            observation: observation,
+            headingDegrees: headingDegrees,
+            aglMeters: aglMeters,
+            gimbalAngleDegrees: gimbalAngleDegrees
+        )
+        guard let terrain = await terrainService.sample(
+            latitude: projection.latitude,
+            longitude: projection.longitude
+        ), terrain.elevationMeters.isFinite else { return nil }
+        let elevationFeet = Int((terrain.elevationMeters * 3.28084).rounded())
+        let resolution = terrain.horizontalResolutionMeters.flatMap { value in
+            value.isFinite && value > 0 ? max(1, Int(value.rounded())) : nil
+        }
+        let sample = OperationalCenterpointElevation.Sample(
+            elevationFeet: elevationFeet,
+            demResolutionMeters: resolution
+        )
+        centerpointElevationCache[streamID] = (inputKey, sample)
+        return sample
     }
 
     func terrainDerivedAglMeters(
@@ -769,9 +822,47 @@ final class RIDTrackViewModel: ObservableObject {
             remoteID,
         ], trackStartedAt: trackStartedAt, trackEndedAt: trackEndedAt)
         let description = CaltopoArchiveDescription.build(capturedVideoURL: videoURL)
-        await caltopoPublisher.finish(
+        let archivedTrack = await caltopoPublisher.finish(
             remoteID: remoteID,
             description: description
+        )
+        guard description.isEmpty, let archivedTrack else { return }
+        Task { [weak self] in
+            await self?.attachDeferredVideoLink(
+                to: archivedTrack,
+                designators: [identity?.mappedID ?? "", remoteID],
+                trackStartedAt: trackStartedAt,
+                trackEndedAt: trackEndedAt
+            )
+        }
+    }
+
+    private func attachDeferredVideoLink(
+        to archivedTrack: AppleArchivedCaltopoTrack,
+        designators: [String],
+        trackStartedAt: Date,
+        trackEndedAt: Date
+    ) async {
+        for _ in 0..<Self.deferredVideoLinkRetryCount {
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(nanoseconds: Self.deferredVideoLinkRetryNanoseconds)
+            guard let videoURL = peerCoordinator?.capturedVideoURL(
+                matching: designators,
+                trackStartedAt: trackStartedAt,
+                trackEndedAt: trackEndedAt
+            ) else { continue }
+            let description = CaltopoArchiveDescription.build(capturedVideoURL: videoURL)
+            guard !description.isEmpty else { return }
+            if await caltopoPublisher.updateArchivedDescription(
+                archivedTrack,
+                description: description
+            ) {
+                return
+            }
+        }
+        AppleLog.warning(
+            "CalTopo",
+            "Recording did not become linkable before the deferred CalTopo link deadline."
         )
     }
 }

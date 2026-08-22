@@ -19,6 +19,22 @@ import org.junit.Test
  */
 class CoordinateFormatterTest {
 
+    @Test
+    fun streamCoordinatePreference_restoresAcrossViewModelRecreationAndMigratesLegacyConfig() {
+        assertEquals(
+            CoordinateDisplayFormat.USNG,
+            restoredCoordinateDisplayFormat("usng", "decimal")
+        )
+        assertEquals(
+            CoordinateDisplayFormat.UTM,
+            restoredCoordinateDisplayFormat(null, "utm")
+        )
+        assertEquals(
+            CoordinateDisplayFormat.DECIMAL,
+            restoredCoordinateDisplayFormat("invalid", "usng")
+        )
+    }
+
     // ---------------------------------------------------------------------------
     // Decimal format (passthrough — confirms no regression from future refactors)
     // ---------------------------------------------------------------------------

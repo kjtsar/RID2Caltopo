@@ -14,6 +14,30 @@ import org.osmdroid.util.MapTileIndex
 
 class MapPaneArtifactOverlayStateTest {
     @Test
+    fun localDeviceMarkerOutline_buildsACompleteThreePixelHalo() {
+        val offsets = markerOutlineOffsets(radiusPx = 3).toSet()
+
+        assertTrue(0 to 0 in offsets)
+        assertTrue(-3 to 0 in offsets)
+        assertTrue(3 to 0 in offsets)
+        assertTrue(0 to -3 in offsets)
+        assertTrue(0 to 3 in offsets)
+        assertEquals(29, offsets.size)
+    }
+
+    @Test
+    fun mapAttribution_combinesSourcesIntoOneWidthResponsiveLabel() {
+        assertEquals(
+            "© OpenStreetMap contributors · DEM: USGS",
+            mapPaneAttributionText(contoursEnabled = false)
+        )
+        assertEquals(
+            "© OpenStreetMap contributors · DEM: USGS · Contours: USGS",
+            mapPaneAttributionText(contoursEnabled = true)
+        )
+    }
+
+    @Test
     fun demPlannerDefaultsToThirtyMetersAndPricesFinerProductsHigher() {
         val bounds = BoundingBox(39.75, -104.98, 39.73, -105.01)
         assertEquals(30, DemResolutionOption.values().first().meters)

@@ -22,7 +22,8 @@ import kotlin.math.roundToInt
 internal data class DemElevationSample(
     val elevationMeters: Double,
     val stale: Boolean,
-    val source: String
+    val source: String,
+    val horizontalResolutionMeters: Double? = null,
 )
 
 internal class DemElevationService(context: Context) {
@@ -83,7 +84,8 @@ internal class DemElevationService(context: Context) {
             val sample = DemElevationSample(
                 elevationMeters = localTiff.elevationMeters,
                 stale = false,
-                source = "usgs-geotiff-local-${localTiff.horizontalResolutionMeters.roundToInt()}m"
+                source = "usgs-geotiff-local-${localTiff.horizontalResolutionMeters.roundToInt()}m",
+                horizontalResolutionMeters = localTiff.horizontalResolutionMeters,
             )
             MapCacheDebug.log("dem local-geotiff key=$key elevM=${"%.2f".format(Locale.US, sample.elevationMeters)}")
             return@withContext sample
@@ -335,6 +337,7 @@ internal class DemElevationService(context: Context) {
         val jo = JSONObject()
         jo.put("elevationMeters", sample.elevationMeters)
         jo.put("source", sample.source)
+        sample.horizontalResolutionMeters?.let { jo.put("horizontalResolutionMeters", it) }
         return jo.toString().toByteArray(StandardCharsets.UTF_8)
     }
 
@@ -346,7 +349,9 @@ internal class DemElevationService(context: Context) {
             DemElevationSample(
                 elevationMeters = value,
                 stale = stale,
-                source = jo.optString("source", "cache")
+                source = jo.optString("source", "cache"),
+                horizontalResolutionMeters = jo.optDouble("horizontalResolutionMeters", Double.NaN)
+                    .takeIf { it.isFinite() && it > 0.0 },
             )
         } catch (_: Exception) {
             null

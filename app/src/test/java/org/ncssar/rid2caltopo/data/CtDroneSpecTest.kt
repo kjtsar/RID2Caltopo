@@ -520,6 +520,37 @@ class CtDroneSpecTest {
     }
 
     @Test
+    fun flightIdle_withoutPairedVideo_usesRidPeerIdle() {
+        assertEquals(29_999L, CaltopoClient.CombinedFlightIdleTimeInMsecForTests(
+            29_999L, 100_000L, false, 0L
+        ))
+    }
+
+    @Test
+    fun flightIdle_withActivePairedPublisher_staysActiveWithoutSei() {
+        assertEquals(0L, CaltopoClient.CombinedFlightIdleTimeInMsecForTests(
+            60_000L, 100_000L, true, 100_000L
+        ))
+    }
+
+    @Test
+    fun flightIdle_afterVideoStops_startsAtLaterPresenceLoss() {
+        assertEquals(29_999L, CaltopoClient.CombinedFlightIdleTimeInMsecForTests(
+            120_000L, 100_000L, false, 70_001L
+        ))
+        assertEquals(30_000L, CaltopoClient.CombinedFlightIdleTimeInMsecForTests(
+            120_000L, 100_000L, false, 70_000L
+        ))
+    }
+
+    @Test
+    fun flightIdle_recentRidWinsAfterVideoHasBeenGoneLonger() {
+        assertEquals(5_000L, CaltopoClient.CombinedFlightIdleTimeInMsecForTests(
+            5_000L, 100_000L, false, 40_000L
+        ))
+    }
+
+    @Test
     fun activeTrackNearHome_usesConfiguredNewTrackDelay() {
         val drone = CtDroneSpec("RID123")
         val newTrackDelayMs = 30_000L

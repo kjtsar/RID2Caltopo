@@ -23,6 +23,7 @@ public enum OperationalZipArchive {
     public static func encode(_ entries: [Entry], compress: Bool = false) throws -> Data {
         var output = Data()
         var central = Data()
+        let (dosTime, dosDate) = dosTimestamp(Date())
         for entry in entries {
             let path = try safePath(entry.path)
             guard let name = path.data(using: .utf8), name.count <= Int(UInt16.max), entry.data.count <= Int(UInt32.max) else {
@@ -35,14 +36,14 @@ public enum OperationalZipArchive {
             let crc = crc32(entry.data)
             output.appendLE(UInt32(0x04034b50))
             output.appendLE(UInt16(20)); output.appendLE(UInt16(0)); output.appendLE(method)
-            output.appendLE(UInt16(0)); output.appendLE(UInt16(0)); output.appendLE(crc)
+            output.appendLE(dosTime); output.appendLE(dosDate); output.appendLE(crc)
             output.appendLE(UInt32(payload.count)); output.appendLE(UInt32(entry.data.count))
             output.appendLE(UInt16(name.count)); output.appendLE(UInt16(0))
             output.append(name); output.append(payload)
 
             central.appendLE(UInt32(0x02014b50))
             central.appendLE(UInt16(20)); central.appendLE(UInt16(20)); central.appendLE(UInt16(0)); central.appendLE(method)
-            central.appendLE(UInt16(0)); central.appendLE(UInt16(0)); central.appendLE(crc)
+            central.appendLE(dosTime); central.appendLE(dosDate); central.appendLE(crc)
             central.appendLE(UInt32(payload.count)); central.appendLE(UInt32(entry.data.count))
             central.appendLE(UInt16(name.count)); central.appendLE(UInt16(0)); central.appendLE(UInt16(0))
             central.appendLE(UInt16(0)); central.appendLE(UInt16(0)); central.appendLE(UInt32(0)); central.appendLE(offset)
@@ -58,6 +59,22 @@ public enum OperationalZipArchive {
         output.appendLE(UInt16(entries.count)); output.appendLE(UInt16(entries.count))
         output.appendLE(UInt32(central.count)); output.appendLE(centralOffset); output.appendLE(UInt16(0))
         return output
+    }
+
+    private static func dosTimestamp(_ date: Date) -> (time: UInt16, date: UInt16) {
+        let components = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second],
+            from: date
+        )
+        let year = min(2107, max(1980, components.year ?? 1980))
+        let month = min(12, max(1, components.month ?? 1))
+        let day = min(31, max(1, components.day ?? 1))
+        let hour = min(23, max(0, components.hour ?? 0))
+        let minute = min(59, max(0, components.minute ?? 0))
+        let second = min(59, max(0, components.second ?? 0))
+        let dosTime = UInt16((hour << 11) | (minute << 5) | (second / 2))
+        let dosDate = UInt16(((year - 1980) << 9) | (month << 5) | day)
+        return (dosTime, dosDate)
     }
 
     public static func decode(

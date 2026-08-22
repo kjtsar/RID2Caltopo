@@ -60,8 +60,11 @@ object DroneScoutBridgeMonitor {
         staleAfterMs: Long = SIGNAL_STALE_AFTER_MS,
     ): Int? {
         if (signal == null) return null
-        val ageMs = nowMonotonicMs - signal.lastSeenMonotonicMs
-        return signal.rssiDbm.takeIf { ageMs in 0..staleAfterMs }
+        // Compose's display clock is refreshed periodically. A packet can arrive after that
+        // snapshot, making its timestamp slightly newer than nowMonotonicMs. It is fresh, not a
+        // clock reversal; clamping prevents the Bridge RSSI indicator from flashing blank.
+        val ageMs = (nowMonotonicMs - signal.lastSeenMonotonicMs).coerceAtLeast(0L)
+        return signal.rssiDbm.takeIf { ageMs <= staleAfterMs }
     }
 
     fun toggleAudioMuted() {
@@ -118,5 +121,43 @@ internal class DroneScoutBridgeLossAnnouncementGate(
         if (lossActive) return false
         lossActive = true
         return !muted
+    }
+}
+
+/**
+ * Produces one diagnostic record when the bridge meter first appears and whenever it changes
+ * between visible and blank. RSSI fluctuations while the meter remains visible are intentionally
+ * suppressed so a field log remains readable.
+ */
+internal class DroneScoutBridgeStatusLogGate {
+    private var lastAvailability: Boolean? = null
+
+    fun transitionMessage(
+        surface: String,
+        signal: DroneScoutBridgeSignal?,
+        nowMonotonicMs: Long,
+    ): String? {
+        val ageMs = signal?.let {
+            (nowMonotonicMs - it.lastSeenMonotonicMs).coerceAtLeast(0L)
+        }
+        val rssi = DroneScoutBridgeMonitor.currentRssi(signal, nowMonotonicMs)
+        val available = rssi != null
+        if (lastAvailability == available) return null
+        lastAvailability = available
+
+        val reason = when {
+            signal == null -> "no_signal"
+            ageMs == null -> "no_signal"
+            ageMs > DroneScoutBridgeMonitor.SIGNAL_STALE_AFTER_MS -> "stale"
+            else -> "fresh"
+        }
+        return "surface=$surface state=${if (available) "visible" else "blank"} " +
+            "rssi=${rssi ?: signal?.rssiDbm ?: "none"} ageMs=${ageMs ?: "none"} " +
+            "eventCount=${signal?.eventCount ?: 0L} reason=$reason " +
+            "staleAfterMs=${DroneScoutBridgeMonitor.SIGNAL_STALE_AFTER_MS}"
+    }
+
+    fun reset() {
+        lastAvailability = null
     }
 }

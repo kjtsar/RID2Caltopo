@@ -66,7 +66,7 @@ The expected CalTopo camera fields map as follows after a controlled Matrice
 
 | CalTopo field | Candidate encoding | Confidence |
 | --- | --- | --- |
-| `camera:azimuth` | tag 4, offset 3, unsigned 32-bit binary angle (`raw * 360 / 2^32`), then subtract 90° and normalize | Field-validated |
+| `camera:azimuth` | tag 4, offset 3, unsigned 32-bit binary angle (`raw * 360 / 2^32`), then convert magnetic-east/counter-clockwise to true-north/clockwise as `90° - raw + declination` | Field-validated |
 | raw gimbal tilt | tag 4, offset 11, the same binary angle minus 90°, normalized signed | High |
 | `camera:fov_width` | tag 10, offset 1, unsigned 32-bit / 256 | High |
 | `camera:fov_height` | tag 10, offset 5, unsigned 32-bit / 256 | High |
@@ -76,6 +76,13 @@ The expected CalTopo camera fields map as follows after a controlled Matrice
 | local north displacement | tag 4, signed 32-bit millimetres split low word at offsets 15-16 and high word at 21-22 | Field-validated |
 | local east displacement | tag 4, signed 32-bit millimetres split low word at offsets 17-18 and high word at 23-24 | Field-validated |
 | down coordinate | tag 4, signed 32-bit millimetres split low word at offsets 19-20 and high word at 25-26 | Field-validated |
+
+No independently validated aircraft-yaw/compass-heading field has been found in
+this payload. In the August 21 hover-and-rotate capture, treating tag 4 offset
+15 as another binary angle appeared to reproduce the turns, but that
+interpretation is invalid: offsets 15-18 are the already field-validated low
+words of north/east position. The SEI camera azimuth can differ from aircraft
+heading when the gimbal stabilizes or yaws relative to the airframe.
 
 The FOV fields move with camera and zoom changes. Their ratio is approximately
 1.778 for 16:9 imagery and exactly 1.25 for the 5:4 thermal image, which is
@@ -112,7 +119,8 @@ while displaying a live H.264 stream. A complete sample received within three
 seconds of a position observation can supply `camera:azimuth`, `camera:tilt`,
 `camera:fov_width`, and `camera:fov_height` without delaying position
 publication. A fresh SEI camera azimuth also seeds clue heading ahead of
-movement-derived or RID direction and remains operator-adjustable. Tilt
+movement-derived or RID direction and remains operator-adjustable. It must not
+be described as airframe compass heading. Tilt
 continues to seed clue reports, while upward
 or horizon-facing tilt safely leaves the projected clue at the aircraft
 position instead of inventing a ground intersection.

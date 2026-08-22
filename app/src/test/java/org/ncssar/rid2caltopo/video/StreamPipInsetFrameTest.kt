@@ -1,9 +1,57 @@
 package org.ncssar.rid2caltopo.video
 
+import CenterpointElevationSample
+import androidx.compose.ui.geometry.Offset
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StreamPipInsetFrameTest {
+    @Test
+    fun splitDividerDrag_changesFractionUsingScreenPixels() {
+        assertEquals(0.6f, adjustedSplitFraction(0.5f, 100f, 1000f), 0.0001f)
+        assertEquals(0.4f, adjustedSplitFraction(0.5f, -100f, 1000f), 0.0001f)
+    }
+
+    @Test
+    fun splitDividerDrag_reachesCollapsedEdgeStates() {
+        assertEquals(MAX_SPLIT_FRACTION, adjustedSplitFraction(0.5f, 1000f, 1000f), 0f)
+        assertEquals(MIN_SPLIT_FRACTION, adjustedSplitFraction(0.5f, -1000f, 1000f), 0f)
+        assertEquals(MIN_SPLIT_FRACTION, adjustedSplitFraction(0f, 100f, 0f), 0f)
+    }
+
+    @Test
+    fun splitDividerEdgeStates_selectSinglePaneLayoutsWithoutLosingTheHandle() {
+        assertEquals(StreamsLayoutMode.Map, layoutModeForSplitFraction(MIN_SPLIT_FRACTION))
+        assertEquals(StreamsLayoutMode.Both, layoutModeForSplitFraction(0.5f))
+        assertEquals(StreamsLayoutMode.Streams, layoutModeForSplitFraction(MAX_SPLIT_FRACTION))
+    }
+
+    @Test
+    fun splitDividerEdgeStates_leaveHalfTheDragPadVisible() {
+        assertEquals(-24f, splitDividerOffsetPx(0f, 1000f, 48f), 0f)
+        assertEquals(976f, splitDividerOffsetPx(1f, 1000f, 48f), 0f)
+    }
+
+    @Test
+    fun splitDividerEdgeStates_keepTheFullTouchTargetInsideSystemGestureEdges() {
+        assertEquals(0f, splitDividerTouchOffsetPx(0f, 1000f, 48f), 0f)
+        assertEquals(476f, splitDividerTouchOffsetPx(0.5f, 1000f, 48f), 0f)
+        assertEquals(952f, splitDividerTouchOffsetPx(1f, 1000f, 48f), 0f)
+        assertEquals(0f, splitDividerTouchOffsetPx(0f, 1000f, 96f), 0f)
+        assertEquals(452f, splitDividerTouchOffsetPx(0.5f, 1000f, 96f), 0f)
+        assertEquals(904f, splitDividerTouchOffsetPx(1f, 1000f, 96f), 0f)
+    }
+
+    @Test
+    fun splitDividerDrag_snapsWithinTwoHandleWidthsOfEitherEdge() {
+        assertEquals(MIN_SPLIT_FRACTION, snappedSplitFraction(0.096f, 1000f, 48f), 0f)
+        assertEquals(0.097f, snappedSplitFraction(0.097f, 1000f, 48f), 0f)
+        assertEquals(MAX_SPLIT_FRACTION, snappedSplitFraction(0.904f, 1000f, 48f), 0f)
+        assertEquals(0.903f, snappedSplitFraction(0.903f, 1000f, 48f), 0f)
+    }
+
     @Test
     fun streamClueCaptureButton_isVisibleOnlyForInteractiveLiveStreams() {
         assertEquals(true, shouldShowStreamClueCaptureButton(true, false, StreamState.LIVE))
@@ -11,6 +59,27 @@ class StreamPipInsetFrameTest {
         assertEquals(false, shouldShowStreamClueCaptureButton(true, true, StreamState.LIVE))
         assertEquals(false, shouldShowStreamClueCaptureButton(true, false, StreamState.CONNECTING))
         assertEquals(false, shouldShowStreamClueCaptureButton(true, false, StreamState.ERROR))
+    }
+
+    @Test
+    fun centerpointToggleTap_acceptsOnlyTheConfiguredCenterRadius() {
+        assertTrue(isNearStreamCenter(Offset(500f, 300f), 1000f, 600f, 80f))
+        assertTrue(isNearStreamCenter(Offset(560f, 340f), 1000f, 600f, 80f))
+        assertFalse(isNearStreamCenter(Offset(581f, 300f), 1000f, 600f, 80f))
+        assertFalse(isNearStreamCenter(Offset(500f, 300f), 0f, 600f, 80f))
+    }
+
+    @Test
+    fun centerpointElevationLabel_distinguishesKnownResolutionFromOnlineDEM() {
+        assertEquals(
+            "4812' MSL · 1m DEM",
+            centerpointElevationLabel(CenterpointElevationSample(39.0, -121.0, 4812, 1)),
+        )
+        assertEquals(
+            "4812' MSL · USGS DEM",
+            centerpointElevationLabel(CenterpointElevationSample(39.0, -121.0, 4812, null)),
+        )
+        assertEquals("--' MSL", centerpointElevationLabel(null))
     }
 
     @Test

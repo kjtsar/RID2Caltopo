@@ -511,7 +511,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     }
 
     override fun onLocalTrackFinished(remoteId: String, mappedId: String, reason: String) {
-        clearInactivePromptOnly(remoteId, "local track finished: $reason")
+        clearFinishedFlightConfirmationState(remoteId, "local track finished: $reason")
     }
 
     fun requestDroneConfirmation(drone: CtDroneSpec) {
@@ -735,7 +735,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         queueConfirmationIfNeeded(droneSpec, "first RID sighting")
     }
 
-    /** Active RID state is scoped by remoteId; confirmation decisions are session-scoped. */
+    /** Active flight state is scoped by remoteId. */
     private fun currentFlightRemoteId(drone: CtDroneSpec): String? {
         if (!drone.isActive) return null
         return drone.remoteId.takeIf { it.isNotBlank() }
@@ -744,14 +744,12 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private fun queueConfirmationIfNeeded(drone: CtDroneSpec, reason: String): Boolean {
         if (_pendingDroneConfirmation.value != null) return false
         val remoteId = drone.remoteId.takeIf { it.isNotBlank() } ?: return false
-        // Save and Ignore are operator decisions for this app session. A temporary RID
-        // outage can end/recreate a local track even while matching video/SEI remains
-        // live, and must not resurrect the confirmation panel for the same remoteId.
+        // A saved confirmation is scoped to the current flight. The track lifecycle keeps a
+        // flight active across RID loss while SEI position is live or the drone is distant.
         if (remoteId in promptedCurrentFlightRemoteIds ||
             CaltopoClient.IsSessionUnknownDrone(remoteId) ||
             drone.isLocalArchiveOnly ||
             remoteId in confirmedCurrentFlightRemoteIds ||
-            CaltopoClient.IsSessionDroneConfirmed(remoteId) ||
             CaltopoClient.IsCurrentPeerDroneConfirmed(remoteId)
         ) {
             return false
@@ -788,6 +786,14 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         } else if (removedPrompt) {
             CTDebug(tag, "Clearing inactive undecided prompt state for $trimmedRemoteId: $reason")
         }
+    }
+
+    private fun clearFinishedFlightConfirmationState(remoteId: String, reason: String) {
+        val trimmedRemoteId = remoteId.trim()
+        if (trimmedRemoteId.isEmpty()) return
+        confirmedCurrentFlightRemoteIds.remove(trimmedRemoteId)
+        CaltopoClient.ClearCurrentPeerDroneConfirmation(trimmedRemoteId)
+        clearInactivePromptOnly(trimmedRemoteId, reason)
     }
 
     private fun buildConfirmationState(drone: CtDroneSpec): DroneSpecConfirmationUiState {

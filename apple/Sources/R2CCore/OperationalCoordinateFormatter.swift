@@ -7,6 +7,10 @@ public enum OperationalCoordinateDisplayFormat: String, CaseIterable, Codable, S
 
     public var id: String { rawValue }
 
+    public static func restored(from rawValue: String?) -> Self {
+        rawValue.flatMap(Self.init(rawValue:)) ?? .decimal
+    }
+
     public var label: String {
         switch self {
         case .decimal: "Decimal"

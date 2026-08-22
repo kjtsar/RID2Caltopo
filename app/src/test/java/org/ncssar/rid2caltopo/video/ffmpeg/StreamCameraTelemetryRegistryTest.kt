@@ -34,6 +34,7 @@ class StreamCameraTelemetryRegistryTest {
         // Host Android stubs return zero declination; production GeomagneticField
         // supplies the location/date-specific magnetic-to-true correction.
         assertEquals(338.54, fresh?.azimuthDeg ?: 0.0, 1e-9)
+        assertEquals(21.46, fresh?.fovAzimuthDeg ?: 0.0, 1e-9)
         assertNull(fresh?.courseDeg)
         assertEquals(-26.768848384424192, fresh?.tiltDeg ?: 0.0, 1e-9)
         assertEquals(111.46, fresh?.rawCameraAzimuthDeg ?: 0.0, 1e-9)
@@ -83,6 +84,7 @@ class StreamCameraTelemetryRegistryTest {
         assertEquals(2.5, sample?.relativeUpMeters ?: 0.0, 0.0)
         assertEquals(45.0, sample?.courseDeg ?: 0.0, 1e-9)
         assertEquals(14.7, sample?.azimuthDeg ?: 0.0, 1e-9)
+        assertEquals(345.3, sample?.fovAzimuthDeg ?: 0.0, 1e-9)
         StreamCameraTelemetryRegistry.clear("WRAP")
     }
 
@@ -170,12 +172,111 @@ class StreamCameraTelemetryRegistryTest {
     }
 
     @Test
+    fun validatedSeiPositionContinuesAfterRidAnchorBecomesStale() {
+        val base = FfmpegTelemetry(
+            sourceTag = "dji-sei-245",
+            sourceTimestampUs = 1_000_000,
+            gimbalPitchDeg = -90.0,
+            cameraYawDeg = 75.0,
+            horizontalFovDeg = 37.7,
+            verticalFovDeg = 21.2,
+            latitude = 39.0,
+            longitude = -121.0,
+            altitudeMeters = 500.0,
+            djiNorthMm = 0,
+            djiEastMm = 0,
+            djiDownMm = -500_000,
+        )
+        StreamCameraTelemetryRegistry.update("CONTINUE", base, nowMs = 1_000)
+        val validated = StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
+            "CONTINUE", 39.0, -121.0, nowMs = 1_000
+        )
+        assertEquals(39.0, validated?.latitudeDeg ?: 0.0, 1e-9)
+
+        StreamCameraTelemetryRegistry.update(
+            "CONTINUE",
+            base.copy(sourceTimestampUs = 2_000_000, djiNorthMm = 50_000),
+            nowMs = 2_000,
+        )
+        val continued = StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
+            "CONTINUE", 39.0, -121.0, nowMs = 2_000
+        )
+        assertEquals(50.0, continued?.northMeters ?: 0.0, 1e-9)
+        StreamCameraTelemetryRegistry.clear("CONTINUE")
+    }
+
+    @Test
+    fun unvalidatedSeiPositionIsWithheldButAzimuthRemainsAvailable() {
+        StreamCameraTelemetryRegistry.update(
+            "UNVALIDATED",
+            FfmpegTelemetry(
+                sourceTag = "dji-sei-245",
+                sourceTimestampUs = 1_000_000,
+                gimbalPitchDeg = -90.0,
+                cameraYawDeg = 75.0,
+                horizontalFovDeg = 37.7,
+                verticalFovDeg = 21.2,
+                latitude = 39.0,
+                longitude = -121.0,
+                altitudeMeters = 500.0,
+                djiNorthMm = 0,
+                djiEastMm = 0,
+                djiDownMm = -500_000,
+            ),
+            nowMs = 1_000,
+        )
+        val sample = StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
+            "UNVALIDATED", 40.0, -121.0, nowMs = 1_000
+        )
+        assertNull(sample?.latitudeDeg)
+        assertNull(sample?.longitudeDeg)
+        assertEquals(15.0, sample?.azimuthDeg ?: 0.0, 1e-9)
+        StreamCameraTelemetryRegistry.clear("UNVALIDATED")
+    }
+
+    @Test
+    fun seiPositionRequiresRidValidationAgainAfterSourceTimestampRestart() {
+        val base = FfmpegTelemetry(
+            sourceTag = "dji-sei-245",
+            sourceTimestampUs = 5_000_000,
+            gimbalPitchDeg = -90.0,
+            cameraYawDeg = 75.0,
+            horizontalFovDeg = 37.7,
+            verticalFovDeg = 21.2,
+            latitude = 39.0,
+            longitude = -121.0,
+            altitudeMeters = 500.0,
+            djiNorthMm = 0,
+            djiEastMm = 0,
+            djiDownMm = -500_000,
+        )
+        StreamCameraTelemetryRegistry.update("REVALIDATE", base, nowMs = 1_000)
+        assertEquals(39.0, StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
+            "REVALIDATE", 39.0, -121.0, nowMs = 1_000
+        )?.latitudeDeg ?: 0.0, 1e-9)
+
+        StreamCameraTelemetryRegistry.update(
+            "REVALIDATE",
+            base.copy(sourceTimestampUs = 1_000_000, latitude = 40.0),
+            nowMs = 2_000,
+        )
+        assertNull(StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
+            "REVALIDATE", 39.0, -121.0, nowMs = 2_000
+        )?.latitudeDeg)
+        StreamCameraTelemetryRegistry.clear("REVALIDATE")
+    }
+
+    @Test
     fun orientationNormalizesSeiAzimuthAndUsesTwoPointTiltCalibration() {
         assertEquals(99.13, DjiCameraOrientation.trueAzimuthDeg(5.0, 14.13) ?: 0.0, 1e-9)
         assertEquals(23.33, DjiCameraOrientation.trueAzimuthDeg(80.8, 14.13) ?: 0.0, 1e-9)
         assertEquals(105.0, DjiCameraOrientation.trueAzimuthDeg(-1.0, 14.0) ?: 0.0, 0.0)
         assertNull(DjiCameraOrientation.trueAzimuthDeg(null, 14.0))
         assertNull(DjiCameraOrientation.trueAzimuthDeg(80.8, null))
+        assertEquals(289.13, DjiCameraOrientation.clockwiseFovAzimuthDeg(5.0, 14.13) ?: 0.0, 1e-9)
+        assertEquals(4.93, DjiCameraOrientation.clockwiseFovAzimuthDeg(80.8, 14.13) ?: 0.0, 1e-9)
+        assertNull(DjiCameraOrientation.clockwiseFovAzimuthDeg(null, 14.0))
+        assertNull(DjiCameraOrientation.clockwiseFovAzimuthDeg(80.8, null))
         assertEquals(-90.0, DjiCameraOrientation.calibratedTiltDeg(-90.0) ?: 0.0, 0.0)
         assertEquals(0.0, DjiCameraOrientation.calibratedTiltDeg(-14.5625) ?: 1.0, 0.0)
         assertEquals(-11.86, DjiCameraOrientation.calibratedTiltDeg(-24.5) ?: 0.0, 0.02)

@@ -174,6 +174,20 @@ public enum OperationalClueGeometry {
         return RidHeading.normalized(90 - seiCameraAzimuthDegrees + magneticDeclinationDegrees)
     }
 
+    /// Clockwise camera bearing for the Map Pane FOV rays. The controlled M4TD
+    /// pan test showed that the SEI tag-4 value increases clockwise, so this
+    /// display path must preserve that motion instead of using the legacy
+    /// CalTopo camera conversion above.
+    public static func djiClockwiseFovAzimuthDegrees(
+        seiCameraAzimuthDegrees: Double?,
+        magneticDeclinationDegrees: Double?
+    ) -> Double? {
+        guard let seiCameraAzimuthDegrees, seiCameraAzimuthDegrees.isFinite,
+              let magneticDeclinationDegrees, magneticDeclinationDegrees.isFinite
+        else { return nil }
+        return RidHeading.normalized(seiCameraAzimuthDegrees - 90 + magneticDeclinationDegrees)
+    }
+
     /// Matrice 4TD calibration: raw -90 is down; controlled raw -14.5625 is horizontal.
     public static func djiCalibratedTiltDegrees(rawTiltDegrees: Double?) -> Double? {
         guard let rawTiltDegrees, rawTiltDegrees.isFinite else { return nil }
@@ -476,6 +490,39 @@ public enum OperationalClueGeometry {
             cos(angularDistance) - sin(latitude1) * sin(latitude2)
         )
         return (latitude2 * 180 / .pi, longitude2 * 180 / .pi)
+    }
+}
+
+public enum OperationalCenterpointElevation {
+    public struct Sample: Sendable, Equatable {
+        public let elevationFeet: Int
+        public let demResolutionMeters: Int?
+
+        public init(elevationFeet: Int, demResolutionMeters: Int?) {
+            self.elevationFeet = elevationFeet
+            self.demResolutionMeters = demResolutionMeters
+        }
+    }
+
+    public static func displayText(_ sample: Sample?) -> String {
+        guard let sample else { return "--' MSL" }
+        if let resolution = sample.demResolutionMeters {
+            return "\(sample.elevationFeet)' MSL · \(resolution)m DEM"
+        }
+        return "\(sample.elevationFeet)' MSL · USGS DEM"
+    }
+
+    public static func isNearCenter(
+        x: Double,
+        y: Double,
+        width: Double,
+        height: Double,
+        radius: Double
+    ) -> Bool {
+        guard x.isFinite, y.isFinite, width > 0, height > 0, radius > 0 else { return false }
+        let dx = x - width / 2
+        let dy = y - height / 2
+        return dx * dx + dy * dy <= radius * radius
     }
 }
 

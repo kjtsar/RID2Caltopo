@@ -51,6 +51,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.savedstate.SavedStateRegistryOwner
@@ -145,6 +146,24 @@ internal fun buildLogArchiveEntryName(rawName: String?): String {
     return if (baseName.lowercase(Locale.US).endsWith(".txt")) baseName else "$baseName.txt"
 }
 
+internal fun isDiagnosticBundleFile(rawName: String?, mimeType: String?): Boolean {
+    val extension = rawName?.substringAfterLast('.', missingDelimiterValue = "")?.lowercase(Locale.US)
+    return extension == "txt" || extension == "json" || mimeType == "text/plain"
+}
+
+internal fun buildDiagnosticArchiveEntryName(relativePath: String, mimeType: String?): String {
+    val normalized = relativePath.trim('/').ifBlank { "log_unknown" }
+    val parent = normalized.substringBeforeLast('/', missingDelimiterValue = "")
+    val leaf = normalized.substringAfterLast('/')
+    val extension = leaf.substringAfterLast('.', missingDelimiterValue = "").lowercase(Locale.US)
+    val archiveLeaf = if (extension == "json" || mimeType == "application/json") {
+        leaf
+    } else {
+        buildLogArchiveEntryName(leaf)
+    }
+    return if (parent.isBlank()) archiveLeaf else "$parent/$archiveLeaf"
+}
+
 internal fun shouldShowBluetoothDisabledPanel(
     adapterPresent: Boolean,
     bluetoothEnabled: Boolean,
@@ -221,6 +240,11 @@ private fun TrackerReauthenticationDialog(
 
 internal fun shouldOpenTrackerReauthentication(browserAlreadyOpen: Boolean): Boolean =
     !browserAlreadyOpen
+
+internal fun shouldRetryTrackerReauthenticationAfterBrowserReturn(
+    browserWasOpen: Boolean,
+    pendingUrl: String?,
+): Boolean = browserWasOpen && !pendingUrl.isNullOrBlank()
 
 @Composable
 private fun VideoStreamRequestDialog(
@@ -629,12 +653,36 @@ class R2CActivity :
             val selectedDirs = selectedDirectoryNames.distinct().mapNotNull { dirName ->
                 archiveDir.findFile(dirName)?.takeIf { it.isDirectory }
             }
-            val logFiles = selectedDirs.flatMap { dir ->
-                dir.listFiles()
-                    .filter { it.type == "text/plain" }
-                    .map { dir to it }
+            data class DiagnosticDocument(
+                val directoryName: String,
+                val relativePath: String,
+                val document: DocumentFile,
+            )
+            fun collectDiagnosticDocuments(
+                directory: DocumentFile,
+                directoryName: String,
+                relativePrefix: String = "",
+            ): List<DiagnosticDocument> = directory.listFiles().flatMap { child ->
+                val name = child.name ?: return@flatMap emptyList()
+                val relativePath = if (relativePrefix.isBlank()) name else "$relativePrefix/$name"
+                when {
+                    child.isDirectory -> collectDiagnosticDocuments(child, directoryName, relativePath)
+                    isDiagnosticBundleFile(name, child.type) -> listOf(
+                        DiagnosticDocument(directoryName, relativePath, child)
+                    )
+                    else -> emptyList()
+                }
             }
-            if (logFiles.isEmpty()) {
+            val diagnosticFiles = selectedDirs.flatMap { dir ->
+                collectDiagnosticDocuments(dir, dir.name ?: "tracks")
+            }
+            val logFileCount = diagnosticFiles.count {
+                !it.relativePath.lowercase(Locale.US).endsWith(".json")
+            }
+            val trackFileCount = diagnosticFiles.count {
+                it.relativePath.lowercase(Locale.US).endsWith(".json")
+            }
+            if (logFileCount == 0) {
                 CTError(TAG, "zipAndEmailSelectedLogs(): no log files found in selected dirs")
                 return@withContext null
             }
@@ -645,12 +693,11 @@ class R2CActivity :
             try {
                 ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
                     val resolver = context.contentResolver
-                    for ((dir, logDoc) in logFiles) {
-                        val dirName = dir.name ?: "logs"
-                        val entryName = "$dirName/${buildLogArchiveEntryName(logDoc.name)}"
-                        resolver.openInputStream(logDoc.uri)?.use { inputStream ->
+                    for (diagnostic in diagnosticFiles) {
+                        val entryName = "${diagnostic.directoryName}/${buildDiagnosticArchiveEntryName(diagnostic.relativePath, diagnostic.document.type)}"
+                        resolver.openInputStream(diagnostic.document.uri)?.use { inputStream ->
                             val entry = ZipEntry(entryName)
-                            val lastModified = logDoc.lastModified()
+                            val lastModified = diagnostic.document.lastModified()
                             if (lastModified > 0L) {
                                 entry.time = lastModified
                             }
@@ -671,14 +718,15 @@ class R2CActivity :
                             zos.closeEntry()
                         }
                 }
-                Triple(zipFile, selectedDirs.size, logFiles.size)
+                Triple(zipFile, selectedDirs.size, Pair(logFileCount, trackFileCount))
             } catch (e: Exception) {
                 CTError(TAG, "zipAndEmailSelectedLogs(): failed to create/share zip", e)
                 null
             }
         } ?: return
 
-        val (zipFile, selectedDirCount, logFileCount) = zipResult
+        val (zipFile, selectedDirCount, fileCounts) = zipResult
+        val (logFileCount, trackFileCount) = fileCounts
         val dateTag = SimpleDateFormat("ddMMMyyyy", Locale.US).format(Date())
         val sharedUri = FileProvider.getUriForFile(
             context, "${context.packageName}.fileprovider", zipFile
@@ -689,7 +737,7 @@ class R2CActivity :
             putExtra(Intent.EXTRA_EMAIL, arrayOf("kjtsar@kjt.us"))
             putExtra(
                 Intent.EXTRA_SUBJECT,
-                "RID2Caltopo Logs $dateTag (${selectedDirCount} day${if (selectedDirCount == 1) "" else "s"}, ${logFileCount} log${if (logFileCount == 1) "" else "s"})"
+                "RID2Caltopo Diagnostics $dateTag (${selectedDirCount} day${if (selectedDirCount == 1) "" else "s"}, ${logFileCount} log${if (logFileCount == 1) "" else "s"}, ${trackFileCount} track${if (trackFileCount == 1) "" else "s"})"
             )
             putExtra(Intent.EXTRA_STREAM, sharedUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -802,7 +850,21 @@ class R2CActivity :
 
     override fun onResume() {
         super.onResume()
+        val retryTrackerReauthentication = shouldRetryTrackerReauthenticationAfterBrowserReturn(
+            browserWasOpen = trackerReauthenticationBrowserOpen,
+            pendingUrl = pendingTrackerReauthenticationUrl,
+        )
         trackerReauthenticationBrowserOpen = false
+        if (retryTrackerReauthentication) {
+            pendingTrackerReauthenticationUrl = null
+            CTDebug(
+                TAG,
+                "Returned from Tracker sign-in browser without an app callback; retrying Tracker access",
+            )
+            TrackerEnrollmentClient.retryManagedConfigurationBootstrap(this)
+            R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+                .resumeAfterReauthentication()
+        }
         reloadExternalDisplayConfig()
         refreshBluetoothDisabledState("resume")
     }

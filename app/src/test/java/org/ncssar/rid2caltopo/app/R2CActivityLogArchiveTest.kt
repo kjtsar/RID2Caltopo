@@ -53,9 +53,57 @@ class R2CActivityLogArchiveTest {
     }
 
     @Test
+    fun diagnosticBundleIncludesTextLogsAndJsonTracksOnly() {
+        assertTrue(isDiagnosticBundleFile("Log_22Aug.txt", "text/plain"))
+        assertTrue(isDiagnosticBundleFile("1SAR7-track.json", "application/json"))
+        assertFalse(isDiagnosticBundleFile("flight.mp4", "video/mp4"))
+        assertFalse(isDiagnosticBundleFile("clues.kmz", "application/vnd.google-earth.kmz"))
+    }
+
+    @Test
+    fun diagnosticBundlePreservesTrackPathAndNormalizesLogSuffix() {
+        assertEquals(
+            "1sar7/track.json",
+            buildDiagnosticArchiveEntryName("1sar7/track.json", "application/json")
+        )
+        assertEquals(
+            "Log_22Aug.txt",
+            buildDiagnosticArchiveEntryName("Log_22Aug.txt.txt", "text/plain")
+        )
+    }
+
+    @Test
     fun trackerReauthenticationOpensOnlyOneBrowserAttemptAtATime() {
         assertTrue(shouldOpenTrackerReauthentication(browserAlreadyOpen = false))
         assertFalse(shouldOpenTrackerReauthentication(browserAlreadyOpen = true))
+    }
+
+    @Test
+    fun returningFromTrackerBrowserRetriesOnlyWhenReauthenticationIsPending() {
+        assertTrue(
+            shouldRetryTrackerReauthenticationAfterBrowserReturn(
+                browserWasOpen = true,
+                pendingUrl = "https://r2c-tracker.com/reauth",
+            )
+        )
+        assertFalse(
+            shouldRetryTrackerReauthenticationAfterBrowserReturn(
+                browserWasOpen = false,
+                pendingUrl = "https://r2c-tracker.com/reauth",
+            )
+        )
+        assertFalse(
+            shouldRetryTrackerReauthenticationAfterBrowserReturn(
+                browserWasOpen = true,
+                pendingUrl = null,
+            )
+        )
+        assertFalse(
+            shouldRetryTrackerReauthenticationAfterBrowserReturn(
+                browserWasOpen = true,
+                pendingUrl = "",
+            )
+        )
     }
 
     @Test

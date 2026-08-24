@@ -23,6 +23,12 @@ public struct PilotDisplayPreference: Codable, Sendable, Equatable {
         return normalized.isEmpty ? nil : normalized
     }
 
+    public static func preferredPilotCallsign(saved: String?, existing: String?) -> String {
+        normalizePilotCallsign(saved)
+            ?? existing?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? ""
+    }
+
     public static func sanitizeTrackColor(_ value: String?, fallback: String) -> String {
         var candidate = value?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
         if candidate.count == 6 { candidate = "#" + candidate }

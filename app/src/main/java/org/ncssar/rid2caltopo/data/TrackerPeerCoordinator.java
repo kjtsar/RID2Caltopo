@@ -67,7 +67,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private static final long SIGHTING_SEND_INTERVAL_MS = 3_000L;
     private static final long OWNER_ACTIVITY_HEARTBEAT_SUPPRESS_MS = 30_000L;
     private static final long OWNER_ACTIVITY_MAX_HEARTBEAT_SILENCE_MS = 45_000L;
-    private static final long DEFAULT_IDLE_PARK_DELAY_MS = 120_000L;
+    private static final long DEFAULT_IDLE_PARK_DELAY_MS = 30_000L;
     private static final long CONNECT_GRACE_MS = 12_000L;
     private static final long DEFAULT_HANDOFF_DELAY_MS = 2_000L;
     private static volatile long handoffDelayMs = DEFAULT_HANDOFF_DELAY_MS;
@@ -162,6 +162,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private volatile long forcedReconnectCount;
     private volatile boolean heartbeatSendQueued;
     private volatile boolean intentionallyParked;
+    private volatile boolean standaloneStandbyEligible;
     private volatile long reconnectScheduledAtMs;
     private volatile long reconnectTargetAtMs;
     private volatile boolean reconnectPending;
@@ -373,6 +374,16 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public synchronized void setStandaloneStandbyEligible(boolean eligible) {
+        standaloneStandbyEligible = eligible;
+        if (!eligible) {
+            idleParkTimer.stop();
+        } else {
+            scheduleIdleParkIfEligible();
+        }
+    }
+
+    @Override
     public void updateManagedVideoStreams(
             @NonNull String incidentName,
             @NonNull List<ManagedVideoStreamAdvertisement> streams) {
@@ -380,7 +391,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         managedVideoStreams = Collections.unmodifiableList(
                 new ArrayList<>(streams.subList(0, Math.min(streams.size(), 4)))
         );
-        if (!managedVideoStreams.isEmpty()) {
+        if (hasLiveManagedVideoStream()) {
             wakeForCoordinationActivity("video_stream");
         } else {
             scheduleIdleParkIfEligible();
@@ -594,7 +605,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         if (intentionallyParked) {
             return CoordinationIndicatorState.IDLE;
         }
-        return isConnected()
+        return isConnected() && helloAckAtMs >= helloSeqSentAtMs && helloAckAtMs > 0L
                 ? CoordinationIndicatorState.HEALTHY
                 : CoordinationIndicatorState.DEGRADED;
     }
@@ -605,9 +616,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         CoordinationIndicatorState state = getCoordinationIndicatorState();
         switch (state) {
             case HEALTHY:
-                return "Tracker link healthy";
+                return "Tracker verified";
             case IDLE:
-                return "Tracker link idle";
+                return "Tracker link standby";
             case DEGRADED:
                 return "Tracker link degraded";
             case UNCONFIGURED:
@@ -626,7 +637,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             return lines;
         }
         if (intentionallyParked) {
-            lines.add("Tracker websocket parked until drone activity resumes");
+            lines.add("Tracker websocket on standby until an incident or coordination activity resumes");
             return lines;
         }
         if (trackerWsUrl == null || trackerApiKey == null) {
@@ -684,10 +695,20 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     private boolean isIdleEligible() {
         return started &&
+                standaloneStandbyEligible &&
+                helloAckAtMs >= helloSeqSentAtMs &&
+                helloAckAtMs > 0L &&
                 pendingDrones.isEmpty() &&
                 ownerByRemoteId.isEmpty() &&
                 pendingConfirmationsByRemoteId.isEmpty() &&
-                managedVideoStreams.isEmpty();
+                !hasLiveManagedVideoStream();
+    }
+
+    private boolean hasLiveManagedVideoStream() {
+        for (ManagedVideoStreamAdvertisement stream : managedVideoStreams) {
+            if ("live".equalsIgnoreCase(stream.mediaKind)) return true;
+        }
+        return false;
     }
 
     private boolean shouldSkipIntervalHeartbeat() {
@@ -716,7 +737,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     private synchronized void parkIfIdle() {
         if (!isIdleEligible() || !isConnected()) return;
-        CTInfo(TAG, "parkIfIdle(): parking tracker websocket until coordination activity resumes");
+        CTInfo(TAG, "parkIfIdle(): placing standalone tracker websocket on standby");
         intentionallyParked = true;
         heartbeatTimer.stop();
         ackWatchdogTimer.stop();
@@ -740,7 +761,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("mapId", mapId != null ? mapId : "");
             jo.put("zoneId", myGuid != null ? myGuid : "");
             jo.put("guid", myGuid != null ? myGuid : "");
-            jo.put("reason", "no_active_drones");
+            jo.put("reason", "standalone_standby");
             sendJson(jo);
         } catch (Exception e) {
             CTError(TAG, "sendIdleNotice() raised", e);
@@ -1218,6 +1239,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 case "hello_ack":
                     helloAckAtMs = nowMs();
                     handleAppUpdateRecommendation(jo);
+                    long advertisedStandbySeconds = jo.optLong(
+                            "standbyParkSec",
+                            jo.optLong("idleParkSec", DEFAULT_IDLE_PARK_DELAY_MS / 1_000L));
+                    idleParkDelayMs = Math.max(
+                            5_000L,
+                            Math.min(advertisedStandbySeconds * 1_000L, 3_600_000L));
                     long managedConfigVersionMs = jo.optLong(
                             "organizationConfigVersionMs", 0L);
                     if (managedConfigVersionMs != 0L
@@ -1229,8 +1256,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                                 trackerHttpOrigin,
                                 CaltopoClient.GetHomeOrgName(),
                                 trackerApiKey,
-                                managedConfigVersionMs);
+                                managedConfigVersionMs,
+                                this::scheduleIdleParkIfEligible);
+                    } else {
+                        scheduleIdleParkIfEligible();
                     }
+                    notifyCoordinationIndicatorListener();
                     CTDebug(TAG, String.format(Locale.US,
                             "hello_ack received from tracker after %d ms",
                             helloAckAtMs - helloSeqSentAtMs));
@@ -2198,6 +2229,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         INSTANCE.forcedReconnectCount = 0L;
         INSTANCE.lastOwnerActivityAtMs = 0L;
         INSTANCE.intentionallyParked = false;
+        INSTANCE.standaloneStandbyEligible = false;
         INSTANCE.suppressScheduledHeartbeatRequestsForTesting = false;
         INSTANCE.lastOutboundJsonForTesting = null;
         INSTANCE.lastWaypointRemoteIdForTesting = null;

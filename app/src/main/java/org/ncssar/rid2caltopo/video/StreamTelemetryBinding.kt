@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.video
 
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetryRegistry
 import java.util.Locale
 
 data class StreamTelemetryState(
@@ -39,6 +40,11 @@ data class ConfiguredStreamTelemetryBindingMaps(
 data class PairedVideoFlightActivity(
     val publisherActive: Boolean,
     val lastActivityAtMs: Long,
+)
+
+data class PairedStreamTelemetryActivity(
+    val paired: Boolean,
+    val lastSeiActivityAtMs: Long,
 )
 
 /**
@@ -93,14 +99,27 @@ object StreamFlightActivityRegistry {
         val remote = remoteId.trim()
         if (remote.isEmpty()) return PairedVideoFlightActivity(false, 0L)
         synchronized(lock) {
-            val designators = (configuredBindings.keys + runtimeBindings.keys).filter { designator ->
-                (runtimeBindings[designator] ?: configuredBindings[designator]) == remote
-            }
+            val designators = boundDesignatorsForRemoteIdLocked(remote)
             val active = designators.any { it in livePublishers }
             val lastActivity = if (active) nowMs else designators.maxOfOrNull {
                 lastPublisherActivityAtMs[it] ?: 0L
             } ?: 0L
             return PairedVideoFlightActivity(active, lastActivity)
+        }
+    }
+
+    @JvmStatic
+    fun seiActivityForRemoteId(remoteId: String): PairedStreamTelemetryActivity {
+        val remote = remoteId.trim()
+        if (remote.isEmpty()) return PairedStreamTelemetryActivity(false, 0L)
+        synchronized(lock) {
+            val designators = boundDesignatorsForRemoteIdLocked(remote)
+            return PairedStreamTelemetryActivity(
+                paired = designators.isNotEmpty(),
+                lastSeiActivityAtMs = designators.maxOfOrNull {
+                    StreamCameraTelemetryRegistry.lastReceivedAtMs(it)
+                } ?: 0L,
+            )
         }
     }
 
@@ -115,6 +134,11 @@ object StreamFlightActivityRegistry {
 
     private fun normalizeDesignator(value: String): String =
         value.trim().uppercase(Locale.US)
+
+    private fun boundDesignatorsForRemoteIdLocked(remoteId: String): List<String> =
+        (configuredBindings.keys + runtimeBindings.keys).filter { designator ->
+            (runtimeBindings[designator] ?: configuredBindings[designator]) == remoteId
+        }
 }
 
 enum class StreamTelemetryPairingControlAction {

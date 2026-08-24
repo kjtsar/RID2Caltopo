@@ -120,5 +120,19 @@ class DroneScoutBridgeMonitorTest {
         assertFalse(shouldMonitorDroneScoutBridgeAlerts(scannerRunning = false, activeFlightCount = 1))
         assertFalse(shouldMonitorDroneScoutBridgeAlerts(scannerRunning = true, activeFlightCount = 0))
         assertTrue(shouldMonitorDroneScoutBridgeAlerts(scannerRunning = true, activeFlightCount = 1))
+        assertFalse(
+            shouldMonitorDroneScoutBridgeAlerts(
+                scannerRunning = true,
+                activeFlightCount = 1,
+                allActiveFlightsCoveredByFreshPairedSei = true,
+            )
+        )
+        assertTrue(
+            shouldMonitorDroneScoutBridgeAlerts(
+                scannerRunning = true,
+                activeFlightCount = 2,
+                allActiveFlightsCoveredByFreshPairedSei = false,
+            )
+        )
     }
 }

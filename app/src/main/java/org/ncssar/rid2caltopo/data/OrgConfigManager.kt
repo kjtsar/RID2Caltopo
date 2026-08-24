@@ -285,11 +285,34 @@ object OrgConfigManager {
         deviceToken: String,
         advertisedVersionMs: Long
     ) {
-        if (advertisedVersionMs == 0L || advertisedVersionMs == getManagedVersionMs(context)) return
+        syncManagedConfiguration(
+            context,
+            trackerOrigin,
+            organization,
+            deviceToken,
+            advertisedVersionMs,
+            null
+        )
+    }
+
+    @JvmStatic
+    fun syncManagedConfiguration(
+        context: Context,
+        trackerOrigin: String,
+        organization: String,
+        deviceToken: String,
+        advertisedVersionMs: Long,
+        completion: Runnable?
+    ) {
+        if (advertisedVersionMs == 0L || advertisedVersionMs == getManagedVersionMs(context)) {
+            completion?.run()
+            return
+        }
         enqueueManagedConfigurationSync(
             context,
             "${trackerOrigin.trimEnd('/')}/${organization.lowercase()}/api/v1/organization-config/current",
-            deviceToken
+            deviceToken,
+            completion
         )
     }
 
@@ -303,14 +326,16 @@ object OrgConfigManager {
         enqueueManagedConfigurationSync(
             context,
             "${trackerBaseUrl.trimEnd('/')}/api/v1/organization-config/current",
-            deviceToken
+            deviceToken,
+            null
         )
     }
 
     private fun enqueueManagedConfigurationSync(
         context: Context,
         endpoint: String,
-        deviceToken: String
+        deviceToken: String,
+        completion: Runnable?
     ) {
         executor.execute {
             try {
@@ -344,6 +369,8 @@ object OrgConfigManager {
                 }
             } catch (e: Exception) {
                 CaltopoClient.CTWarn(TAG, "Managed organization configuration sync failed.", e)
+            } finally {
+                completion?.run()
             }
         }
     }

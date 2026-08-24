@@ -10,7 +10,8 @@ enum AppleTrackerCoordinationStatus: String, Sendable {
     case unavailable = "Unavailable"
     case standalone = "Standalone"
     case connecting = "Connecting"
-    case healthy = "Healthy"
+    case healthy = "Verified"
+    case standby = "Standby"
     case degraded = "Degraded"
 }
 
@@ -392,7 +393,11 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var heartbeatTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var standbyTask: Task<Void, Never>?
     private var authorizationRecoveryTask: Task<Void, Never>?
+    private var standaloneStandbyEligible = false
+    private var organizationConfigSyncInProgress = false
+    private var standbyParkDelay: Duration = .seconds(30)
     private var observedSightings: [String: TrackerCoordinationSighting] = [:]
     private var firstSightingsSent: Set<String> = []
     private var seenVideoStreamRequestIDs: [String] = []
@@ -571,6 +576,8 @@ final class AppleTrackerCoordinator: ObservableObject {
         self.trackerURLPrefix = normalizedURL
         self.trackerAPIKey = normalizedKey
         self.mapID = normalizedMapID
+        standaloneStandbyEligible = normalizedMapID.isEmpty
+            && standaloneR2CCoordinationEnabled
         if (trackerConfigurationChanged || forceReconnect)
             && !normalizedURL.isEmpty && !normalizedKey.isEmpty {
             trackerKnownUnavailable = false
@@ -660,6 +667,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         let isFirst = observedSightings[track.aircraftID] == nil
         observedSightings[track.aircraftID] = sighting
         if isFirst {
+            wakeForCoordinationActivity(reason: "first sighting")
             scheduleFallbackOwnership(remoteID: track.aircraftID)
             sendFirstSightingIfNeeded(remoteID: track.aircraftID)
         } else {
@@ -671,6 +679,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         guard coordinationRequired else { return }
         let trackerIdentity = Self.trackerIdentity(identity)
         pendingConfirmations[identity.remoteID] = trackerIdentity
+        wakeForCoordinationActivity(reason: "drone confirmation")
         if let event = protocolState.confirmLocally(remoteID: identity.remoteID) {
             publish(event)
         }
@@ -683,10 +692,75 @@ final class AppleTrackerCoordinator: ObservableObject {
         pendingConfirmations.removeValue(forKey: remoteID)
         lastSightingSentAt.removeValue(forKey: remoteID)
         fallbackTasks.removeValue(forKey: remoteID)?.cancel()
+        scheduleStandbyIfEligible()
         guard coordinationRequired,
               let data = try? TrackerCoordinationWire.droneLost(client: client, remoteID: remoteID)
         else { return }
         send(data)
+    }
+
+    private var hasLiveManagedVideoStream: Bool {
+        managedVideoStreams.contains { $0.mediaKind == "live" }
+    }
+
+    private var canEnterStandaloneStandby: Bool {
+        TrackerStandbyPolicy.isEligible(
+            standalone: standaloneStandbyEligible,
+            connected: connected,
+            helloAcknowledged: helloAcknowledged,
+            configurationSyncInProgress: organizationConfigSyncInProgress,
+            activeSightings: observedSightings.count,
+            pendingConfirmations: pendingConfirmations.count,
+            hasLiveVideo: hasLiveManagedVideoStream,
+            activeMediaConnections: mediaPeersByRequestID.count
+        )
+    }
+
+    private func scheduleStandbyIfEligible() {
+        guard canEnterStandaloneStandby else {
+            standbyTask?.cancel()
+            standbyTask = nil
+            return
+        }
+        guard standbyTask == nil else { return }
+        let delay = standbyParkDelay
+        standbyTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self, self.canEnterStandaloneStandby else { return }
+            self.sendStandaloneStandbyNotice()
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, self.canEnterStandaloneStandby else { return }
+            self.standbyTask = nil
+            self.stopSocketOnly()
+            self.peers = []
+            self.status = .standby
+            self.statusDetail = "Tracker standby"
+            AppleLog.info("TrackerPeer", "Standalone tracker websocket entered standby")
+        }
+    }
+
+    private func sendStandaloneStandbyNotice() {
+        let payload: [String: Any] = [
+            "type": "idle",
+            "mapId": mapID,
+            "zoneId": zoneID,
+            "guid": zoneID,
+            "reason": "standalone_standby",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        send(data)
+    }
+
+    private func wakeForCoordinationActivity(reason: String) {
+        guard status == .standby else {
+            standbyTask?.cancel()
+            standbyTask = nil
+            return
+        }
+        standbyTask?.cancel()
+        standbyTask = nil
+        AppleLog.info("TrackerPeer", "Waking tracker websocket for \(reason)")
+        connect()
     }
 
     func publicationAllowed(remoteID: String) -> Bool {
@@ -814,6 +888,14 @@ final class AppleTrackerCoordinator: ObservableObject {
         }
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let type = object["type"] as? String {
+            if type == "hello_ack" {
+                let seconds = (object["standbyParkSec"] as? NSNumber)?.intValue
+                    ?? (object["idleParkSec"] as? NSNumber)?.intValue
+                    ?? 30
+                standbyParkDelay = .seconds(
+                    TrackerStandbyPolicy.normalizedDelaySeconds(seconds)
+                )
+            }
             if type == "reauthentication_required" {
                 if let url = (object["reauthenticationUrl"] as? String)
                     .flatMap(URL.init(string:)) {
@@ -845,8 +927,9 @@ final class AppleTrackerCoordinator: ObservableObject {
                         URL(string: $0.trimmingCharacters(in: .whitespacesAndNewlines))
                     }
                     status = .healthy
-                    statusDetail = "Tracker link healthy"
+                    statusDetail = "Tracker verified"
                     flushPendingConfirmations()
+                    scheduleStandbyIfEligible()
                 case let .heartbeatAcknowledged(sequence, _):
                     heartbeatAcknowledgedAtMilliseconds = Self.nowMilliseconds
                     heartbeatSequenceAcknowledged = sequence
@@ -865,6 +948,7 @@ final class AppleTrackerCoordinator: ObservableObject {
                     }
                 }
                 publish(event)
+                scheduleStandbyIfEligible()
             }
         } catch {
             AppleLog.error("TrackerPeer", "Invalid tracker message: \(error.localizedDescription)")
@@ -902,6 +986,7 @@ final class AppleTrackerCoordinator: ObservableObject {
            let version = (object["organizationConfigVersionMs"] as? NSNumber)?.int64Value,
            version != 0,
            version != Int64(defaults.integer(forKey: AppleManagedOrganizationConfig.versionDefaultsKey)) {
+            organizationConfigSyncInProgress = true
             synchronizeOrganizationConfig(advertisedVersionMs: version)
         }
         return false
@@ -921,6 +1006,10 @@ final class AppleTrackerCoordinator: ObservableObject {
             forHTTPHeaderField: "X-R2C-Functionality-Release"
         )
         Task { @MainActor [weak self] in
+            defer {
+                self?.organizationConfigSyncInProgress = false
+                self?.scheduleStandbyIfEligible()
+            }
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let http = response as? HTTPURLResponse,
@@ -1371,6 +1460,11 @@ final class AppleTrackerCoordinator: ObservableObject {
         managedVideoSourcesBySessionID = currentSources
         let presenceChanged = managedVideoStreams != updatedStreams
         managedVideoStreams = updatedStreams
+        if hasLiveManagedVideoStream {
+            wakeForCoordinationActivity(reason: "live video")
+        } else {
+            scheduleStandbyIfEligible()
+        }
         if presenceChanged {
             sendManagedVideoPresence()
         }
@@ -2384,6 +2478,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     private func stopTransport() {
+        standbyTask?.cancel()
+        standbyTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
         authorizationRecoveryTask?.cancel()
@@ -2396,6 +2492,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         sourceEndGraceTasks.removeAll()
         stopSocketOnly()
         peers = []
+        organizationConfigSyncInProgress = false
         resetAcknowledgements()
     }
 

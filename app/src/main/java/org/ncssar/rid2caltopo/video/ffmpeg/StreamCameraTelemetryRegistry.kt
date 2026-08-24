@@ -152,6 +152,10 @@ object StreamCameraTelemetryRegistry {
         }
     }
 
+    fun lastReceivedAtMs(designator: String): Long = synchronized(lock) {
+        samples[designator.trim().uppercase()]?.receivedAtMs ?: 0L
+    }
+
     /**
      * Validates the independently decoded full-width DJI position against a current RID fix.
      * Position is withheld when the two sources disagree beyond the operational gate, while

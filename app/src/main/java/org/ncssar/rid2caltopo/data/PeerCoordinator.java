@@ -37,6 +37,8 @@ public interface PeerCoordinator {
     }
 
     void start(@NonNull String mapId, @NonNull String guid, @NonNull String name, @Nullable String brokerUri);
+    default void setStandaloneStandbyEligible(boolean eligible) {
+    }
     default void resumeAfterReauthentication() {
     }
     void stop();
@@ -105,7 +107,7 @@ public interface PeerCoordinator {
             case HEALTHY:
                 return "R2C link healthy";
             case IDLE:
-                return "R2C link idle";
+                return "R2C link standby";
             case DEGRADED:
                 return "R2C link degraded";
             case UNCONFIGURED:

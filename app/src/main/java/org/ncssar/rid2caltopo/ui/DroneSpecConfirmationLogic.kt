@@ -18,7 +18,8 @@ object DroneSpecConfirmationLogic {
     fun buildInitialState(
         drone: CtDroneSpec,
         defaultOrganization: String,
-        defaultUnknownOrganization: String = ""
+        defaultUnknownOrganization: String = "",
+        defaultPilotCallsign: String = ""
     ): DroneSpecConfirmationUiState {
         val hasKnownSpecFields = drone.org.isNotBlank() || drone.model.isNotBlank() || drone.owner.isNotBlank()
         val guessedDescription = CtDroneSpec.GuessMakeModel(drone.remoteId)
@@ -31,11 +32,12 @@ object DroneSpecConfirmationLogic {
             usesUnknownOrganizationDefault -> defaultUnknownOrganization
             else -> defaultOrganization
         }
-        val pilotCallsign = if (hasKnownSpecFields && drone.mappedId != drone.remoteId) {
+        val mappedPilotCallsign = if (hasKnownSpecFields && drone.mappedId != drone.remoteId) {
             guessPilotCallsign(drone, droneDescription, guessedDescription)
         } else {
             ""
         }
+        val pilotCallsign = defaultPilotCallsign.trim().ifBlank { mappedPilotCallsign }
         val warning = if (drone.mappedId == drone.remoteId && drone.org.isBlank()) {
             "New or mutual-aid drone detected. Confirm org, pilot callsign, and drone description before continuing."
         } else {

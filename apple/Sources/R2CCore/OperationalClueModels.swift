@@ -494,6 +494,11 @@ public enum OperationalClueGeometry {
 }
 
 public enum OperationalCenterpointElevation {
+    public enum DisplayMode: Sendable, Equatable {
+        case msl
+        case reference
+    }
+
     public struct Sample: Sendable, Equatable {
         public let elevationFeet: Int
         public let demResolutionMeters: Int?
@@ -504,12 +509,27 @@ public enum OperationalCenterpointElevation {
         }
     }
 
-    public static func displayText(_ sample: Sample?) -> String {
+    public static func displayText(
+        _ sample: Sample?,
+        referenceElevationFeet: Int? = nil,
+        mode: DisplayMode = .msl
+    ) -> String {
         guard let sample else { return "--' MSL" }
-        if let resolution = sample.demResolutionMeters {
-            return "\(sample.elevationFeet)' MSL · \(resolution)m DEM"
+        let suffix = sample.demResolutionMeters.map { "\($0)m DEM" } ?? "USGS DEM"
+        if mode == .reference, let referenceElevationFeet {
+            let delta = sample.elevationFeet - referenceElevationFeet
+            let signedDelta = delta >= 0 ? "+\(delta)" : "\(delta)"
+            return "\(signedDelta)' REF · \(suffix)"
         }
-        return "\(sample.elevationFeet)' MSL · USGS DEM"
+        return "\(sample.elevationFeet)' MSL · \(suffix)"
+    }
+
+    public static func shouldSetReference(
+        focused: Bool,
+        elevationEnabled: Bool,
+        pressNearCenter: Bool
+    ) -> Bool {
+        focused && elevationEnabled && pressNearCenter
     }
 
     public static func isNearCenter(

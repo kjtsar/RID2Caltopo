@@ -70,6 +70,60 @@ class StreamPipInsetFrameTest {
     }
 
     @Test
+    fun centerpointToggleTap_doesNotConsumeFirstTapOnImplicitlyFocusedSingleStream() {
+        assertFalse(
+            shouldToggleCenterpointElevation(
+                explicitlyFocused = false,
+                tapNearCenter = true,
+            )
+        )
+        assertTrue(
+            shouldToggleCenterpointElevation(
+                explicitlyFocused = true,
+                tapNearCenter = true,
+            )
+        )
+        assertFalse(
+            shouldToggleCenterpointElevation(
+                explicitlyFocused = true,
+                tapNearCenter = false,
+            )
+        )
+    }
+
+    @Test
+    fun centerpointReferenceLongPress_requiresActiveExplicitlyFocusedCenterpoint() {
+        assertTrue(
+            shouldSetCenterpointElevationReference(
+                explicitlyFocused = true,
+                elevationEnabled = true,
+                pressNearCenter = true,
+            )
+        )
+        assertFalse(
+            shouldSetCenterpointElevationReference(
+                explicitlyFocused = false,
+                elevationEnabled = true,
+                pressNearCenter = true,
+            )
+        )
+        assertFalse(
+            shouldSetCenterpointElevationReference(
+                explicitlyFocused = true,
+                elevationEnabled = false,
+                pressNearCenter = true,
+            )
+        )
+        assertFalse(
+            shouldSetCenterpointElevationReference(
+                explicitlyFocused = true,
+                elevationEnabled = true,
+                pressNearCenter = false,
+            )
+        )
+    }
+
+    @Test
     fun centerpointElevationLabel_distinguishesKnownResolutionFromOnlineDEM() {
         assertEquals(
             "4812' MSL · 1m DEM",
@@ -80,6 +134,30 @@ class StreamPipInsetFrameTest {
             centerpointElevationLabel(CenterpointElevationSample(39.0, -121.0, 4812, null)),
         )
         assertEquals("--' MSL", centerpointElevationLabel(null))
+        assertEquals(
+            "+37' REF · 1m DEM",
+            centerpointElevationLabel(
+                sample = CenterpointElevationSample(39.0, -121.0, 4849, 1),
+                referenceElevationFeet = 4812,
+                displayMode = CenterpointElevationDisplayMode.REFERENCE,
+            ),
+        )
+        assertEquals(
+            "-12' REF · USGS DEM",
+            centerpointElevationLabel(
+                sample = CenterpointElevationSample(39.0, -121.0, 4800, null),
+                referenceElevationFeet = 4812,
+                displayMode = CenterpointElevationDisplayMode.REFERENCE,
+            ),
+        )
+        assertEquals(
+            "4800' MSL · USGS DEM",
+            centerpointElevationLabel(
+                sample = CenterpointElevationSample(39.0, -121.0, 4800, null),
+                referenceElevationFeet = 4812,
+                displayMode = CenterpointElevationDisplayMode.MSL,
+            ),
+        )
     }
 
     @Test

@@ -518,7 +518,7 @@ class TrackerPeerCoordinatorTest {
 
         clock.advanceBy(2_000L)
 
-        assertEquals("Tracker link healthy", coordinator.coordinationStatusText)
+        assertEquals("Tracker verified", coordinator.coordinationStatusText)
         val diagnosticLines = coordinator.coordinationDiagnosticLines
         assertTrue(diagnosticLines.any { it == "Hello ack 2 sec ago" })
         assertTrue(
@@ -631,8 +631,9 @@ class TrackerPeerCoordinatorTest {
 
     @Test
     fun idleParkDisconnectsAndPositionUpdateDoesNotWake() {
+        coordinator.setStandaloneStandbyEligible(true)
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
-
+        coordinator.handleHelloAckForTesting()
         coordinator.parkIfIdleForTesting()
 
         assertEquals(PeerCoordinator.CoordinationIndicatorState.IDLE, coordinator.coordinationIndicatorState)
@@ -641,19 +642,23 @@ class TrackerPeerCoordinatorTest {
             .map { JSONObject(it) }
             .filter { it.optString("type") == "idle" }
         assertEquals(1, idleMessages.size)
-        assertEquals("no_active_drones", idleMessages.single().optString("reason"))
+        assertEquals("standalone_standby", idleMessages.single().optString("reason"))
         val connectCountAfterPark = transport.connectCount
 
         coordinator.updateMyPosition(39.2, -121.2)
 
         assertEquals(connectCountAfterPark, transport.connectCount)
-        assertEquals("Tracker link idle", coordinator.coordinationStatusText)
+        assertEquals("Tracker link standby", coordinator.coordinationStatusText)
     }
 
     @Test
     fun heartbeatAckWhileIdleEligible_doesNotResetIdleParkDeadline() {
-        TrackerPeerCoordinator.setIdleParkDelayMsForTesting(200L)
+        coordinator.setStandaloneStandbyEligible(true)
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
+        TrackerPeerCoordinator.setIdleParkDelayMsForTesting(200L)
+        coordinator.setStandaloneStandbyEligible(false)
+        coordinator.setStandaloneStandbyEligible(true)
         assertTrue(transport.connected)
 
         Thread.sleep(120L)
@@ -666,8 +671,22 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
-    fun firstSightingWakesParkedCoordinatorAndSendsClaim() {
+    fun activeMapSession_doesNotEnterStandaloneStandby() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
+        TrackerPeerCoordinator.setIdleParkDelayMsForTesting(50L)
+
+        Thread.sleep(100L)
+
+        assertTrue(transport.connected)
+        assertEquals(PeerCoordinator.CoordinationIndicatorState.HEALTHY, coordinator.coordinationIndicatorState)
+    }
+
+    @Test
+    fun firstSightingWakesParkedCoordinatorAndSendsClaim() {
+        coordinator.setStandaloneStandbyEligible(true)
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
         coordinator.parkIfIdleForTesting()
         transport.sentMessages.clear()
 
@@ -742,7 +761,9 @@ class TrackerPeerCoordinatorTest {
 
     @Test
     fun droneConfirmedWakesParkedCoordinatorAndFlushesSaveEvent() {
+        coordinator.setStandaloneStandbyEligible(true)
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
         coordinator.parkIfIdleForTesting()
         transport.sentMessages.clear()
 

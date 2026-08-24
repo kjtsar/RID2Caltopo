@@ -131,17 +131,48 @@ internal fun isNearStreamCenter(
     return dx * dx + dy * dy <= radiusPx * radiusPx
 }
 
+internal fun shouldToggleCenterpointElevation(
+    explicitlyFocused: Boolean,
+    tapNearCenter: Boolean,
+): Boolean = explicitlyFocused && tapNearCenter
+
+internal fun shouldSetCenterpointElevationReference(
+    explicitlyFocused: Boolean,
+    elevationEnabled: Boolean,
+    pressNearCenter: Boolean,
+): Boolean = explicitlyFocused && elevationEnabled && pressNearCenter
+
+internal enum class CenterpointElevationDisplayMode {
+    MSL,
+    REFERENCE,
+}
+
 private val CenterpointTurquoise = Color(0xFF40E0D0)
 
-internal fun centerpointElevationLabel(sample: CenterpointElevationSample?): String = when {
-    sample == null -> "--' MSL"
-    sample.demResolutionMeters != null ->
-        "${sample.elevationFeet}' MSL · ${sample.demResolutionMeters}m DEM"
-    else -> "${sample.elevationFeet}' MSL · USGS DEM"
+internal fun centerpointElevationLabel(
+    sample: CenterpointElevationSample?,
+    referenceElevationFeet: Int? = null,
+    displayMode: CenterpointElevationDisplayMode = CenterpointElevationDisplayMode.MSL,
+): String {
+    val suffix = sample?.demResolutionMeters?.let { "${it}m DEM" }
+        ?: "USGS DEM"
+    if (sample == null) return "--' MSL"
+    if (displayMode == CenterpointElevationDisplayMode.REFERENCE && referenceElevationFeet != null) {
+        val delta = sample.elevationFeet - referenceElevationFeet
+        val signedDelta = if (delta >= 0) "+$delta" else delta.toString()
+        return "$signedDelta' REF · $suffix"
+    }
+    return "${sample.elevationFeet}' MSL · $suffix"
 }
 
 @Composable
-private fun CenterpointElevationOverlay(sample: CenterpointElevationSample?) {
+private fun CenterpointElevationOverlay(
+    sample: CenterpointElevationSample?,
+    referenceElevationFeet: Int?,
+    displayMode: CenterpointElevationDisplayMode,
+    onToggleDisplayMode: () -> Unit,
+    onSetReference: () -> Unit,
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -171,11 +202,21 @@ private fun CenterpointElevationOverlay(sample: CenterpointElevationSample?) {
             drawCircle(Color.Black, radius = 3.5.dp.toPx(), center = center, style = Stroke(2.5.dp.toPx()))
             drawCircle(CenterpointTurquoise, radius = 3.5.dp.toPx(), center = center, style = Stroke(1.dp.toPx()))
         }
-        val label = centerpointElevationLabel(sample)
+        val label = centerpointElevationLabel(sample, referenceElevationFeet, displayMode)
         Box(
             modifier = Modifier
                 .align(Alignment.Center)
-                .offset(x = 42.dp, y = 28.dp),
+                .offset(x = 42.dp, y = 28.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .pointerInput(referenceElevationFeet, displayMode) {
+                    detectTapGestures(
+                        onTap = {
+                            if (referenceElevationFeet != null) onToggleDisplayMode()
+                        },
+                        onLongPress = { onSetReference() },
+                    )
+                }
+                .padding(horizontal = 4.dp, vertical = 2.dp),
         ) {
             Text(
                 text = label,
@@ -250,6 +291,10 @@ fun StreamTile(
     var pendingAnnotationPoint by remember(streamDesignator) { mutableStateOf<Offset?>(null) }
     var centerpointElevationEnabled by remember(streamDesignator) { mutableStateOf(false) }
     var centerpointElevation by remember(streamDesignator) { mutableStateOf<CenterpointElevationSample?>(null) }
+    var centerpointReferenceElevationFeet by remember(streamDesignator) { mutableStateOf<Int?>(null) }
+    var centerpointDisplayMode by remember(streamDesignator) {
+        mutableStateOf(CenterpointElevationDisplayMode.MSL)
+    }
     val density = LocalDensity.current
     val localRuntimeSnapshot by produceState<org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot?>(
         initialValue = null,
@@ -355,6 +400,17 @@ fun StreamTile(
             }
             is DesignatorState.Green -> showUnmatchDialog = true
             else -> {}
+        }
+    }
+
+    fun setCenterpointElevationReference() {
+        val sample = centerpointElevation
+        if (sample == null) {
+            CaltopoClient.ShowToast("Reference unavailable: waiting for centerpoint elevation.")
+        } else {
+            centerpointReferenceElevationFeet = sample.elevationFeet
+            centerpointDisplayMode = CenterpointElevationDisplayMode.REFERENCE
+            CaltopoClient.ShowToast("Elevation reference set at ${sample.elevationFeet} ft MSL.")
         }
     }
 
@@ -596,10 +652,6 @@ fun StreamTile(
                     }
             )
         }
-        if (centerpointElevationEnabled && isFocused && streamState == StreamState.LIVE) {
-            CenterpointElevationOverlay(centerpointElevation)
-        }
-
         // Match the map's canonical ATO / AGL / RNG / HDG telemetry order.
         if (streamState == StreamState.LIVE && !isLocalPlayback && showStandaloneTelemetryOverlay) {
             val displayState = viewModel.droneDisplayStateForStream(streamDesignator)
@@ -693,11 +745,14 @@ fun StreamTile(
                                             (minimumDimension * 0.20f)
                                                 .coerceIn(48.dp.toPx(), 96.dp.toPx())
                                         }
-                                        if (isNearStreamCenter(
-                                                tap = tapOffset,
-                                                widthPx = size.width.toFloat(),
-                                                heightPx = size.height.toFloat(),
-                                                radiusPx = radiusPx,
+                                        if (shouldToggleCenterpointElevation(
+                                                explicitlyFocused = explicitlyFocused,
+                                                tapNearCenter = isNearStreamCenter(
+                                                    tap = tapOffset,
+                                                    widthPx = size.width.toFloat(),
+                                                    heightPx = size.height.toFloat(),
+                                                    radiusPx = radiusPx,
+                                                ),
                                             )
                                         ) {
                                             centerpointElevationEnabled = !centerpointElevationEnabled
@@ -713,9 +768,28 @@ fun StreamTile(
                                         onToggleFocus()
                                     }
                                 },
-                                onLongPress = {
+                                onLongPress = { pressOffset ->
                                     if (isLocalPlayback) {
                                         showAnomalySettingsDialog = true
+                                        return@detectTapGestures
+                                    }
+                                    val minimumDimension = minOf(size.width, size.height).toFloat()
+                                    val radiusPx = with(density) {
+                                        (minimumDimension * 0.20f)
+                                            .coerceIn(48.dp.toPx(), 96.dp.toPx())
+                                    }
+                                    if (shouldSetCenterpointElevationReference(
+                                            explicitlyFocused = explicitlyFocused,
+                                            elevationEnabled = centerpointElevationEnabled,
+                                            pressNearCenter = isNearStreamCenter(
+                                                tap = pressOffset,
+                                                widthPx = size.width.toFloat(),
+                                                heightPx = size.height.toFloat(),
+                                                radiusPx = radiusPx,
+                                            ),
+                                        )
+                                    ) {
+                                        setCenterpointElevationReference()
                                         return@detectTapGestures
                                     }
                                     CTDebug(tag, "StreamTile(${streamDesignator}) onLongPress designatorState=${designatorState::class.simpleName}")
@@ -729,6 +803,22 @@ fun StreamTile(
                     }
                 )
         )
+        if (centerpointElevationEnabled && isFocused && streamState == StreamState.LIVE) {
+            CenterpointElevationOverlay(
+                sample = centerpointElevation,
+                referenceElevationFeet = centerpointReferenceElevationFeet,
+                displayMode = centerpointDisplayMode,
+                onToggleDisplayMode = {
+                    if (centerpointReferenceElevationFeet != null) {
+                        centerpointDisplayMode = when (centerpointDisplayMode) {
+                            CenterpointElevationDisplayMode.MSL -> CenterpointElevationDisplayMode.REFERENCE
+                            CenterpointElevationDisplayMode.REFERENCE -> CenterpointElevationDisplayMode.MSL
+                        }
+                    }
+                },
+                onSetReference = ::setCenterpointElevationReference,
+            )
+        }
         if (shouldShowStreamClueCaptureButton(showTileControls, isLocalPlayback, streamState)) {
             IconButton(
                 onClick = { requestClueCapture("camera-button") },

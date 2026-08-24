@@ -44,6 +44,37 @@ class DroneSpecConfirmationLogicTest {
     }
 
     @Test
+    fun teamDrone_tabletPilotCallsignOverridesPlaceholderAndPreservesMapping() {
+        val drone = CtDroneSpec(
+            "1581F8HGX255W00A0H2W",
+            "1sar1001DjMtrc4td-01",
+            "NCSSAR",
+            "DJI Matrice 4TD",
+            "NCSSAR Team"
+        )
+
+        val state = DroneSpecConfirmationLogic.buildInitialState(
+            drone = drone,
+            defaultOrganization = "NCSSAR",
+            defaultPilotCallsign = "1SAR7"
+        )
+
+        assertEquals("1SAR7", state.pilotCallsign)
+        assertEquals("1SAR7", state.initialPilotCallsign)
+        assertEquals(
+            true,
+            DroneSpecConfirmationLogic.shouldPreserveMappedId(
+                existingMappedId = drone.mappedId,
+                remoteId = drone.remoteId,
+                initialPilotCallsign = state.initialPilotCallsign,
+                savedPilotCallsign = state.pilotCallsign,
+                initialDroneDescription = state.initialDroneDescription,
+                savedDroneDescription = state.droneDescription
+            )
+        )
+    }
+
+    @Test
     fun unknownMutualAidDrone_usesUnknownDefaultOrgAndGuessOnlyWhenMappedIdEqualsRemoteId() {
         val drone = CtDroneSpec("1581F6Z9C24BK0036M9Q")
 

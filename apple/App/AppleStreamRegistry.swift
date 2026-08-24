@@ -160,6 +160,29 @@ final class AppleStreamRegistry: ObservableObject {
         flightActivity.activityByAircraftID(at: date)
     }
 
+    func djiSEILastActivityByAircraftID() -> [String: Date] {
+        sessions.reduce(into: [:]) { result, session in
+            guard let aircraftID = flightActivity.boundAircraftID(for: session.id),
+                  let receivedAt = session.model.latestDJICameraTelemetry?.receivedAt
+            else { return }
+            result[aircraftID] = max(result[aircraftID] ?? .distantPast, receivedAt)
+        }
+    }
+
+    func allAircraftHaveFreshPairedSEI(
+        aircraftIDs: [String],
+        at date: Date = Date(),
+        maximumAge: TimeInterval = 3
+    ) -> Bool {
+        guard !aircraftIDs.isEmpty else { return false }
+        let activity = djiSEILastActivityByAircraftID()
+        return aircraftIDs.allSatisfy { aircraftID in
+            guard let receivedAt = activity[aircraftID] else { return false }
+            let age = date.timeIntervalSince(receivedAt)
+            return age >= 0 && age <= maximumAge
+        }
+    }
+
     func close(_ id: String) {
         guard let session = sessions.first(where: { $0.id == id }) else { return }
         session.model.stop()
@@ -504,6 +527,9 @@ private struct AppleStreamTile: View {
     @State private var tileSize: CGSize = .zero
     @State private var centerpointElevationEnabled = false
     @State private var centerpointElevationSample: OperationalCenterpointElevation.Sample?
+    @State private var centerpointReferenceElevationFeet: Int?
+    @State private var centerpointDisplayMode: OperationalCenterpointElevation.DisplayMode = .msl
+    @State private var latestTouchLocation: CGPoint?
     let ingestAddress: String?
     let networkSSID: String?
     let focused: Bool
@@ -696,8 +722,21 @@ private struct AppleStreamTile: View {
                 .padding(6)
             }
             if centerpointElevationEnabled, focused {
-                AppleCenterpointElevationOverlay(sample: centerpointElevationSample)
-                    .allowsHitTesting(false)
+                AppleCenterpointElevationOverlay(
+                    sample: centerpointElevationSample,
+                    referenceElevationFeet: centerpointReferenceElevationFeet,
+                    displayMode: centerpointDisplayMode,
+                    onToggleDisplayMode: {
+                        guard centerpointReferenceElevationFeet != nil else { return }
+                        centerpointDisplayMode = centerpointDisplayMode == .msl ? .reference : .msl
+                    },
+                    onSetReference: {
+                        if let sample = centerpointElevationSample {
+                            centerpointReferenceElevationFeet = sample.elevationFeet
+                            centerpointDisplayMode = .reference
+                        }
+                    }
+                )
             }
         }
         .modifier(StreamTileSizing(
@@ -741,6 +780,12 @@ private struct AppleStreamTile: View {
                     panAtGestureStart = pan
                 }
         )
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    latestTouchLocation = value.startLocation
+                }
+        )
         .onTapGesture(count: 2) {
             onDoubleTap(
                 Double(zoom),
@@ -772,7 +817,31 @@ private struct AppleStreamTile: View {
                 onFocus()
             }
         }
-        .onLongPressGesture(minimumDuration: 0.5, perform: onLongPress)
+        .onLongPressGesture(minimumDuration: 0.5) {
+            let minimumDimension = min(tileSize.width, tileSize.height)
+            let radius = min(96, max(48, minimumDimension * 0.20))
+            let pressNearCenter = latestTouchLocation.map {
+                OperationalCenterpointElevation.isNearCenter(
+                    x: $0.x,
+                    y: $0.y,
+                    width: tileSize.width,
+                    height: tileSize.height,
+                    radius: radius
+                )
+            } ?? false
+            if OperationalCenterpointElevation.shouldSetReference(
+                focused: focused,
+                elevationEnabled: centerpointElevationEnabled,
+                pressNearCenter: pressNearCenter
+            ) {
+                if let sample = centerpointElevationSample {
+                    centerpointReferenceElevationFeet = sample.elevationFeet
+                    centerpointDisplayMode = .reference
+                }
+            } else {
+                onLongPress()
+            }
+        }
         .onChange(of: focused) { _, isFocused in
             if !isFocused {
                 centerpointElevationEnabled = false
@@ -861,6 +930,10 @@ private struct AppleStreamTile: View {
 
 private struct AppleCenterpointElevationOverlay: View {
     let sample: OperationalCenterpointElevation.Sample?
+    let referenceElevationFeet: Int?
+    let displayMode: OperationalCenterpointElevation.DisplayMode
+    let onToggleDisplayMode: () -> Void
+    let onSetReference: () -> Void
     private let turquoise = Color(red: 64 / 255, green: 224 / 255, blue: 208 / 255)
 
     var body: some View {
@@ -891,14 +964,29 @@ private struct AppleCenterpointElevationOverlay: View {
                 context.stroke(circle, with: .color(.black), lineWidth: 2.5)
                 context.stroke(circle, with: .color(turquoise), lineWidth: 1)
             }
-            OutlinedCenterpointText(text: OperationalCenterpointElevation.displayText(sample), color: turquoise)
-                .position(x: center.x + 84, y: center.y + 30)
+            .allowsHitTesting(false)
+            Button(action: onToggleDisplayMode) {
+                OutlinedCenterpointText(
+                    text: OperationalCenterpointElevation.displayText(
+                        sample,
+                        referenceElevationFeet: referenceElevationFeet,
+                        mode: displayMode
+                    ),
+                    color: turquoise
+                )
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.5)
+                    .onEnded { _ in onSetReference() }
+            )
+            .position(x: center.x + 84, y: center.y + 30)
+            .accessibilityLabel(displayMode == .reference ? "Reference elevation" : "MSL elevation")
+            .accessibilityHint(referenceElevationFeet == nil ? "Long press the crosshair to set a reference" : "Toggles MSL and reference elevation")
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(sample.map {
-            let resolution = $0.demResolutionMeters.map { ", \($0) meter DEM" } ?? ", USGS DEM"
-            return "Centerpoint elevation \($0.elevationFeet) feet\(resolution)"
-        } ?? "Centerpoint elevation unavailable")
     }
 }
 

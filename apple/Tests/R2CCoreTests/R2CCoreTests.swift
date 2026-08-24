@@ -44,6 +44,42 @@ import Testing
 }
 @testable import R2CCore
 
+@Test func trackerStandbyPolicyRequiresVerifiedQuietStandaloneSession() {
+    #expect(TrackerStandbyPolicy.normalizedDelaySeconds(nil) == 30)
+    #expect(TrackerStandbyPolicy.normalizedDelaySeconds(1) == 5)
+    #expect(TrackerStandbyPolicy.normalizedDelaySeconds(7_200) == 3_600)
+    #expect(TrackerStandbyPolicy.isEligible(
+        standalone: true,
+        connected: true,
+        helloAcknowledged: true,
+        configurationSyncInProgress: false,
+        activeSightings: 0,
+        pendingConfirmations: 0,
+        hasLiveVideo: false,
+        activeMediaConnections: 0
+    ))
+    #expect(!TrackerStandbyPolicy.isEligible(
+        standalone: false,
+        connected: true,
+        helloAcknowledged: true,
+        configurationSyncInProgress: false,
+        activeSightings: 0,
+        pendingConfirmations: 0,
+        hasLiveVideo: false,
+        activeMediaConnections: 0
+    ))
+    #expect(!TrackerStandbyPolicy.isEligible(
+        standalone: true,
+        connected: true,
+        helloAcknowledged: true,
+        configurationSyncInProgress: true,
+        activeSightings: 0,
+        pendingConfirmations: 0,
+        hasLiveVideo: false,
+        activeMediaConnections: 0
+    ))
+}
+
 @Test func archiveFolderAgeUsesLargestRequestedWholeUnit() {
     #expect(ArchiveFolderDisplay.age(59) == "<1 minute")
     #expect(ArchiveFolderDisplay.age(60) == "1 minute")
@@ -1251,6 +1287,34 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     ))
     #expect(!locationStaleButAircraftStillHeard.alert)
 
+    let freshPairedSEICoversRIDAndPeerLoss = OperationalSignalLossPolicy.evaluate(.init(
+        signalIdleSeconds: 20,
+        trackTelemetryIdleSeconds: 20,
+        pairedSEIIdleSeconds: 1,
+        learnedIntervalSeconds: nil,
+        learnedSamples: 0,
+        distanceFromDeviceFeet: 500,
+        distanceFromTakeoffFeet: 600,
+        bridgeCheckDistanceFeet: 300,
+        maximumTrackDelaySeconds: 30,
+        hasPreviouslyExceededBridgeDistance: true
+    ))
+    #expect(!freshPairedSEICoversRIDAndPeerLoss.alert)
+
+    let stalePairedSEINoLongerCoversRIDLoss = OperationalSignalLossPolicy.evaluate(.init(
+        signalIdleSeconds: 20,
+        trackTelemetryIdleSeconds: 20,
+        pairedSEIIdleSeconds: 11,
+        learnedIntervalSeconds: nil,
+        learnedSamples: 0,
+        distanceFromDeviceFeet: 500,
+        distanceFromTakeoffFeet: 600,
+        bridgeCheckDistanceFeet: 300,
+        maximumTrackDelaySeconds: 30,
+        hasPreviouslyExceededBridgeDistance: true
+    ))
+    #expect(stalePairedSEINoLongerCoversRIDLoss.alert)
+
     let returned = OperationalSignalLossPolicy.evaluate(.init(
         signalIdleSeconds: 12,
         learnedIntervalSeconds: nil,
@@ -1262,6 +1326,29 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
         hasPreviouslyExceededBridgeDistance: true
     ))
     #expect(!returned.alert)
+}
+
+@Test func bridgeAudioMonitoringPausesOnlyWhenEveryActiveFlightHasFreshPairedSEI() {
+    #expect(!OperationalBridgeAlertPolicy.shouldMonitor(
+        scannerRunning: false,
+        activeFlightCount: 1,
+        allActiveFlightsCoveredByFreshPairedSEI: false
+    ))
+    #expect(!OperationalBridgeAlertPolicy.shouldMonitor(
+        scannerRunning: true,
+        activeFlightCount: 0,
+        allActiveFlightsCoveredByFreshPairedSEI: false
+    ))
+    #expect(!OperationalBridgeAlertPolicy.shouldMonitor(
+        scannerRunning: true,
+        activeFlightCount: 1,
+        allActiveFlightsCoveredByFreshPairedSEI: true
+    ))
+    #expect(OperationalBridgeAlertPolicy.shouldMonitor(
+        scannerRunning: true,
+        activeFlightCount: 2,
+        allActiveFlightsCoveredByFreshPairedSEI: false
+    ))
 }
 
 @Test func altitudeAlertUsesAndroidThresholds() {
@@ -1750,6 +1837,14 @@ private func proximityDrone(
 @Test func pilotDisplayPreferenceMatchesAndroidNormalizationAndColorDefaults() {
     #expect(PilotDisplayPreference.normalizePilotCallsign("  apple1 ") == "APPLE1")
     #expect(PilotDisplayPreference.normalizePilotCallsign("  ") == nil)
+    #expect(PilotDisplayPreference.preferredPilotCallsign(
+        saved: "  1sar7 ",
+        existing: "1sar1001"
+    ) == "1SAR7")
+    #expect(PilotDisplayPreference.preferredPilotCallsign(
+        saved: "",
+        existing: "1sar1001"
+    ) == "1sar1001")
     #expect(PilotDisplayPreference.sanitizeTrackColor("e53935", fallback: defaultActiveTrackColor) == "#E53935")
     #expect(PilotDisplayPreference.sanitizeTrackColor("invalid", fallback: defaultActiveTrackColor) == "#1E88E5")
     #expect(PilotDisplayPreference() == PilotDisplayPreference(
@@ -2125,6 +2220,44 @@ private func proximityDrone(
         demResolutionMeters: nil
     )) == "4812' MSL · USGS DEM")
     #expect(OperationalCenterpointElevation.displayText(nil) == "--' MSL")
+    #expect(OperationalCenterpointElevation.displayText(
+        .init(elevationFeet: 4_849, demResolutionMeters: 1),
+        referenceElevationFeet: 4_812,
+        mode: .reference
+    ) == "+37' REF · 1m DEM")
+    #expect(OperationalCenterpointElevation.displayText(
+        .init(elevationFeet: 4_800, demResolutionMeters: nil),
+        referenceElevationFeet: 4_812,
+        mode: .reference
+    ) == "-12' REF · USGS DEM")
+    #expect(OperationalCenterpointElevation.displayText(
+        .init(elevationFeet: 4_800, demResolutionMeters: nil),
+        referenceElevationFeet: 4_812,
+        mode: .msl
+    ) == "4800' MSL · USGS DEM")
+}
+
+@Test func centerpointReferenceLongPressRequiresActiveFocusedCenterpoint() {
+    #expect(OperationalCenterpointElevation.shouldSetReference(
+        focused: true,
+        elevationEnabled: true,
+        pressNearCenter: true
+    ))
+    #expect(!OperationalCenterpointElevation.shouldSetReference(
+        focused: false,
+        elevationEnabled: true,
+        pressNearCenter: true
+    ))
+    #expect(!OperationalCenterpointElevation.shouldSetReference(
+        focused: true,
+        elevationEnabled: false,
+        pressNearCenter: true
+    ))
+    #expect(!OperationalCenterpointElevation.shouldSetReference(
+        focused: true,
+        elevationEnabled: true,
+        pressNearCenter: false
+    ))
 }
 
 @Test func operationalClueGimbalSelectionMatchesAndroidTelemetryFallback() {
@@ -3982,6 +4115,19 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(identity.mappedID == "Eagle1DjMtrc4td")
     #expect(RidAircraftIdentity.modelAbbreviation("Autel Evo 2 Dual 640T") == "lEv2Dl640t")
     #expect(RidAircraftIdentity.modelAbbreviation("Potensic Atom LT") == "PtnscAtm2lt")
+}
+
+@Test func aircraftIdentityKeepsImportedTeamDroneMappingWithPreferredPilotCallsign() {
+    let identity = RidAircraftIdentity(
+        remoteID: "1581F8HGX255W00A0H2W",
+        organization: "NCSSAR",
+        pilotCallsign: "1SAR7",
+        droneDescription: "DJI Matrice 4TD",
+        mappedIDOverride: "1sar1001DjMtrc4td-01"
+    )
+
+    #expect(identity.pilotCallsign == "1SAR7")
+    #expect(identity.mappedID == "1sar1001DjMtrc4td-01")
 }
 
 @Test func aircraftIdentityGuessesAndroidCompatiblePilotCallsign() {

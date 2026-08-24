@@ -8,6 +8,8 @@ import androidx.compose.runtime.remember
 import kotlinx.coroutines.delay
 import org.ncssar.rid2caltopo.app.ScanningService
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.video.StreamFlightActivityRegistry
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetryRegistry
 import org.opendroneid.android.bluetooth.DroneScoutBridgeLossAnnouncementGate
 import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
 
@@ -20,10 +22,21 @@ fun DroneScoutBridgeAlertHost() {
     LaunchedEffect(signal, muted) {
         while (true) {
             val nowMs = System.nanoTime() / 1_000_000L
+            val nowWallMs = System.currentTimeMillis()
+            val activeRemoteIds = CaltopoClient.GetActiveRemoteIdsSnapshot()
+            val allActiveFlightsCoveredByFreshPairedSei = activeRemoteIds.isNotEmpty() &&
+                activeRemoteIds.all { remoteId ->
+                    val activity = StreamFlightActivityRegistry.seiActivityForRemoteId(remoteId)
+                    activity.paired && activity.lastSeiActivityAtMs > 0L &&
+                        nowWallMs - activity.lastSeiActivityAtMs in
+                        0..StreamCameraTelemetryRegistry.DEFAULT_MAX_AGE_MS
+                }
             if (gate.shouldAnnounce(
                     monitoringActive = shouldMonitorDroneScoutBridgeAlerts(
                         scannerRunning = ScanningService.IsRunning(),
-                        activeFlightCount = CaltopoClient.GetActiveFlightCount(),
+                        activeFlightCount = activeRemoteIds.size,
+                        allActiveFlightsCoveredByFreshPairedSei =
+                            allActiveFlightsCoveredByFreshPairedSei,
                     ),
                     lastPingAtMs = signal?.lastSeenMonotonicMs,
                     nowMs = nowMs,
@@ -49,4 +62,5 @@ fun DroneScoutBridgeAlertHost() {
 internal fun shouldMonitorDroneScoutBridgeAlerts(
     scannerRunning: Boolean,
     activeFlightCount: Int,
-): Boolean = scannerRunning && activeFlightCount > 0
+    allActiveFlightsCoveredByFreshPairedSei: Boolean = false,
+): Boolean = scannerRunning && activeFlightCount > 0 && !allActiveFlightsCoveredByFreshPairedSei

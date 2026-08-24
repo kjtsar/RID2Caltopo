@@ -237,6 +237,7 @@ public enum OperationalOfflineMapPlanner {
 public struct OperationalSignalLossInput: Sendable, Equatable {
     public let signalIdleSeconds: Double
     public let trackTelemetryIdleSeconds: Double
+    public let pairedSEIIdleSeconds: Double?
     public let learnedIntervalSeconds: Double?
     public let learnedSamples: Int
     public let distanceFromDeviceFeet: Double
@@ -248,6 +249,7 @@ public struct OperationalSignalLossInput: Sendable, Equatable {
     public init(
         signalIdleSeconds: Double,
         trackTelemetryIdleSeconds: Double? = nil,
+        pairedSEIIdleSeconds: Double? = nil,
         learnedIntervalSeconds: Double?,
         learnedSamples: Int,
         distanceFromDeviceFeet: Double,
@@ -258,6 +260,7 @@ public struct OperationalSignalLossInput: Sendable, Equatable {
     ) {
         self.signalIdleSeconds = signalIdleSeconds
         self.trackTelemetryIdleSeconds = trackTelemetryIdleSeconds ?? signalIdleSeconds
+        self.pairedSEIIdleSeconds = pairedSEIIdleSeconds
         self.learnedIntervalSeconds = learnedIntervalSeconds
         self.learnedSamples = learnedSamples
         self.distanceFromDeviceFeet = distanceFromDeviceFeet
@@ -286,15 +289,31 @@ public enum OperationalSignalLossPolicy {
             || (input.distanceFromTakeoffFeet ?? 0) > input.bridgeCheckDistanceFeet
         let returnedToDevice = input.distanceFromDeviceFeet <= input.bridgeCheckDistanceFeet
         let returnedToTakeoff = input.distanceFromTakeoffFeet.map { $0 <= 30 } ?? false
+        let redundantTelemetryIdleSeconds = min(
+            input.trackTelemetryIdleSeconds,
+            input.pairedSEIIdleSeconds ?? .infinity
+        )
         return OperationalSignalLossDecision(
             alert: exceeded
                 && !returnedToDevice
                 && !returnedToTakeoff
                 && input.signalIdleSeconds > threshold
-                && input.trackTelemetryIdleSeconds > threshold,
+                && redundantTelemetryIdleSeconds > threshold,
             hasExceededBridgeDistance: exceeded,
             idleThresholdSeconds: threshold
         )
+    }
+}
+
+public enum OperationalBridgeAlertPolicy {
+    public static func shouldMonitor(
+        scannerRunning: Bool,
+        activeFlightCount: Int,
+        allActiveFlightsCoveredByFreshPairedSEI: Bool
+    ) -> Bool {
+        scannerRunning
+            && activeFlightCount > 0
+            && !allActiveFlightsCoveredByFreshPairedSEI
     }
 }
 

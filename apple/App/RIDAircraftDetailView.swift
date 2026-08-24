@@ -223,12 +223,17 @@ final class AppleDroneConfirmationStore: ObservableObject {
     @Published private var sessionIdentities: [String: RidAircraftIdentity] = [:]
     @Published private var peerIdentities: [String: RidAircraftIdentity] = [:]
     @Published private var importedIdentities: [String: RidAircraftIdentity] = [:]
+    @Published private(set) var preferredPilotCallsign: String
     private var confirmationLifecycle = CurrentFlightConfirmationLifecycle()
     private var ignoredRemoteIDs: Set<String> = []
     private let defaults = UserDefaults.standard
     private static let ignoredRemoteIDsDefaultsKey = "org.ignoredRemoteIDs"
+    private static let preferredPilotCallsignDefaultsKey = "operator.pilotCallsign"
 
     init() {
+        preferredPilotCallsign = PilotDisplayPreference.normalizePilotCallsign(
+            UserDefaults.standard.string(forKey: Self.preferredPilotCallsignDefaultsKey)
+        ) ?? ""
         if let entries = defaults.array(forKey: "org.ridMappings") as? [[String: String]] {
             importedIdentities = Dictionary(uniqueKeysWithValues: entries.compactMap { entry in
                 guard let remoteID = entry["remoteID"], !remoteID.isEmpty else { return nil }
@@ -300,6 +305,14 @@ final class AppleDroneConfirmationStore: ObservableObject {
     }
 
     var importedMappingCount: Int { importedIdentities.count }
+
+    func setPreferredPilotCallsign(_ value: String) {
+        preferredPilotCallsign = value
+        defaults.set(
+            PilotDisplayPreference.normalizePilotCallsign(value) ?? "",
+            forKey: Self.preferredPilotCallsignDefaultsKey
+        )
+    }
 
     var importedMappings: [RidAircraftIdentity] {
         importedIdentities.values.sorted { $0.remoteID < $1.remoteID }
@@ -404,6 +417,7 @@ struct DroneConfirmationView: View {
     @ObservedObject var identityStore: AppleDroneConfirmationStore
     let onConfirm: (RidAircraftIdentity) -> Void
     let onIgnore: (() -> Void)?
+    private let mappedIDOverride: String?
     @Environment(\.dismiss) private var dismiss
     @State private var organization: String
     @State private var pilotCallsign: String
@@ -420,8 +434,14 @@ struct DroneConfirmationView: View {
         self.identityStore = identityStore
         self.onConfirm = onConfirm
         self.onIgnore = onIgnore
+        mappedIDOverride = existing.flatMap { identity in
+            identity.mappedID == remoteID ? nil : identity.mappedID
+        }
         _organization = State(initialValue: existing?.organization ?? "")
-        _pilotCallsign = State(initialValue: existing?.pilotCallsign ?? "")
+        _pilotCallsign = State(initialValue: PilotDisplayPreference.preferredPilotCallsign(
+            saved: identityStore.preferredPilotCallsign,
+            existing: existing?.pilotCallsign
+        ))
         _droneDescription = State(initialValue: existing?.droneDescription ?? "")
     }
 
@@ -482,7 +502,8 @@ struct DroneConfirmationView: View {
             remoteID: remoteID,
             organization: organization,
             pilotCallsign: pilotCallsign,
-            droneDescription: droneDescription
+            droneDescription: droneDescription,
+            mappedIDOverride: mappedIDOverride
         )
     }
 }

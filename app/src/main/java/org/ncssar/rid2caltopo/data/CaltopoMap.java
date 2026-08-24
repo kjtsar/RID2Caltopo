@@ -1126,6 +1126,8 @@ public class CaltopoMap {
                             "SetMapStatus(up): starting peer coordination. trackerConfigured=%s",
                             !CaltopoClient.GetTrackerApiKey().isEmpty() &&
                                     !CaltopoClient.GetTrackerUrlPfx().isEmpty()));
+                    getCurrentRuntime().getPeerCoordinator()
+                            .setStandaloneStandbyEligible(false);
                     getCurrentRuntime().getPeerCoordinator().start(
                             MapNode.getId(), GetMyUUID(), R2CActivity.MyDeviceName, null);
                     getCurrentRuntime().getPeerCoordinator()
@@ -1370,6 +1372,8 @@ public class CaltopoMap {
                 location.getLatitude(),
                 location.getLongitude(),
                 CaltopoClient.DescribeTrackerCredentialSelection("coordination")));
+        getCurrentRuntime().getPeerCoordinator()
+                .setStandaloneStandbyEligible(true);
         getCurrentRuntime().getPeerCoordinator().start(
                 scopeId,
                 GetMyUUID(),

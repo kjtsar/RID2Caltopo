@@ -5,6 +5,8 @@ import org.junit.After
 import org.junit.Before
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegTelemetry
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetryRegistry
 
 class StreamTelemetryBindingTest {
     @Before
@@ -15,6 +17,7 @@ class StreamTelemetryBindingTest {
     @After
     fun tearDownFlightActivityRegistry() {
         StreamFlightActivityRegistry.resetForTests()
+        StreamCameraTelemetryRegistry.clear("RED1")
     }
 
     @Test
@@ -266,6 +269,30 @@ class StreamTelemetryBindingTest {
             true,
             StreamFlightActivityRegistry.activityForRemoteId("RID-1", 11_000L).publisherActive,
         )
+    }
+
+    @Test
+    fun pairedStreamExposesLastSeiReceiptForBoundAircraft() {
+        StreamFlightActivityRegistry.bindRuntime("Red1", "RID-1")
+        StreamCameraTelemetryRegistry.update(
+            designator = "red1",
+            telemetry = FfmpegTelemetry(
+                sourceTag = "dji-sei-245",
+                gimbalPitchDeg = -30.0,
+                cameraYawDeg = 90.0,
+                horizontalFovDeg = 40.0,
+                verticalFovDeg = 25.0,
+                latitude = 38.85,
+                longitude = -121.06,
+                altitudeMeters = 330.0,
+            ),
+            nowMs = 12_345L,
+        )
+
+        val activity = StreamFlightActivityRegistry.seiActivityForRemoteId("RID-1")
+
+        assertEquals(true, activity.paired)
+        assertEquals(12_345L, activity.lastSeiActivityAtMs)
     }
 
     private fun testTelemetry(remoteId: String, mappedId: String): StreamTelemetryState {

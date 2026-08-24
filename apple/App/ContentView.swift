@@ -1181,6 +1181,7 @@ struct ContentView: View {
         HStack(spacing: 2) {
             androidIncidentMapButton
             androidOpPeriodCell
+            androidPilotCallsignCell
             androidHeaderCell("Coordinator", androidCoordinatorStatus, width: 150)
             androidHeaderCell("Team Drones", "\(droneConfirmations.importedMappingCount)", width: 110)
             androidHeaderCell("", deviceVersionText, width: 190)
@@ -1233,6 +1234,26 @@ struct ContentView: View {
         }
         .padding(.horizontal, 6)
         .frame(width: 120, height: 58)
+        .background(Color(uiColor: .secondarySystemBackground))
+    }
+
+    private var androidPilotCallsignCell: some View {
+        VStack(spacing: 2) {
+            Text("Pilot Callsign")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("", text: Binding(
+                get: { droneConfirmations.preferredPilotCallsign },
+                set: { droneConfirmations.setPreferredPilotCallsign($0) }
+            ))
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.center)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+                .accessibilityLabel("Pilot Callsign")
+        }
+        .padding(.horizontal, 6)
+        .frame(width: 140, height: 58)
         .background(Color(uiColor: .secondarySystemBackground))
     }
 
@@ -1502,7 +1523,8 @@ struct ContentView: View {
 
     private var androidCoordinatorStatus: String {
         switch peerCoordinator.status {
-        case .healthy: "Tracker OK"
+        case .healthy: "Tracker verified"
+        case .standby: "Tracker standby"
         case .degraded: "Tracker degraded"
         case .unavailable: "Unavailable"
         case .standalone: "Disabled"
@@ -2022,6 +2044,7 @@ struct ContentView: View {
         let color: String
         switch peerCoordinator.status {
         case .healthy: color = "#2e7d32"
+        case .standby: color = "#1976d2"
         case .standalone: color = "#1976d2"
         case .connecting: color = "#f9a825"
         case .degraded: color = "#f9a825"
@@ -2107,7 +2130,8 @@ struct ContentView: View {
             alertEligibility: demoAlerts ? { _ in true } : peerCoordinator.isLocalAlertEligible,
             bridgeCheckDistanceFeet: Double(orgConfigSettings.bridgeCheckDistanceFeet),
             maximumTrackDelaySeconds: Double(orgConfigSettings.newTrackDelaySeconds),
-            bridgeLastSeenAt: bluetoothScanner.bridgeLastSeenAt
+            bridgeLastSeenAt: bluetoothScanner.bridgeLastSeenAt,
+            pairedSEILastActivityAt: streamRegistry.djiSEILastActivityByAircraftID()
         )
     }
 
@@ -2145,8 +2169,18 @@ struct ContentView: View {
         while !Task.isCancelled,
               !AppleApplicationCleanupCenter.shared.isShutdownRequested {
             updateOperationalAlerts()
+            let activeAircraftIDs = ridTracks.tracks.map(\.aircraftID)
+            let allActiveFlightsCoveredByFreshPairedSEI =
+                streamRegistry.allAircraftHaveFreshPairedSEI(
+                    aircraftIDs: activeAircraftIDs
+                )
             bridgeAlerts.update(
-                monitoringActive: bluetoothScanner.state == .scanning && !ridTracks.tracks.isEmpty,
+                monitoringActive: OperationalBridgeAlertPolicy.shouldMonitor(
+                    scannerRunning: bluetoothScanner.state == .scanning,
+                    activeFlightCount: activeAircraftIDs.count,
+                    allActiveFlightsCoveredByFreshPairedSEI:
+                        allActiveFlightsCoveredByFreshPairedSEI
+                ),
                 lastPingAt: bluetoothScanner.bridgeLastSeenAt
             )
             if !ProcessInfo.processInfo.arguments.contains("--demo-notam") {

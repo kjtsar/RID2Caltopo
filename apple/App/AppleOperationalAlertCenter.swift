@@ -41,6 +41,7 @@ final class AppleOperationalAlertCenter: ObservableObject {
         bridgeCheckDistanceFeet: Double = 20,
         maximumTrackDelaySeconds: Double = 30,
         bridgeLastSeenAt: Date? = nil,
+        pairedSEILastActivityAt: [String: Date] = [:],
         now: Date = Date()
     ) {
         let activeIDs = Set(tracks.map(\.aircraftID))
@@ -69,6 +70,9 @@ final class AppleOperationalAlertCenter: ObservableObject {
                 let decision = OperationalSignalLossPolicy.evaluate(.init(
                     signalIdleSeconds: max(0, now.timeIntervalSince(track.lastSignalAt)),
                     trackTelemetryIdleSeconds: max(0, now.timeIntervalSince(track.lastAircraftMessageAt)),
+                    pairedSEIIdleSeconds: pairedSEILastActivityAt[track.aircraftID].map {
+                        max(0, now.timeIntervalSince($0))
+                    },
                     learnedIntervalSeconds: intervals.isEmpty ? nil : intervals.reduce(0, +) / Double(intervals.count),
                     learnedSamples: intervals.count,
                     distanceFromDeviceFeet: currentDistance,

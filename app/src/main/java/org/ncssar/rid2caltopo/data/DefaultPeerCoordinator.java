@@ -55,6 +55,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     private volatile double myLat;
     private volatile double myLon;
     private volatile long myCaltopoRttMs = 2_000L;
+    private volatile boolean standaloneStandbyEligible;
     @NonNull private volatile PeerCoordinator activeCoordinator = getMqttCoordinator();
     @NonNull private volatile CoordinationIndicatorState lastIndicatorState = CoordinationIndicatorState.UNCONFIGURED;
     @NonNull private volatile String lastLoggedStatusSignature = "";
@@ -123,6 +124,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         }
         activeCoordinator.setCoordinationIndicatorListener(this::handleChildCoordinationIndicatorStateChanged);
         activeCoordinator.setVideoStreamRequestListener(videoStreamRequestListener);
+        activeCoordinator.setStandaloneStandbyEligible(standaloneStandbyEligible);
         activeCoordinator.updateManagedVideoStreams(
                 managedVideoIncidentName,
                 managedVideoStreams
@@ -131,6 +133,12 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         activeCoordinator.updateCaltopoRtt(myCaltopoRttMs);
         activeCoordinator.updateMyPosition(myLat, myLon);
         emitCoordinationIndicatorIfChanged();
+    }
+
+    @Override
+    public void setStandaloneStandbyEligible(boolean eligible) {
+        standaloneStandbyEligible = eligible;
+        activeCoordinator.setStandaloneStandbyEligible(eligible);
     }
 
     @Override
@@ -459,11 +467,14 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         }
         String channel = isTrackerConfiguredForCoordination() ? "Tracker" : "MQTT";
         if (state == CoordinationIndicatorState.IDLE) {
-            return channel + " link idle";
+            return channel + " link standby";
         }
-        return channel + (state == CoordinationIndicatorState.HEALTHY
-                ? " link healthy"
-                : " link degraded");
+        if (state == CoordinationIndicatorState.HEALTHY) {
+            return isTrackerConfiguredForCoordination()
+                    ? "Tracker verified"
+                    : "MQTT link healthy";
+        }
+        return channel + " link degraded";
     }
 
     @NonNull
@@ -573,6 +584,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             activeCoordinator.setPeerListChangedListener(peerListChangedListener);
         }
         activeCoordinator.setCoordinationIndicatorListener(this::handleChildCoordinationIndicatorStateChanged);
+        activeCoordinator.setStandaloneStandbyEligible(standaloneStandbyEligible);
         activeCoordinator.start(startedMapId, startedGuid, startedName, startedBrokerUri);
         activeCoordinator.updateCaltopoRtt(myCaltopoRttMs);
         activeCoordinator.updateMyPosition(myLat, myLon);

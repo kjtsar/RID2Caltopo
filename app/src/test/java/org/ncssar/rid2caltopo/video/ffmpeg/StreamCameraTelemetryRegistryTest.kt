@@ -47,6 +47,7 @@ class StreamCameraTelemetryRegistryTest {
         assertEquals(-121.132845, fresh?.referenceLongitudeDeg ?: 0.0, 0.0)
         assertEquals(574.595, fresh?.referenceAltitudeMeters ?: 0.0, 0.0)
         assertEquals((0..8).map(Int::toDouble), fresh?.attitudeAnglesDeg)
+        assertEquals(10_000L, StreamCameraTelemetryRegistry.lastReceivedAtMs("mtrc4td"))
         assertNull(StreamCameraTelemetryRegistry.fresh("MTRC4TD", nowMs = 13_001))
         StreamCameraTelemetryRegistry.clear("MTRC4TD")
     }

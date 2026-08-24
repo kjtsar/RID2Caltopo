@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.ncssar.rid2caltopo.app.R2CActivity
+import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.app.ScanningService
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
@@ -32,6 +33,7 @@ import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import org.ncssar.rid2caltopo.data.SimpleTimer
+import org.ncssar.rid2caltopo.data.TabletPilotCallsignPrefs
 import java.util.concurrent.atomic.AtomicBoolean
 
 enum class ActiveScreen {
@@ -801,7 +803,10 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             DroneSpecConfirmationLogic.buildInitialState(
                 drone = drone,
                 defaultOrganization = CaltopoClient.GetHomeOrgName(),
-                defaultUnknownOrganization = lastUnknownDroneConfirmationOrganization
+                defaultUnknownOrganization = lastUnknownDroneConfirmationOrganization,
+                defaultPilotCallsign = R2CApplication.getAppCtxt()
+                    ?.let(TabletPilotCallsignPrefs::load)
+                    .orEmpty()
             )
         )
     }

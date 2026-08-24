@@ -14,6 +14,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
+import org.ncssar.rid2caltopo.video.StreamFlightActivityRegistry
 import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
 import kotlin.math.max
 
@@ -163,16 +164,23 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                     maxTrackDelayMs = newTrackDelayMs
                 )
                 val trackTelemetryIdleMs = spec.trackTelemetryIdleTimeInMsec(nowMs)
-                if (shouldSuppressForPeerVisibleTelemetry(
+                val pairedSei = StreamFlightActivityRegistry.seiActivityForRemoteId(spec.remoteId)
+                val pairedSeiIdleMs = pairedSei.lastSeiActivityAtMs
+                    .takeIf { pairedSei.paired && it > 0L }
+                    ?.let { (nowMs - it).coerceAtLeast(0L) }
+                    ?: Long.MAX_VALUE
+                val redundantTelemetryIdleMs = minOf(trackTelemetryIdleMs, pairedSeiIdleMs)
+                if (shouldSuppressForRedundantTelemetry(
                         signalIdleMs = signalIdleMs,
-                        trackTelemetryIdleMs = trackTelemetryIdleMs,
+                        redundantTelemetryIdleMs = redundantTelemetryIdleMs,
                         thresholdMs = effectiveIdleThresholdMs
                     )
                 ) {
                     CTDebug(
                         SIGNAL_LOSS_ALERT_TAG,
-                        "Suppressing LOS for peer-visible ${spec.mappedId} flightKey=$flightKey " +
+                        "Suppressing LOS for redundant telemetry ${spec.mappedId} flightKey=$flightKey " +
                             "signalIdleMs=$signalIdleMs trackTelemetryIdleMs=$trackTelemetryIdleMs " +
+                            "pairedSeiIdleMs=${pairedSeiIdleMs.takeUnless { it == Long.MAX_VALUE } ?: "unavailable"} " +
                             "thresholdMs=$effectiveIdleThresholdMs"
                     )
                     flightMonitorState[flightKey] = FlightMonitorState(
@@ -473,11 +481,11 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         bridgeCheckDistanceFt: Double
     ): Boolean = bridgeVerified && stationaryRidReports && referenceDistanceFt <= bridgeCheckDistanceFt
 
-    private fun shouldSuppressForPeerVisibleTelemetry(
+    private fun shouldSuppressForRedundantTelemetry(
         signalIdleMs: Long,
-        trackTelemetryIdleMs: Long,
+        redundantTelemetryIdleMs: Long,
         thresholdMs: Long
-    ): Boolean = signalIdleMs > thresholdMs && trackTelemetryIdleMs <= thresholdMs
+    ): Boolean = signalIdleMs > thresholdMs && redundantTelemetryIdleMs <= thresholdMs
 
     private fun isBridgeRecentlySeen(
         lastSeenMonotonicMs: Long?,
@@ -520,9 +528,9 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         signalIdleMs: Long,
         trackTelemetryIdleMs: Long,
         thresholdMs: Long
-    ): Boolean = shouldSuppressForPeerVisibleTelemetry(
+    ): Boolean = shouldSuppressForRedundantTelemetry(
         signalIdleMs = signalIdleMs,
-        trackTelemetryIdleMs = trackTelemetryIdleMs,
+        redundantTelemetryIdleMs = trackTelemetryIdleMs,
         thresholdMs = thresholdMs
     )
 

@@ -76,3 +76,22 @@ object PilotDisplayPrefs {
         return true
     }
 }
+
+object TabletPilotCallsignPrefs {
+    private const val PREFS_NAME = "operator_identity_prefs"
+    private const val KEY_PILOT_CALLSIGN = "pilot_callsign"
+
+    fun load(context: Context): String = normalizePilotCallsign(
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_PILOT_CALLSIGN, null)
+    ).orEmpty()
+
+    fun save(context: Context, pilotCallsign: String) {
+        val normalized = normalizePilotCallsign(pilotCallsign).orEmpty()
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PILOT_CALLSIGN, normalized)
+            .apply()
+    }
+}

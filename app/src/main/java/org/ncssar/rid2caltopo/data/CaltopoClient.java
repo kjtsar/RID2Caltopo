@@ -752,6 +752,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return activeCount;
     }
 
+    @NonNull
+    public static List<String> GetActiveRemoteIdsSnapshot() {
+        ClientClassState ccs = GetState();
+        ArrayList<String> remoteIds = new ArrayList<>();
+        if (ccs.droneSpecTable == null || ccs.droneSpecTable.isEmpty()) return remoteIds;
+        for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+            if (ds != null && ds.isActive()) remoteIds.add(ds.getRemoteId());
+        }
+        return remoteIds;
+    }
+
     public static int GetActiveFlightCountSnapshot() {
         ClientClassState ccs = Ccstate;
         if (ccs == null || ccs.droneSpecTable == null || ccs.droneSpecTable.isEmpty()) return -1;

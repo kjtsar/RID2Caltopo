@@ -103,6 +103,16 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
                     .padding(horizontal = 4.dp),
             )
         }
+        Column(
+            modifier = colModifier.width(150.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            PilotCallsignField(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+            )
+        }
         Column(modifier = colModifier) {
             val coordinatorStatus = coordinatorStatusDisplayText(
                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.coordinationStatusText
@@ -165,7 +175,9 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
 }
 
 internal fun coordinatorStatusDisplayText(statusText: String): String = when (statusText) {
-    "Tracker link healthy" -> "Tracker OK"
+    "Tracker verified" -> "Tracker verified"
+    "Tracker link healthy" -> "Tracker verified"
+    "Tracker link standby" -> "Tracker standby"
     "Tracker link degraded" -> "Tracker degraded"
     "Tracker link disabled" -> "Disabled"
     "Tracker link not configured",

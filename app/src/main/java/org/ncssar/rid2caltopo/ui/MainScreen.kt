@@ -103,6 +103,8 @@ import org.ncssar.rid2caltopo.video.ComplianceAlertDialog
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge
 import org.opendroneid.android.bluetooth.DroneScoutBridgeMonitor
 import org.opendroneid.android.bluetooth.DroneScoutBridgeStatusLogGate
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -220,10 +222,45 @@ internal fun shouldLaunchArchiveDirPicker(
 
 internal fun archiveDirPromptMessage(permissionMissing: Boolean): String =
     if (permissionMissing) {
-        "Archive folder access expired. Please re-select the archive directory for drone tracks and map cache."
+        "Android needs permission again to save drone tracks, logs, and map data."
     } else {
-        "Select an archive directory for drone tracks and map cache."
+        "Select an archive folder for drone tracks, logs, and map data."
     }
+
+internal fun archiveDirDisplayPath(uriString: String?): String? {
+    val encodedDocumentId = uriString
+        ?.substringAfter("/tree/", "")
+        ?.substringBefore("/document/")
+        ?.substringBefore('?')
+        ?.takeIf { it.isNotBlank() }
+        ?: return null
+    val documentId = runCatching {
+        URLDecoder.decode(encodedDocumentId, StandardCharsets.UTF_8.name())
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: return null
+    return if (documentId.startsWith("primary:")) {
+        "sdcard:/" + documentId.removePrefix("primary:").trimStart('/')
+    } else {
+        documentId.replaceFirst(":", ":/")
+    }
+}
+
+internal data class ArchiveDirPromptActions(
+    val continueLabel: String,
+    val chooseDifferentLabel: String?
+)
+
+internal fun archiveDirPromptActions(
+    permissionMissing: Boolean,
+    previousArchivePath: String?
+): ArchiveDirPromptActions = ArchiveDirPromptActions(
+    continueLabel = previousArchivePath?.let { "Continue using $it" }
+        ?: "Select archive folder",
+    chooseDifferentLabel = if (permissionMissing && previousArchivePath != null) {
+        "Choose a different archive folder"
+    } else {
+        null
+    }
+)
 
 internal suspend fun <T> readMutualAidPackagePreviewOffMain(
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -1181,6 +1218,7 @@ fun MainScreen(
     var archiveDirPickerOpen by rememberSaveable { mutableStateOf(false) }
     var pendingArchiveDirPromptMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingArchiveDirInitialUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingArchiveDirPermissionMissing by rememberSaveable { mutableStateOf(false) }
     val queryArchiveDirLauncher = rememberLauncherForActivityResult(
         contract = OpenArchiveDir(),
         onResult = { uri ->
@@ -1224,16 +1262,29 @@ fun MainScreen(
             val permissionMissing = CaltopoClient.WasArchiveUriPermissionMissing()
             forceArchiveDirPrompt = false
             pendingArchiveDirInitialUri = initialUri?.toString()
+            pendingArchiveDirPermissionMissing = permissionMissing
             pendingArchiveDirPromptMessage = archiveDirPromptMessage(permissionMissing)
             CTDebug(tag, "LaunchedEffect() prepared archiveDir prompt initialUri='${initialUri ?: "<none>"}'")
         }
     }
     pendingArchiveDirPromptMessage?.let { message ->
+        val previousArchivePath = archiveDirDisplayPath(pendingArchiveDirInitialUri)
+        val promptActions = archiveDirPromptActions(
+            pendingArchiveDirPermissionMissing,
+            previousArchivePath
+        )
         AlertDialog(
-            // Required setup can only continue through Select or the explicit
-            // session-temporary Not now fallback.
+            // Archive setup can only continue through a persistent folder grant.
             onDismissRequest = {},
-            title = { Text("Archive directory") },
+            title = {
+                Text(
+                    if (pendingArchiveDirPermissionMissing) {
+                        "Archive folder access expired"
+                    } else {
+                        "Archive folder"
+                    }
+                )
+            },
             text = { Text(message) },
             confirmButton = {
                 TextButton(
@@ -1241,23 +1292,29 @@ fun MainScreen(
                         val initialUri = pendingArchiveDirInitialUri?.let(Uri::parse)
                         pendingArchiveDirPromptMessage = null
                         pendingArchiveDirInitialUri = null
+                        pendingArchiveDirPermissionMissing = false
                         archiveDirPickerOpen = true
                         CTDebug(tag, "Archive directory prompt confirmed initialUri='${initialUri ?: "<none>"}'")
                         queryArchiveDirLauncher.launch(initialUri)
                     }
                 ) {
-                    Text("Select")
+                    Text(promptActions.continueLabel)
                 }
             },
             dismissButton = {
-                TextButton(
-                    onClick = {
-                        CaltopoClient.UseTemporaryArchiveDirForSession()
-                        pendingArchiveDirPromptMessage = null
-                        pendingArchiveDirInitialUri = null
+                promptActions.chooseDifferentLabel?.let { chooseDifferentLabel ->
+                    TextButton(
+                        onClick = {
+                            pendingArchiveDirPromptMessage = null
+                            pendingArchiveDirInitialUri = null
+                            pendingArchiveDirPermissionMissing = false
+                            archiveDirPickerOpen = true
+                            CTDebug(tag, "Archive directory prompt requested a different folder")
+                            queryArchiveDirLauncher.launch(null)
+                        }
+                    ) {
+                        Text(chooseDifferentLabel)
                     }
-                ) {
-                    Text("Not now")
                 }
             }
         )

@@ -337,6 +337,28 @@ struct AppleDJICameraTelemetry: Equatable {
             receivedAt: receivedAt
         )
     }
+
+    func replacingRelativeUpMeters(_ value: Double?) -> AppleDJICameraTelemetry {
+        AppleDJICameraTelemetry(
+            rawAzimuthCandidateDegrees: rawAzimuthCandidateDegrees,
+            cameraAzimuthDegrees: cameraAzimuthDegrees,
+            courseDegrees: courseDegrees,
+            rawTiltDegrees: rawTiltDegrees,
+            tiltDegrees: tiltDegrees,
+            horizontalFovDegrees: horizontalFovDegrees,
+            verticalFovDegrees: verticalFovDegrees,
+            attitudeAnglesDegrees: attitudeAnglesDegrees,
+            latitudeDegrees: latitudeDegrees,
+            longitudeDegrees: longitudeDegrees,
+            altitudeMeters: altitudeMeters,
+            relativeUpMeters: value,
+            referenceLatitudeDegrees: referenceLatitudeDegrees,
+            referenceLongitudeDegrees: referenceLongitudeDegrees,
+            referenceAltitudeMeters: referenceAltitudeMeters,
+            sourceTimestampMicroseconds: sourceTimestampMicroseconds,
+            receivedAt: receivedAt
+        )
+    }
 }
 
 @MainActor
@@ -890,9 +912,8 @@ final class AppleVideoFrameSource: ObservableObject {
                 }
                 latestDJICameraTelemetry = AppleDJICameraTelemetry(
                     rawAzimuthCandidateDegrees: RidHeading.normalized(djiAzimuthDegrees) ?? djiAzimuthDegrees,
-                    cameraAzimuthDegrees: OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(
-                        seiCameraAzimuthDegrees: djiAzimuthDegrees,
-                        magneticDeclinationDegrees: AppleMagneticNorth.declinationDegrees
+                    cameraAzimuthDegrees: OperationalClueGeometry.djiControllerCameraAzimuthDegrees(
+                        seiCameraAzimuthDegrees: djiAzimuthDegrees
                     ),
                     courseDegrees: RidHeading.normalized(djiPositionValues[6]),
                     rawTiltDegrees: djiTiltDegrees,

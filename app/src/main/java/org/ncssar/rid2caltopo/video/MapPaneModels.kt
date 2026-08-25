@@ -161,10 +161,44 @@ internal data class DroneMapPoint(
     val timestampMsec: Long,
     val receivedAtMsec: Long? = null,
     val headingDeg: Double? = null,
+    val speedKnots: Double? = null,
     val cameraAzimuthDeg: Double? = null,
     val horizontalCameraFovDeg: Double? = null,
     val droneSpec: CtDroneSpec? = null
 )
+
+/**
+ * Chooses peer traffic only when its source sample is newer than every local
+ * sample for the same aircraft. Equal timestamps deliberately retain the local
+ * point, while an absent or stale local point yields immediately to the peer.
+ */
+internal fun selectFreshestDroneMapEntries(
+    localEntries: List<Pair<DroneMapPoint, Boolean>>,
+    peerEntries: List<Pair<DroneMapPoint, Boolean>>,
+): List<Pair<DroneMapPoint, Boolean>> {
+    val latestLocalTimestampByRemoteId = localEntries
+        .groupBy { it.first.remoteId }
+        .mapValues { (_, entries) -> entries.maxOf { it.first.timestampMsec } }
+    val latestPeerByRemoteId = peerEntries
+        .groupBy { it.first.remoteId }
+        .mapValues { (_, entries) ->
+            entries.maxWithOrNull(
+                compareBy<Pair<DroneMapPoint, Boolean>> { it.first.timestampMsec }
+                    .thenBy { it.first.receivedAtMsec ?: Long.MIN_VALUE }
+            )!!
+        }
+    val peerPreferredRemoteIds = latestPeerByRemoteId
+        .filter { (remoteId, peerEntry) ->
+            peerEntry.first.timestampMsec >
+                (latestLocalTimestampByRemoteId[remoteId] ?: Long.MIN_VALUE)
+        }
+        .keys
+
+    return localEntries.filter { it.first.remoteId !in peerPreferredRemoteIds } +
+        latestPeerByRemoteId
+            .filterKeys { it in peerPreferredRemoteIds }
+            .values
+}
 
 internal data class LabelRect(
     val left: Int,

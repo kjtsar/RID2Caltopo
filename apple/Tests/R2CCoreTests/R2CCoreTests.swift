@@ -1,6 +1,27 @@
 import Foundation
 import Testing
 
+@Test func operationalMapTrackFreshnessPrefersOnlyStrictlyNewerPeerSamples() {
+    let local = Date(timeIntervalSince1970: 1_000)
+
+    #expect(OperationalMapTrackFreshness.prefersPeer(
+        localSampleAt: local,
+        peerSampleAt: local.addingTimeInterval(0.001)
+    ))
+    #expect(!OperationalMapTrackFreshness.prefersPeer(
+        localSampleAt: local,
+        peerSampleAt: local
+    ))
+    #expect(!OperationalMapTrackFreshness.prefersPeer(
+        localSampleAt: local,
+        peerSampleAt: local.addingTimeInterval(-0.001)
+    ))
+    #expect(OperationalMapTrackFreshness.prefersPeer(
+        localSampleAt: nil,
+        peerSampleAt: local
+    ))
+}
+
 @Test func appleTrackerEnrollmentLinksOpenTheInstalledApp() throws {
     let appleRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -43,6 +64,201 @@ import Testing
     #expect(entitlements.contains("<string>applinks:r2c-tracker.com</string>"))
 }
 @testable import R2CCore
+
+@Test func seiPositionContinuationRequiresRidAgreementOncePerStreamEpoch() {
+    var continuation = OperationalSEIPositionContinuation()
+
+    let mismatched = continuation.acceptHorizontalPosition(
+        latitudeDegrees: 39.1,
+        longitudeDegrees: -121.1,
+        ridLatitudeDegrees: 39.2,
+        ridLongitudeDegrees: -121.2,
+        sourceTimestampMicroseconds: 1_000_000
+    )
+    #expect(!mismatched)
+    let validated = continuation.acceptHorizontalPosition(
+        latitudeDegrees: 39.2,
+        longitudeDegrees: -121.2,
+        ridLatitudeDegrees: 39.2,
+        ridLongitudeDegrees: -121.2,
+        sourceTimestampMicroseconds: 2_000_000
+    )
+    #expect(validated)
+    let continued = continuation.acceptHorizontalPosition(
+        latitudeDegrees: 39.205,
+        longitudeDegrees: -121.205,
+        ridLatitudeDegrees: 39.2,
+        ridLongitudeDegrees: -121.2,
+        sourceTimestampMicroseconds: 3_000_000
+    )
+    #expect(continued)
+}
+
+@Test func seiPositionContinuationRequiresRevalidationAfterSourceTimestampRestart() {
+    var continuation = OperationalSEIPositionContinuation()
+    let validated = continuation.acceptHorizontalPosition(
+        latitudeDegrees: 39.2,
+        longitudeDegrees: -121.2,
+        ridLatitudeDegrees: 39.2,
+        ridLongitudeDegrees: -121.2,
+        sourceTimestampMicroseconds: 5_000_000
+    )
+    #expect(validated)
+    let restartedAwayFromRID = continuation.acceptHorizontalPosition(
+        latitudeDegrees: 39.205,
+        longitudeDegrees: -121.205,
+        ridLatitudeDegrees: 39.2,
+        ridLongitudeDegrees: -121.2,
+        sourceTimestampMicroseconds: 100_000
+    )
+    #expect(!restartedAwayFromRID)
+}
+
+@Test func seiRelativeUpRequiresRidAgreementThenContinuesUntilStreamRestart() {
+    var continuation = OperationalSEIPositionContinuation()
+    let mismatched = continuation.acceptRelativeUp(
+        observedRelativeUpMeters: 80,
+        ridAltitudeMeters: 510,
+        takeoffReportedAltitudeMeters: 500
+    )
+    #expect(!mismatched)
+    let validated = continuation.acceptRelativeUp(
+        observedRelativeUpMeters: 10,
+        ridAltitudeMeters: 510,
+        takeoffReportedAltitudeMeters: 500
+    )
+    #expect(validated)
+    let continued = continuation.acceptRelativeUp(
+        observedRelativeUpMeters: 120,
+        ridAltitudeMeters: 510,
+        takeoffReportedAltitudeMeters: 500
+    )
+    #expect(continued)
+    continuation.reset()
+    let afterReset = continuation.acceptRelativeUp(
+        observedRelativeUpMeters: 120,
+        ridAltitudeMeters: 510,
+        takeoffReportedAltitudeMeters: 500
+    )
+    #expect(!afterReset)
+}
+
+@Test func trackerPeerTrafficWireIncludesFreshnessAndSourceIdentity() throws {
+    let client = TrackerCoordinationClient(
+        mapID: "MAP1", zoneID: "zone-a", name: "Alpha", appVersion: "2.1", appVersionCode: 160
+    )
+    let sighting = TrackerCoordinationSighting(
+        identity: TrackerCoordinationIdentity(
+            remoteID: "RID-1", mappedID: "1SAR7DJ", organization: "", model: "", ownerName: ""
+        ),
+        droneTimestampMilliseconds: 1_234,
+        latitude: 39.2,
+        longitude: -121.2,
+        altitudeMeters: 140,
+        headingDegrees: 87
+    )
+    let data = try TrackerCoordinationWire.trafficPosition(
+        client: client, sighting: sighting, source: "sei", sourceEpoch: "epoch-1", sequence: 9,
+        altitudeSampleTimestampMilliseconds: 1_100,
+        altitudeCalibration: TrackerTrafficAltitudeCalibration(
+            flightEpoch: "flight-1",
+            state: "locked",
+            correctionMeters: 12.5,
+            lockedAtMilliseconds: 1_000,
+            demSource: "usgs-geotiff-local-1m",
+            demResolutionMeters: 1
+        ),
+        proximityAlertDistanceFeet: 100
+    )
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(object["type"] as? String == "traffic_position")
+    #expect(object["sampleTs"] as? Int == 1_234)
+    #expect(object["source"] as? String == "sei")
+    #expect(object["sourceEpoch"] as? String == "epoch-1")
+    #expect(object["seq"] as? Int == 9)
+    #expect(object["altSampleTs"] as? Int == 1_100)
+    #expect(object["flightEpoch"] as? String == "flight-1")
+    #expect(object["altCalibrationState"] as? String == "locked")
+    #expect(object["mslAltM"] as? Double == 152.5)
+    #expect(object["mslAltSampleTs"] as? Int == 1_100)
+    #expect(object["padFt"] as? Double == 100)
+    #expect(object["headingDeg"] as? Double == 87)
+}
+
+@Test func trackerPeerTrafficParsesWithoutChangingOwnership() throws {
+    var state = TrackerCoordinationProtocolState(localZoneID: "zone-local")
+    let data = try JSONSerialization.data(withJSONObject: [
+        "type": "peer_traffic_position",
+        "fromZoneId": "zone-peer",
+        "remoteId": "RID-1",
+        "mappedId": "1SAR7DJ",
+        "source": "sei",
+        "sourceEpoch": "epoch-1",
+        "seq": 9,
+        "sampleTs": 1_234,
+        "receivedTs": 1_500,
+        "lat": 39.2,
+        "lng": -121.2,
+        "altM": 140.0,
+        "altSampleTs": 1_100,
+        "flightEpoch": "flight-1",
+        "altCalibrationState": "locked",
+        "mslAltM": 152.5,
+        "mslAltSampleTs": 1_100,
+        "altCorrectionM": 12.5,
+        "demSource": "usgs-geotiff-local-1m",
+        "demResolutionM": 1.0,
+        "incidentPadFt": 80.0,
+        "shadowNearestDistanceM": 50.0,
+        "shadowSchedulingPadFt": 100.0,
+        "shadowIntervalMs": 2_000,
+    ])
+    let events = try state.handleIncoming(data, receivedAtMilliseconds: 2_000)
+    guard case let .peerTrafficPosition(traffic) = events.first else {
+        Issue.record("Expected peer traffic event")
+        return
+    }
+    #expect(traffic.sourceZoneID == "zone-peer")
+    #expect(traffic.source == "sei")
+    #expect(traffic.sampleTimestampMilliseconds == 1_234)
+    #expect(traffic.altitudeSampleTimestampMilliseconds == 1_100)
+    #expect(traffic.flightEpoch == "flight-1")
+    #expect(traffic.altitudeCalibrationState == "locked")
+    #expect(traffic.mslAltitudeMeters == 152.5)
+    #expect(traffic.mslAltitudeSampleTimestampMilliseconds == 1_100)
+    #expect(traffic.altitudeCorrectionMeters == 12.5)
+    #expect(traffic.demSource == "usgs-geotiff-local-1m")
+    #expect(traffic.demResolutionMeters == 1.0)
+    #expect(traffic.incidentPadFeet == 80.0)
+    #expect(traffic.shadowNearestDistanceMeters == 50.0)
+    #expect(traffic.shadowSchedulingPadFeet == 100.0)
+    #expect(traffic.shadowIntervalMilliseconds == 2_000)
+    #expect(!state.isLocalOwner(remoteID: "RID-1"))
+}
+
+@Test func trackerTrafficScheduleParsesAndClampsInterval() throws {
+    var state = TrackerCoordinationProtocolState(localZoneID: "zone-local")
+    let data = try JSONSerialization.data(withJSONObject: [
+        "type": "traffic_schedule",
+        "remoteId": "RID-1",
+        "source": "sei",
+        "sourceEpoch": "epoch-1",
+        "seq": 9,
+        "shadowIntervalMs": 50_000,
+        "incidentPadFt": 80.0,
+        "shadowNearestDistanceM": 50.0,
+        "shadowSchedulingPadFt": 100.0,
+    ])
+    let events = try state.handleIncoming(data, receivedAtMilliseconds: 2_000)
+    guard case let .trafficSchedule(schedule) = events.first else {
+        Issue.record("Expected traffic schedule event")
+        return
+    }
+    #expect(schedule.remoteID == "RID-1")
+    #expect(schedule.sourceEpoch == "epoch-1")
+    #expect(schedule.intervalMilliseconds == 16_000)
+    #expect(schedule.incidentPadFeet == 80.0)
+}
 
 @Test func trackerStandbyPolicyRequiresVerifiedQuietStandaloneSession() {
     #expect(TrackerStandbyPolicy.normalizedDelaySeconds(nil) == 30)
@@ -1854,6 +2070,21 @@ private func proximityDrone(
     ))
 }
 
+@Test func duplicatePilotCallsignPolicyWarnsWithoutInvalidatingIdentity() {
+    #expect(PilotDisplayPreference.callsignsMatch(" 1sar7 ", "1SAR7"))
+    #expect(!PilotDisplayPreference.callsignsMatch("1SAR7", "1SAR8"))
+    #expect(PilotDisplayPreference.activeAssignmentWarning(
+        callsign: "1SAR7",
+        aircraftLabel: "1SAR7DjMtrc4td"
+    ) == "Warning: pilot callsign 1SAR7 is already assigned to active drone 1SAR7DjMtrc4td. Confirm only if this is intentional.")
+    #expect(RidAircraftIdentity(
+        remoteID: "RID-2",
+        organization: "NCSSAR",
+        pilotCallsign: "1SAR7",
+        droneDescription: "DJI Matrice 4TD"
+    ).isComplete)
+}
+
 @Test func operationalMapBearingLineReachesViewportEdgeAtCardinalHeadings() throws {
     let start = MapScreenPoint(x: 50, y: 40)
     let north = try #require(OperationalMapGeometry.bearingLineToViewportEdge(
@@ -2055,6 +2286,28 @@ private func proximityDrone(
     #expect((coordinator.display.rangeFeet ?? 0) > 30)
     #expect(coordinator.display.aglUsesTerrain)
     #expect(!coordinator.display.aglStale)
+}
+
+@Test func operationalAltitudeExposesPeerTrafficTakeoffReference() throws {
+    var coordinator = OperationalAltitudeCoordinator()
+    coordinator.ingest(RidObservation(
+        source: .bluetoothExtended, aircraftId: "TEST",
+        receivedAt: Date(timeIntervalSince1970: 100),
+        latitude: 39, longitude: -105,
+        altitudeMeters: 500, heightMeters: 0, heightReference: .takeoff
+    ))
+
+    let reference = try #require(coordinator.peerTrafficReference)
+    #expect(reference.takeoffCoordinate == .init(latitude: 39, longitude: -105))
+    #expect(reference.reportedGroundAltitudeMeters == 500)
+    let calibration = TrackerTrafficAltitudeCalibration(
+        flightEpoch: "flight-1",
+        state: "locked",
+        reportedGroundAltitudeMeters: 500,
+        correctionMeters: -50
+    )
+    #expect(calibration.normalizedMSLMeters(rawAltitudeMeters: 510) == 460)
+    #expect(calibration.reportedAltitudeMeters(relativeUpMeters: 10) == 510)
 }
 
 @Test func operationalAltitudeClampsNegativeTerrainEstimateToGroundLevel() throws {
@@ -3522,27 +3775,32 @@ private func proximityDrone(
     #expect(values["camera"] == nil)
 }
 
-@Test func djiCameraOrientationNormalizesSEIAzimuthAndUsesTiltCalibration() {
-    #expect(abs((OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(
-        seiCameraAzimuthDegrees: 80.8,
-        magneticDeclinationDegrees: 14.13
-    ) ?? 0) - 23.33) < 0.000001)
-    #expect(OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(
-        seiCameraAzimuthDegrees: nil,
-        magneticDeclinationDegrees: 14.13
+@Test func djiCameraOrientationMatchesControllerHeadingAndUsesTiltCalibration() {
+    #expect(abs((OperationalClueGeometry.djiControllerCameraAzimuthDegrees(
+        seiCameraAzimuthDegrees: 80.8
+    ) ?? 0) - 350.8) < 0.000001)
+    #expect(OperationalClueGeometry.djiControllerCameraAzimuthDegrees(
+        seiCameraAzimuthDegrees: nil
     ) == nil)
-    #expect(OperationalClueGeometry.djiAbsoluteCameraAzimuthDegrees(
-        seiCameraAzimuthDegrees: 80.8,
-        magneticDeclinationDegrees: nil
-    ) == nil)
-    #expect(abs((OperationalClueGeometry.djiClockwiseFovAzimuthDegrees(
-        seiCameraAzimuthDegrees: 80.8,
-        magneticDeclinationDegrees: 14.13
-    ) ?? 0) - 4.93) < 0.000001)
-    #expect(OperationalClueGeometry.djiClockwiseFovAzimuthDegrees(
-        seiCameraAzimuthDegrees: nil,
-        magneticDeclinationDegrees: 14.13
-    ) == nil)
+    // August 24 M4TD clue: controller reported 288 degrees and -17 degrees.
+    #expect(abs((OperationalClueGeometry.djiControllerCameraAzimuthDegrees(
+        seiCameraAzimuthDegrees: 16.733
+    ) ?? 0) - 286.733) < 0.000001)
+    #expect(abs((OperationalClueGeometry.djiCalibratedTiltDegrees(
+        rawTiltDegrees: -29.264
+    ) ?? 0) - (-17.54)) < 0.01)
+    let august24Projection = OperationalClueGeometry.project(
+        droneLatitude: 39.154044,
+        droneLongitude: -121.131754,
+        droneAltitudeMeters: 531.9,
+        headingDegrees: OperationalClueGeometry.djiControllerCameraAzimuthDegrees(
+            seiCameraAzimuthDegrees: 16.733
+        ),
+        aglMeters: 22,
+        gimbalAngleDegrees: -17.5
+    )
+    #expect(august24Projection.latitude > 39.154044)
+    #expect(august24Projection.longitude < -121.131754)
     #expect(OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -90) == -90)
     #expect(OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -14.5625) == 0)
     #expect(abs((OperationalClueGeometry.djiCalibratedTiltDegrees(rawTiltDegrees: -24.5) ?? 0) - (-11.86)) < 0.02)

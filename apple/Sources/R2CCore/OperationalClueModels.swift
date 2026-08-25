@@ -162,30 +162,14 @@ public enum OperationalClueGeometry {
             ? observedRelativeUpMeters : nil
     }
 
-    public static func djiAbsoluteCameraAzimuthDegrees(
-        seiCameraAzimuthDegrees: Double?,
-        magneticDeclinationDegrees: Double?
+    /// Clockwise camera bearing aligned with the heading shown by the DJI controller.
+    /// The August 24 M4TD clue flight confirmed raw 16.733 degrees corresponds to
+    /// approximately 287-288 degrees; no additional magnetic declination is applied.
+    public static func djiControllerCameraAzimuthDegrees(
+        seiCameraAzimuthDegrees: Double?
     ) -> Double? {
-        guard let seiCameraAzimuthDegrees, seiCameraAzimuthDegrees.isFinite,
-              let magneticDeclinationDegrees, magneticDeclinationDegrees.isFinite
-        else { return nil }
-        // DJI encodes this angle counter-clockwise from magnetic east. CalTopo
-        // requires a clockwise bearing from true north.
-        return RidHeading.normalized(90 - seiCameraAzimuthDegrees + magneticDeclinationDegrees)
-    }
-
-    /// Clockwise camera bearing for the Map Pane FOV rays. The controlled M4TD
-    /// pan test showed that the SEI tag-4 value increases clockwise, so this
-    /// display path must preserve that motion instead of using the legacy
-    /// CalTopo camera conversion above.
-    public static func djiClockwiseFovAzimuthDegrees(
-        seiCameraAzimuthDegrees: Double?,
-        magneticDeclinationDegrees: Double?
-    ) -> Double? {
-        guard let seiCameraAzimuthDegrees, seiCameraAzimuthDegrees.isFinite,
-              let magneticDeclinationDegrees, magneticDeclinationDegrees.isFinite
-        else { return nil }
-        return RidHeading.normalized(seiCameraAzimuthDegrees - 90 + magneticDeclinationDegrees)
+        guard let seiCameraAzimuthDegrees, seiCameraAzimuthDegrees.isFinite else { return nil }
+        return RidHeading.normalized(seiCameraAzimuthDegrees - 90)
     }
 
     /// Matrice 4TD calibration: raw -90 is down; controlled raw -14.5625 is horizontal.

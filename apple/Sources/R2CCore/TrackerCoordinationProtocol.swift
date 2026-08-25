@@ -94,6 +94,48 @@ public struct TrackerCoordinationSighting: Sendable, Equatable {
     }
 }
 
+public struct TrackerTrafficAltitudeCalibration: Sendable, Equatable {
+    public let flightEpoch: String
+    public let state: String
+    public let reportedGroundAltitudeMeters: Double?
+    public let correctionMeters: Double?
+    public let lockedAtMilliseconds: Int64?
+    public let demSource: String?
+    public let demResolutionMeters: Double?
+
+    public init(
+        flightEpoch: String,
+        state: String,
+        reportedGroundAltitudeMeters: Double? = nil,
+        correctionMeters: Double? = nil,
+        lockedAtMilliseconds: Int64? = nil,
+        demSource: String? = nil,
+        demResolutionMeters: Double? = nil
+    ) {
+        self.flightEpoch = flightEpoch
+        self.state = state
+        self.reportedGroundAltitudeMeters = reportedGroundAltitudeMeters
+        self.correctionMeters = correctionMeters
+        self.lockedAtMilliseconds = lockedAtMilliseconds
+        self.demSource = demSource
+        self.demResolutionMeters = demResolutionMeters
+    }
+
+    public func normalizedMSLMeters(rawAltitudeMeters: Double?) -> Double? {
+        guard state == "locked", let rawAltitudeMeters, rawAltitudeMeters.isFinite,
+              let correctionMeters, correctionMeters.isFinite
+        else { return nil }
+        return rawAltitudeMeters + correctionMeters
+    }
+
+    public func reportedAltitudeMeters(relativeUpMeters: Double?) -> Double? {
+        guard let reportedGroundAltitudeMeters, reportedGroundAltitudeMeters.isFinite,
+              let relativeUpMeters, relativeUpMeters.isFinite
+        else { return nil }
+        return reportedGroundAltitudeMeters + relativeUpMeters
+    }
+}
+
 public struct TrackerPeerZone: Sendable, Equatable, Identifiable {
     public var id: String { zoneID }
     public let zoneID: String
@@ -117,6 +159,46 @@ public struct TrackerRelaySighting: Sendable, Equatable {
     public let verticalRateFeetPerMinute: Double?
 }
 
+public struct TrackerPeerTrafficPosition: Sendable, Equatable {
+    public let sourceZoneID: String
+    public let remoteID: String
+    public let mappedID: String
+    public let source: String
+    public let sourceEpoch: String
+    public let sequence: Int64
+    public let sampleTimestampMilliseconds: Int64
+    public let trackerReceivedTimestampMilliseconds: Int64
+    public let latitude: Double
+    public let longitude: Double
+    public let altitudeMeters: Double?
+    public let altitudeSampleTimestampMilliseconds: Int64?
+    public let flightEpoch: String
+    public let altitudeCalibrationState: String
+    public let mslAltitudeMeters: Double?
+    public let mslAltitudeSampleTimestampMilliseconds: Int64?
+    public let altitudeCorrectionMeters: Double?
+    public let demSource: String
+    public let demResolutionMeters: Double?
+    public let incidentPadFeet: Double?
+    public let shadowNearestDistanceMeters: Double?
+    public let shadowSchedulingPadFeet: Double?
+    public let shadowIntervalMilliseconds: Int64?
+    public let headingDegrees: Double?
+    public let groundSpeedKnots: Double?
+    public let verticalRateFeetPerMinute: Double?
+}
+
+public struct TrackerTrafficSchedule: Sendable, Equatable {
+    public let remoteID: String
+    public let source: String
+    public let sourceEpoch: String
+    public let sequence: Int64
+    public let intervalMilliseconds: Int64
+    public let incidentPadFeet: Double?
+    public let nearestDistanceMeters: Double?
+    public let schedulingPadFeet: Double?
+}
+
 public enum TrackerCoordinationEvent: Sendable, Equatable {
     case helloAcknowledged(recommendedAppVersionCode: Int?, updateURL: String?)
     case heartbeatAcknowledged(sequence: Int64, ownerLeaseExpiresAtMilliseconds: Int64?)
@@ -124,6 +206,8 @@ public enum TrackerCoordinationEvent: Sendable, Equatable {
     case ownershipChanged(remoteID: String, ownerZoneID: String, localOwner: Bool, alertEligible: Bool)
     case ownerExpired(remoteID: String)
     case relaySighting(TrackerRelaySighting)
+    case peerTrafficPosition(TrackerPeerTrafficPosition)
+    case trafficSchedule(TrackerTrafficSchedule)
     case droneConfirmed(identity: TrackerCoordinationIdentity, confirmedByZoneID: String, confirmedLocally: Bool)
     case reconnectRequired(reason: String)
     case ignored(messageType: String)
@@ -256,6 +340,55 @@ public enum TrackerCoordinationWire {
     ) throws -> Data {
         var object = baseSighting(client: client, sighting: sighting)
         object["type"] = "sighting"
+        return try encode(object)
+    }
+
+    public static func trafficPosition(
+        client: TrackerCoordinationClient,
+        sighting: TrackerCoordinationSighting,
+        source: String,
+        sourceEpoch: String,
+        sequence: Int64,
+        altitudeSampleTimestampMilliseconds: Int64? = nil,
+        altitudeCalibration: TrackerTrafficAltitudeCalibration? = nil,
+        proximityAlertDistanceFeet: Double? = nil
+    ) throws -> Data {
+        var object = baseSighting(client: client, sighting: sighting)
+        object["type"] = "traffic_position"
+        object["sampleTs"] = sighting.droneTimestampMilliseconds
+        object.removeValue(forKey: "droneTs")
+        object["source"] = source
+        object["sourceEpoch"] = sourceEpoch
+        object["seq"] = sequence
+        if sighting.altitudeMeters != nil {
+            object["altSampleTs"] = altitudeSampleTimestampMilliseconds
+                ?? sighting.droneTimestampMilliseconds
+        }
+        if let proximityAlertDistanceFeet,
+           proximityAlertDistanceFeet.isFinite,
+           proximityAlertDistanceFeet > 0 {
+            object["padFt"] = proximityAlertDistanceFeet
+        }
+        if let altitudeCalibration {
+            object["flightEpoch"] = altitudeCalibration.flightEpoch
+            object["altCalibrationState"] = altitudeCalibration.state
+            if let mslAltitude = altitudeCalibration.normalizedMSLMeters(
+                rawAltitudeMeters: sighting.altitudeMeters
+            ) {
+                object["mslAltM"] = mslAltitude
+                object["mslAltSampleTs"] = altitudeSampleTimestampMilliseconds
+                    ?? sighting.droneTimestampMilliseconds
+                object["altCorrectionM"] = altitudeCalibration.correctionMeters
+                object["altCalibrationTs"] = altitudeCalibration.lockedAtMilliseconds
+                object["demSource"] = altitudeCalibration.demSource
+                object["demResolutionM"] = altitudeCalibration.demResolutionMeters
+            }
+        } else {
+            object["altCalibrationState"] = "unconfirmed"
+        }
+        if let telemetry = object.removeValue(forKey: "telemetry") as? [String: Any] {
+            for (key, value) in telemetry { object[key] = value }
+        }
         return try encode(object)
     }
 
@@ -451,6 +584,16 @@ public struct TrackerCoordinationProtocolState: Sendable {
                 return [.ignored(messageType: type)]
             }
             return [.relaySighting(relay)]
+        case "peer_traffic_position":
+            guard let traffic = parsePeerTraffic(object), traffic.sourceZoneID != localZoneID else {
+                return [.ignored(messageType: type)]
+            }
+            return [.peerTrafficPosition(traffic)]
+        case "traffic_schedule":
+            guard let schedule = parseTrafficSchedule(object) else {
+                return [.ignored(messageType: type)]
+            }
+            return [.trafficSchedule(schedule)]
         case "drone_confirmed":
             return handleDroneConfirmed(object)
         default:
@@ -558,6 +701,69 @@ public struct TrackerCoordinationProtocolState: Sendable {
             headingDegrees: finiteOptionalNumber(telemetry?["headingDeg"]),
             groundSpeedKnots: finiteOptionalNumber(telemetry?["groundSpeedKnots"]),
             verticalRateFeetPerMinute: finiteOptionalNumber(telemetry?["verticalRateFpm"])
+        )
+    }
+
+    private func parsePeerTraffic(_ object: [String: Any]) -> TrackerPeerTrafficPosition? {
+        let remoteID = string(object["remoteId"])
+        let sourceZoneID = string(object["fromZoneId"])
+        let source = string(object["source"]).lowercased()
+        let sourceEpoch = string(object["sourceEpoch"])
+        guard !remoteID.isEmpty, !sourceZoneID.isEmpty,
+              source == "rid" || source == "sei",
+              !sourceEpoch.isEmpty,
+              let latitude = finiteOptionalNumber(object["lat"]),
+              let longitude = finiteOptionalNumber(object["lng"]),
+              (-90...90).contains(latitude), (-180...180).contains(longitude)
+        else { return nil }
+        return TrackerPeerTrafficPosition(
+            sourceZoneID: sourceZoneID,
+            remoteID: remoteID,
+            mappedID: string(object["mappedId"]),
+            source: source,
+            sourceEpoch: sourceEpoch,
+            sequence: number(object["seq"])?.int64Value ?? -1,
+            sampleTimestampMilliseconds: number(object["sampleTs"])?.int64Value ?? 0,
+            trackerReceivedTimestampMilliseconds: number(object["receivedTs"])?.int64Value ?? 0,
+            latitude: latitude,
+            longitude: longitude,
+            altitudeMeters: finiteOptionalNumber(object["altM"]),
+            altitudeSampleTimestampMilliseconds: number(object["altSampleTs"])?.int64Value,
+            flightEpoch: string(object["flightEpoch"]),
+            altitudeCalibrationState: string(object["altCalibrationState"]),
+            mslAltitudeMeters: finiteOptionalNumber(object["mslAltM"]),
+            mslAltitudeSampleTimestampMilliseconds: number(object["mslAltSampleTs"])?.int64Value,
+            altitudeCorrectionMeters: finiteOptionalNumber(object["altCorrectionM"]),
+            demSource: string(object["demSource"]),
+            demResolutionMeters: finiteOptionalNumber(object["demResolutionM"]),
+            incidentPadFeet: finiteOptionalNumber(object["incidentPadFt"]),
+            shadowNearestDistanceMeters: finiteOptionalNumber(object["shadowNearestDistanceM"]),
+            shadowSchedulingPadFeet: finiteOptionalNumber(object["shadowSchedulingPadFt"]),
+            shadowIntervalMilliseconds: number(object["shadowIntervalMs"])?.int64Value,
+            headingDegrees: finiteOptionalNumber(object["headingDeg"]),
+            groundSpeedKnots: finiteOptionalNumber(object["groundSpeedKnots"]),
+            verticalRateFeetPerMinute: finiteOptionalNumber(object["verticalRateFpm"])
+        )
+    }
+
+    private func parseTrafficSchedule(_ object: [String: Any]) -> TrackerTrafficSchedule? {
+        let remoteID = string(object["remoteId"])
+        let source = string(object["source"])
+        let sourceEpoch = string(object["sourceEpoch"])
+        guard !remoteID.isEmpty,
+              source == "rid" || source == "sei",
+              !sourceEpoch.isEmpty,
+              let rawInterval = number(object["shadowIntervalMs"])?.int64Value
+        else { return nil }
+        return TrackerTrafficSchedule(
+            remoteID: remoteID,
+            source: source,
+            sourceEpoch: sourceEpoch,
+            sequence: number(object["seq"])?.int64Value ?? -1,
+            intervalMilliseconds: min(16_000, max(1_000, rawInterval)),
+            incidentPadFeet: finiteOptionalNumber(object["incidentPadFt"]),
+            nearestDistanceMeters: finiteOptionalNumber(object["shadowNearestDistanceM"]),
+            schedulingPadFeet: finiteOptionalNumber(object["shadowSchedulingPadFt"])
         )
     }
 

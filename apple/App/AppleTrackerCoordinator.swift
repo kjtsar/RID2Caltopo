@@ -403,6 +403,14 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var seenVideoStreamRequestIDs: [String] = []
     private var pendingConfirmations: [String: TrackerCoordinationIdentity] = [:]
     private var lastSightingSentAt: [String: Date] = [:]
+    private let trafficSourceEpoch = UUID().uuidString
+    private var trafficSequenceByKey: [String: Int64] = [:]
+    private var lastTrafficSentAtByKey: [String: Date] = [:]
+    private var trafficSendIntervalByKey: [String: TimeInterval] = [:]
+    private var lastTrafficSentLogAtByKey: [String: Date] = [:]
+    private var lastTrafficShadowLogAtByKey: [String: Date] = [:]
+    private var trafficAltitudeCalibrationByRemoteID: [String: TrackerTrafficAltitudeCalibration] = [:]
+    private var proximityAlertDistanceFeet: Double?
     private var fallbackTasks: [String: Task<Void, Never>] = [:]
     private var managedVideoIncidentName = ""
     private var managedVideoStreams: [AppleManagedVideoStreamAdvertisement] = []
@@ -637,6 +645,27 @@ final class AppleTrackerCoordinator: ObservableObject {
         )
     }
 
+    func updateProximityAlertDistanceFeet(_ value: Double) {
+        proximityAlertDistanceFeet = value.isFinite && value > 0 ? value : nil
+    }
+
+    func beginPeerTrafficAltitudeCalibration(remoteID: String, flightEpoch: String) {
+        trafficAltitudeCalibrationByRemoteID[remoteID] = TrackerTrafficAltitudeCalibration(
+            flightEpoch: flightEpoch,
+            state: "pending"
+        )
+    }
+
+    func finishPeerTrafficAltitudeCalibration(
+        remoteID: String,
+        flightEpoch: String,
+        calibration: TrackerTrafficAltitudeCalibration?
+    ) {
+        guard trafficAltitudeCalibrationByRemoteID[remoteID]?.flightEpoch == flightEpoch else { return }
+        trafficAltitudeCalibrationByRemoteID[remoteID] = calibration
+            ?? TrackerTrafficAltitudeCalibration(flightEpoch: flightEpoch, state: "unavailable")
+    }
+
     func observe(track: RidAircraftTrack, identity: RidAircraftIdentity?) {
         guard coordinationRequired else { return }
         let resolved = identity.map(Self.trackerIdentity) ?? TrackerCoordinationIdentity(
@@ -666,6 +695,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         )
         let isFirst = observedSightings[track.aircraftID] == nil
         observedSightings[track.aircraftID] = sighting
+        sendTrafficPositionIfEligible(sighting, source: "rid")
         if isFirst {
             wakeForCoordinationActivity(reason: "first sighting")
             scheduleFallbackOwnership(remoteID: track.aircraftID)
@@ -691,6 +721,11 @@ final class AppleTrackerCoordinator: ObservableObject {
         firstSightingsSent.remove(remoteID)
         pendingConfirmations.removeValue(forKey: remoteID)
         lastSightingSentAt.removeValue(forKey: remoteID)
+        trafficAltitudeCalibrationByRemoteID.removeValue(forKey: remoteID)
+        trafficSequenceByKey = trafficSequenceByKey.filter { !$0.key.hasSuffix("|\(remoteID)") }
+        lastTrafficSentAtByKey = lastTrafficSentAtByKey.filter { !$0.key.hasSuffix("|\(remoteID)") }
+        trafficSendIntervalByKey = trafficSendIntervalByKey.filter { !$0.key.hasSuffix("|\(remoteID)") }
+        lastTrafficSentLogAtByKey = lastTrafficSentLogAtByKey.filter { !$0.key.hasSuffix("|\(remoteID)") }
         fallbackTasks.removeValue(forKey: remoteID)?.cancel()
         scheduleStandbyIfEligible()
         guard coordinationRequired,
@@ -863,6 +898,10 @@ final class AppleTrackerCoordinator: ObservableObject {
     private func socketOpened(generation: UUID) {
         guard generation == self.generation, socket != nil else { return }
         connected = true
+        lastTrafficSentAtByKey.removeAll()
+        trafficSendIntervalByKey.removeAll()
+        lastTrafficSentLogAtByKey.removeAll()
+        lastTrafficShadowLogAtByKey.removeAll()
         let now = Self.nowMilliseconds
         protocolState.transportOpened(helloSentAtMilliseconds: now)
         firstSightingsSent.removeAll()
@@ -2311,6 +2350,94 @@ final class AppleTrackerCoordinator: ObservableObject {
         lastSightingSentAt[remoteID] = Date()
     }
 
+    func observeSEITraffic(
+        remoteID: String,
+        mappedID: String,
+        latitude: Double,
+        longitude: Double,
+        altitudeMeters: Double?,
+        relativeUpMeters: Double?,
+        headingDegrees: Double?,
+        sampledAt: Date,
+        altitudeSampledAt: Date
+    ) {
+        guard coordinationRequired else { return }
+        let identity = observedSightings[remoteID]?.identity ?? TrackerCoordinationIdentity(
+            remoteID: remoteID,
+            mappedID: mappedID,
+            organization: "",
+            model: "",
+            ownerName: ""
+        )
+        let calibration = trafficAltitudeCalibrationByRemoteID[remoteID]
+        let seiReportedAltitude = calibration?.reportedAltitudeMeters(
+            relativeUpMeters: relativeUpMeters
+        )
+        sendTrafficPositionIfEligible(
+            TrackerCoordinationSighting(
+                identity: identity,
+                droneTimestampMilliseconds: Int64(sampledAt.timeIntervalSince1970 * 1_000),
+                latitude: latitude,
+                longitude: longitude,
+                altitudeMeters: seiReportedAltitude ?? altitudeMeters,
+                headingDegrees: headingDegrees
+            ),
+            source: "sei",
+            altitudeSampleTimestampMilliseconds: Int64(
+                (seiReportedAltitude == nil ? altitudeSampledAt : sampledAt)
+                    .timeIntervalSince1970 * 1_000
+            )
+        )
+    }
+
+    private func sendTrafficPositionIfEligible(
+        _ sighting: TrackerCoordinationSighting,
+        source: String,
+        altitudeSampleTimestampMilliseconds: Int64? = nil
+    ) {
+        guard connected else { return }
+        let key = "\(source)|\(sighting.identity.remoteID)"
+        let now = Date()
+        let sendInterval = trafficSendIntervalByKey[key] ?? 1
+        if let lastSent = lastTrafficSentAtByKey[key], now.timeIntervalSince(lastSent) < sendInterval {
+            return
+        }
+        let sequence = (trafficSequenceByKey[key] ?? 0) + 1
+        guard let data = try? TrackerCoordinationWire.trafficPosition(
+            client: client,
+            sighting: sighting,
+            source: source,
+            sourceEpoch: trafficSourceEpoch,
+            sequence: sequence,
+            altitudeSampleTimestampMilliseconds: altitudeSampleTimestampMilliseconds,
+            altitudeCalibration: trafficAltitudeCalibrationByRemoteID[sighting.identity.remoteID],
+            proximityAlertDistanceFeet: proximityAlertDistanceFeet
+        ) else { return }
+        send(data)
+        trafficSequenceByKey[key] = sequence
+        lastTrafficSentAtByKey[key] = now
+        let calibration = trafficAltitudeCalibrationByRemoteID[sighting.identity.remoteID]
+        let mslAltitude = calibration?.normalizedMSLMeters(rawAltitudeMeters: sighting.altitudeMeters)
+        let altitudeSample = altitudeSampleTimestampMilliseconds ?? sighting.droneTimestampMilliseconds
+        let altitudeState = calibration?.state ?? "unconfirmed"
+        let mslAltitudeText = mslAltitude.map { String($0) } ?? "null"
+        let mslAltitudeAgeText = mslAltitude == nil
+            ? "null"
+            : String(max(0, Self.nowMilliseconds - altitudeSample))
+        let correctionText = calibration?.correctionMeters.map { String($0) } ?? "null"
+        let flightEpochText = calibration?.flightEpoch ?? "null"
+        guard lastTrafficSentLogAtByKey[key].map({ now.timeIntervalSince($0) >= 5 }) ?? true else {
+            return
+        }
+        lastTrafficSentLogAtByKey[key] = now
+        let headingText = sighting.headingDegrees.map { String($0) } ?? "null"
+        let speedText = sighting.groundSpeedKnots.map { String($0) } ?? "null"
+        AppleLog.info(
+            "TrackerPeer",
+            "Peer traffic sent remoteId=\(sighting.identity.remoteID) source=\(source) seq=\(sequence) sourceAgeMs=\(max(0, Self.nowMilliseconds - sighting.droneTimestampMilliseconds)) headingDeg=\(headingText) speedKt=\(speedText) altAgeMs=\(max(0, Self.nowMilliseconds - altitudeSample)) altState=\(altitudeState) mslAltM=\(mslAltitudeText) mslAltAgeMs=\(mslAltitudeAgeText) correctionM=\(correctionText) flightEpoch=\(flightEpochText) intervalMs=\(Int64(sendInterval * 1_000))"
+        )
+    }
+
     private func flushPendingConfirmations() {
         guard connected else { return }
         for (remoteID, identity) in pendingConfirmations {
@@ -2470,6 +2597,41 @@ final class AppleTrackerCoordinator: ObservableObject {
             AppleLog.info(
                 "TrackerPeer",
                 "Relay sighting remoteId=\(relay.remoteID) fromZoneId=\(relay.sourceZoneID)"
+            )
+        case let .peerTrafficPosition(traffic):
+            let now = Self.nowMilliseconds
+            let logKey = "\(traffic.sourceZoneID)|\(traffic.source)|\(traffic.remoteID)"
+            let logDate = Date()
+            guard lastTrafficShadowLogAtByKey[logKey].map({ logDate.timeIntervalSince($0) >= 5 }) ?? true else {
+                break
+            }
+            lastTrafficShadowLogAtByKey[logKey] = logDate
+            let mslAltitudeText = traffic.mslAltitudeMeters.map { String($0) } ?? "null"
+            let mslAltitudeAgeText = traffic.mslAltitudeSampleTimestampMilliseconds
+                .map { String(max(0, now - $0)) } ?? "null"
+            let correctionText = traffic.altitudeCorrectionMeters.map { String($0) } ?? "null"
+            let demResolutionText = traffic.demResolutionMeters.map { String($0) } ?? "null"
+            let incidentPadText = traffic.incidentPadFeet.map { String($0) } ?? "null"
+            let nearestDistanceText = traffic.shadowNearestDistanceMeters.map { String($0) } ?? "null"
+            let schedulingPadText = traffic.shadowSchedulingPadFeet.map { String($0) } ?? "null"
+            let headingText = traffic.headingDegrees.map { String($0) } ?? "null"
+            let speedText = traffic.groundSpeedKnots.map { String($0) } ?? "null"
+            AppleLog.info(
+                "TrackerPeer",
+                "Peer traffic shadow remoteId=\(traffic.remoteID) source=\(traffic.source) fromZoneId=\(traffic.sourceZoneID) seq=\(traffic.sequence) sourceAgeMs=\(max(0, now - traffic.sampleTimestampMilliseconds)) trackerAgeMs=\(max(0, now - traffic.trackerReceivedTimestampMilliseconds)) headingDeg=\(headingText) speedKt=\(speedText) altAgeMs=\(max(0, now - (traffic.altitudeSampleTimestampMilliseconds ?? traffic.sampleTimestampMilliseconds))) altState=\(traffic.altitudeCalibrationState) mslAltM=\(mslAltitudeText) mslAltAgeMs=\(mslAltitudeAgeText) correctionM=\(correctionText) demSource=\(traffic.demSource) demResolutionM=\(demResolutionText) incidentPadFt=\(incidentPadText) nearestDistanceM=\(nearestDistanceText) schedulingPadFt=\(schedulingPadText) shadowIntervalMs=\(traffic.shadowIntervalMilliseconds ?? 0)"
+            )
+        case let .trafficSchedule(schedule):
+            guard schedule.sourceEpoch == trafficSourceEpoch else { break }
+            let key = "\(schedule.source)|\(schedule.remoteID)"
+            let previousInterval = trafficSendIntervalByKey[key]
+            trafficSendIntervalByKey[key] = TimeInterval(schedule.intervalMilliseconds) / 1_000
+            guard previousInterval != trafficSendIntervalByKey[key] else { break }
+            let incidentPadText = schedule.incidentPadFeet.map { String($0) } ?? "null"
+            let nearestDistanceText = schedule.nearestDistanceMeters.map { String($0) } ?? "null"
+            let schedulingPadText = schedule.schedulingPadFeet.map { String($0) } ?? "null"
+            AppleLog.info(
+                "TrackerPeer",
+                "Peer traffic schedule remoteId=\(schedule.remoteID) source=\(schedule.source) seq=\(schedule.sequence) intervalMs=\(schedule.intervalMilliseconds) incidentPadFt=\(incidentPadText) nearestDistanceM=\(nearestDistanceText) schedulingPadFt=\(schedulingPadText)"
             )
         default:
             break

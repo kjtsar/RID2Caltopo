@@ -217,6 +217,54 @@ class DefaultPeerCoordinatorTest {
     }
 
     @Test
+    fun unconfirmedTrackStillSendsTrackerAdvisoryTraffic() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONEPENDING")
+        var localOwner = true
+        val track = object : LiveTrackOwnerDelegate {
+            override fun getRemoteId(): String = drone.remoteId
+            override fun setLocalOwner(isOwner: Boolean) {
+                localOwner = isOwner
+            }
+        }
+
+        coordinator.onLiveTrackCreated(track, drone, 42.0, 1234L)
+        coordinator.onWaypointReceived(drone, 39.1, -121.2, 120.0, 42.0, 2345L, null)
+
+        assertFalse(localOwner)
+        val messages = synchronized(transport.sentMessages) {
+            transport.sentMessages.map(::JSONObject)
+        }
+        assertTrue(messages.any {
+            it.optString("type") == "traffic_position" &&
+                it.optString("source") == "rid" &&
+                it.optString("remoteId") == drone.remoteId
+        })
+        assertFalse(messages.any { it.optString("type") == "sighting" })
+    }
+
+    @Test
+    fun seiAdvisoryTrafficBypassesOwnershipConfirmation() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        coordinator.onSEIPositionReceived(
+            "DRONESEI", "1SAR7DjMtrc4td", 39.1, -121.2, 550.0,
+            2345L, 2300L, 87.0
+        )
+
+        val messages = synchronized(transport.sentMessages) {
+            transport.sentMessages.map(::JSONObject)
+        }
+        assertTrue(messages.any {
+            it.optString("type") == "traffic_position" &&
+                it.optString("source") == "sei" &&
+                it.optString("remoteId") == "DRONESEI"
+        })
+    }
+
+    @Test
     fun droneConfirmed_forwardsToActiveCoordinator() {
         val coordinator = DefaultPeerCoordinator.getInstance()
         CaltopoClient.SetTrackerApiKey("")

@@ -29,6 +29,17 @@ public struct PilotDisplayPreference: Codable, Sendable, Equatable {
             ?? ""
     }
 
+    public static func callsignsMatch(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let left = normalizePilotCallsign(lhs),
+              let right = normalizePilotCallsign(rhs) else { return false }
+        return left == right
+    }
+
+    public static func activeAssignmentWarning(callsign: String, aircraftLabel: String) -> String {
+        "Warning: pilot callsign \(callsign.trimmingCharacters(in: .whitespacesAndNewlines)) " +
+            "is already assigned to active drone \(aircraftLabel). Confirm only if this is intentional."
+    }
+
     public static func sanitizeTrackColor(_ value: String?, fallback: String) -> String {
         var candidate = value?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
         if candidate.count == 6 { candidate = "#" + candidate }

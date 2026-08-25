@@ -23,8 +23,11 @@ final class RIDTrackViewModel: ObservableObject {
     @Published private(set) var altitudeDisplayByAircraftID: [String: OperationalAircraftAltitudeDisplay] = [:]
     @Published private(set) var lastValidRIDUpdateAt: Date?
     @Published private(set) var lastRIDMessageAt: Date?
+    @Published private(set) var peerTrafficTracks: [RidAircraftTrack] = []
+    @Published private(set) var peerTrafficMappedIDByAircraftID: [String: String] = [:]
 
     private let store = RidTrackStore()
+    private let peerTrafficStore = RidTrackStore(policy: RidTrackPolicy(activeTimeout: 30))
     private let archiveStore = AppleTrackArchiveStore()
     private let caltopoPublisher = AppleCaltopoPublisher()
     private let terrainService = AppleTerrainElevationService()
@@ -46,6 +49,7 @@ final class RIDTrackViewModel: ObservableObject {
     private var publicationSuppressionProvider: ((String) -> Bool)?
     private var peerConfirmationConsumer: ((TrackerCoordinationIdentity) -> Void)?
     private var peerConfirmationClearer: ((String) -> Void)?
+    private var peerTrafficLatestSampleAtByAircraftID: [String: Date] = [:]
     private var pairedVideoActivityProvider: (() -> [String: Date])?
     private var pendingPublication: [String: [RidAircraftTrack]] = [:]
     private var publicationChains: [String: Task<Void, Never>] = [:]
@@ -86,6 +90,16 @@ final class RIDTrackViewModel: ObservableObject {
                 let snapshot = await self.store.snapshot()
                 if snapshot != self.tracks {
                     self.tracks = snapshot
+                }
+                _ = await self.peerTrafficStore.removeInactive()
+                let peerSnapshot = await self.peerTrafficStore.snapshot()
+                if peerSnapshot != self.peerTrafficTracks {
+                    self.peerTrafficTracks = peerSnapshot
+                    let activeIDs = Set(peerSnapshot.map(\.aircraftID))
+                    self.peerTrafficMappedIDByAircraftID = self.peerTrafficMappedIDByAircraftID
+                        .filter { activeIDs.contains($0.key) }
+                    self.peerTrafficLatestSampleAtByAircraftID = self.peerTrafficLatestSampleAtByAircraftID
+                        .filter { activeIDs.contains($0.key) }
                 }
             }
         }
@@ -343,6 +357,37 @@ final class RIDTrackViewModel: ObservableObject {
         )
     }
 
+    func peerTrafficFlightEpoch(remoteID: String) -> String? {
+        tracks.first(where: { $0.aircraftID == remoteID })?.points.first?.id.uuidString
+    }
+
+    func lockPeerTrafficAltitudeCalibration(
+        remoteID: String,
+        flightEpoch: String,
+        now: Date = Date()
+    ) async -> TrackerTrafficAltitudeCalibration? {
+        guard let track = tracks.first(where: { $0.aircraftID == remoteID }),
+              now.timeIntervalSince(track.lastObservation.receivedAt) >= 0,
+              now.timeIntervalSince(track.lastObservation.receivedAt) <= 10,
+              let reference = altitudeCoordinatorByAircraftID[remoteID]?.peerTrafficReference
+        else { return nil }
+
+        let terrain = await terrainService.sample(
+            latitude: reference.takeoffCoordinate.latitude,
+            longitude: reference.takeoffCoordinate.longitude
+        )
+        guard let terrain, !terrain.stale, terrain.elevationMeters.isFinite else { return nil }
+        return TrackerTrafficAltitudeCalibration(
+            flightEpoch: flightEpoch,
+            state: "locked",
+            reportedGroundAltitudeMeters: reference.reportedGroundAltitudeMeters,
+            correctionMeters: terrain.elevationMeters - reference.reportedGroundAltitudeMeters,
+            lockedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            demSource: terrain.source ?? "usgs-epqs-best-available",
+            demResolutionMeters: terrain.horizontalResolutionMeters
+        )
+    }
+
     private func updateAltitude(for track: RidAircraftTrack) {
         var coordinator = altitudeCoordinatorByAircraftID[track.aircraftID] ?? OperationalAltitudeCoordinator()
         coordinator.ingest(track.lastObservation)
@@ -520,6 +565,8 @@ final class RIDTrackViewModel: ObservableObject {
                     }
                 case let .relaySighting(relay):
                     self.publishRelay(relay)
+                case let .peerTrafficPosition(traffic):
+                    await self.ingestPeerTraffic(traffic)
                 case let .droneConfirmed(identity, _, _):
                     self.peerConfirmationConsumer?(identity)
                 case let .ownerExpired(remoteID):
@@ -807,6 +854,33 @@ final class RIDTrackViewModel: ObservableObject {
         )
         let label = identityProvider?(relay.remoteID)?.mappedID ?? relay.remoteID
         enqueuePublication(remoteID: relay.remoteID, label: label, observation: observation)
+    }
+
+    private func ingestPeerTraffic(_ traffic: TrackerPeerTrafficPosition) async {
+        let receivedAt = Date(
+            timeIntervalSince1970: Double(traffic.sampleTimestampMilliseconds) / 1_000
+        )
+        guard abs(receivedAt.timeIntervalSinceNow) <= 30 else { return }
+        let aircraftID = RidTrackStore.canonicalAircraftID(traffic.remoteID)
+        guard !aircraftID.isEmpty,
+              peerTrafficLatestSampleAtByAircraftID[aircraftID].map({ receivedAt >= $0 }) ?? true
+        else { return }
+        let observation = RidObservation(
+            source: .trackerRelay,
+            aircraftId: traffic.remoteID,
+            receivedAt: receivedAt,
+            latitude: traffic.latitude,
+            longitude: traffic.longitude,
+            altitudeMeters: traffic.mslAltitudeMeters ?? traffic.altitudeMeters,
+            headingDegrees: traffic.headingDegrees,
+            speedMetersPerSecond: traffic.groundSpeedKnots.map { $0 / 1.943_844 }
+        )
+        _ = await peerTrafficStore.ingest(observation)
+        peerTrafficLatestSampleAtByAircraftID[aircraftID] = receivedAt
+        peerTrafficMappedIDByAircraftID[aircraftID] = traffic.mappedID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ? traffic.remoteID : traffic.mappedID
+        peerTrafficTracks = await peerTrafficStore.snapshot()
     }
 
     private func finishPublication(track: RidAircraftTrack) async {

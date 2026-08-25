@@ -90,6 +90,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetryRegistry
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetrySample
+import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -154,6 +155,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.PeerTrafficAltitudeNormalizer
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
@@ -786,7 +788,9 @@ internal fun SplitMapPane(
     val airspaceUiState by AirspaceCenter.uiState.collectAsStateWithLifecycle()
     val landRestrictionUiState by LandRestrictionCenter.uiState.collectAsStateWithLifecycle()
     val proximityMapFocusTarget by viewModel.proximityMapFocusTarget.collectAsStateWithLifecycle()
+    val peerTrafficMapPoints by PeerTrafficMapRegistry.points.collectAsStateWithLifecycle()
     val staleTrackCutoffMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
+    val peerTrafficStaleCutoffMs = System.currentTimeMillis() - 30_000L
     var selectedNotam by remember { mutableStateOf<NearbyNotam?>(null) }
     var selectedNotamGroup by remember { mutableStateOf<List<NearbyNotam>?>(null) }
     var selectedArtifact by remember { mutableStateOf<ArtifactInspection?>(null) }
@@ -802,6 +806,8 @@ internal fun SplitMapPane(
                             designator = streamDesignator,
                             anchorLatitudeDeg = state.lastLat,
                             anchorLongitudeDeg = state.lastLng,
+                            anchorAltitudeMeters = state.lastAlt,
+                            takeoffReportedAltitudeMeters = state.source.impliedTakeoffAltM,
                             nowMs = nowMs,
                         )
                     }
@@ -819,6 +825,14 @@ internal fun SplitMapPane(
                 ) {
                     val list = localTrackPointsByMappedId.getOrPut(designator) { mutableStateListOf() }
                     if (list.lastOrNull()?.receivedAtMsec != seiSample.receivedAtMs) {
+                        val seiReportedAltitude = PeerTrafficAltitudeNormalizer
+                            .reportedAltitudeForRelativeUp(state.remoteId, seiSample.relativeUpMeters)
+                        val trafficAltitude = seiReportedAltitude ?: state.lastAlt
+                        val trafficAltitudeTimestamp = if (seiReportedAltitude != null) {
+                            seiSample.receivedAtMs
+                        } else {
+                            state.source.mostRecentMsecTimestamp
+                        }
                         val flightList = currentFlightTrackPointsByMappedId.getOrPut(designator) {
                             mutableStateListOf()
                         }
@@ -826,12 +840,22 @@ internal fun SplitMapPane(
                             mappedId = designator,
                             lat = seiLat,
                             lng = seiLng,
-                            altitudeM = state.lastAlt,
+                            altitudeM = trafficAltitude,
                             timestampMsec = seiSample.receivedAtMs,
                             receivedAtMsec = seiSample.receivedAtMs,
                         )
                         list.add(point)
                         flightList.add(point)
+                        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.onSEIPositionReceived(
+                            state.remoteId,
+                            designator,
+                            seiLat,
+                            seiLng,
+                            trafficAltitude,
+                            seiSample.receivedAtMs,
+                            trafficAltitudeTimestamp,
+                            seiSample.courseDeg,
+                        )
                         trackOverlayRefreshToken++
                         if (list.size > LOCAL_TRACK_RECENT_POINT_LIMIT) list.removeAt(0)
                         if (flightList.size > LOCAL_TRACK_FLIGHT_POINT_LIMIT) flightList.removeAt(0)
@@ -844,7 +868,7 @@ internal fun SplitMapPane(
             delay(250L)
         }
     }
-    val dronePointEntries = viewModel.droneStates.mapNotNull { (designator, state) ->
+    val localDronePointEntries = viewModel.droneStates.mapNotNull { (designator, state) ->
         val stateTs = state.source.mostRecentMsecTimestamp
         var lat = state.lastLat
         var lng = state.lastLng
@@ -898,6 +922,35 @@ internal fun SplitMapPane(
             )
         }
     }
+    val peerDronePointEntries = peerTrafficMapPoints.values
+        .filter { it.sampleTimestampMsec >= peerTrafficStaleCutoffMs }
+        .groupBy { it.remoteId }
+        .values
+        .mapNotNull { candidates ->
+            val point = candidates.maxWithOrNull(
+                compareBy<PeerTrafficMapPoint> { it.sampleTimestampMsec }
+                    .thenBy { it.receivedAtMsec }
+                    .thenBy { it.sequence }
+            ) ?: return@mapNotNull null
+            Pair(
+                DroneMapPoint(
+                    designator = point.mappedId,
+                    remoteId = point.remoteId,
+                    lat = point.latitude,
+                    lng = point.longitude,
+                    altitudeM = point.altitudeMslMeters ?: 0.0,
+                    timestampMsec = point.sampleTimestampMsec,
+                    receivedAtMsec = point.receivedAtMsec,
+                    headingDeg = point.headingDeg,
+                    speedKnots = point.speedKnots,
+                ),
+                false
+            )
+        }
+    val dronePointEntries = selectFreshestDroneMapEntries(
+        localEntries = localDronePointEntries,
+        peerEntries = peerDronePointEntries,
+    )
 
     MapPaneNotamDialogs(
         selectedNotam = selectedNotam,
@@ -2268,7 +2321,7 @@ internal fun SplitMapPane(
                 aglStale = aglStale,
                 rangeFeet = rangeFeet,
                 headingDeg = headingDeg,
-                speedKnots = telemetry?.aircraftGsKnots,
+                speedKnots = point.speedKnots ?: telemetry?.aircraftGsKnots,
                 climbFpm = telemetry?.aircraftAltitudeRateFpm
             )
             val pilotKey = normalizePilotCallsign(point.droneSpec?.owner)

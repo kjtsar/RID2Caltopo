@@ -6,30 +6,12 @@ object DjiCameraOrientation {
     private const val RAW_DOWN_REFERENCE_DEG = -90.0
 
     @JvmStatic
-    fun trueAzimuthDeg(
-        cameraAzimuthDeg: Double?,
-        magneticDeclinationDeg: Double?,
-    ): Double? {
+    fun controllerAzimuthDeg(cameraAzimuthDeg: Double?): Double? {
         val finite = cameraAzimuthDeg?.takeIf { it.isFinite() } ?: return null
-        val declination = magneticDeclinationDeg?.takeIf { it.isFinite() } ?: return null
-        // DJI encodes this angle counter-clockwise from magnetic east. CalTopo
-        // requires a clockwise bearing from true north.
-        return (((90.0 - finite + declination) % 360.0) + 360.0) % 360.0
-    }
-
-    /**
-     * Clockwise camera bearing used by the Map Pane FOV overlay. The August 21
-     * live pan test confirmed that tag-4 offset 3 increases clockwise; unlike
-     * the legacy CalTopo camera conversion, this must not reverse its motion.
-     */
-    @JvmStatic
-    fun clockwiseFovAzimuthDeg(
-        cameraAzimuthDeg: Double?,
-        magneticDeclinationDeg: Double?,
-    ): Double? {
-        val finite = cameraAzimuthDeg?.takeIf { it.isFinite() } ?: return null
-        val declination = magneticDeclinationDeg?.takeIf { it.isFinite() } ?: return null
-        return (((finite - 90.0 + declination) % 360.0) + 360.0) % 360.0
+        // The M4TD controller and August 24 clue flight confirm that tag-4 offset 3
+        // increases clockwise and is already aligned to the controller's north
+        // convention. Raw 16.733 degrees corresponds to about 287-288 degrees.
+        return (((finite - 90.0) % 360.0) + 360.0) % 360.0
     }
 
     /**

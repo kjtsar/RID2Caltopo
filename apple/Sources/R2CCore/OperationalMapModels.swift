@@ -1,5 +1,14 @@
 import Foundation
 
+public enum OperationalMapTrackFreshness {
+    /// Peer traffic replaces a local track only when the peer's source sample
+    /// is strictly newer. Equal timestamps retain the local source.
+    public static func prefersPeer(localSampleAt: Date?, peerSampleAt: Date) -> Bool {
+        guard let localSampleAt else { return true }
+        return peerSampleAt > localSampleAt
+    }
+}
+
 public enum OperationalMapFocusPolicy {
     public static func shouldReleaseFocus(
         hasFocusedAircraft: Bool,

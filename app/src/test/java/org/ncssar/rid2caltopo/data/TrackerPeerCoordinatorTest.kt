@@ -825,6 +825,62 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun ridTrafficPositionsUseSeparateOneSecondShadowChannel() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONE1")
+        coordinator.onLiveTrackCreated(FakeLiveTrack("DRONE1"), drone, 50.0, 1234L)
+        transport.sentMessages.clear()
+
+        coordinator.onWaypointReceived(drone, 39.1, -121.1, 120.0, 50.0, 2_000L, null)
+        clock.advanceBy(500L)
+        coordinator.onWaypointReceived(drone, 39.2, -121.2, 121.0, 50.0, 2_500L, null)
+        clock.advanceBy(500L)
+        coordinator.onWaypointReceived(drone, 39.3, -121.3, 122.0, 50.0, 3_000L, null)
+
+        val traffic = transport.sentMessages
+            .map { JSONObject(it) }
+            .filter { it.optString("type") == "traffic_position" }
+        assertEquals(2, traffic.size)
+        assertEquals("rid", traffic[0].optString("source"))
+        assertEquals(1L, traffic[0].optLong("seq"))
+        assertEquals(2L, traffic[1].optLong("seq"))
+        assertEquals(3_000L, traffic[1].optLong("sampleTs"))
+        assertTrue(traffic[0].optString("sourceEpoch").isNotEmpty())
+    }
+
+    @Test
+    fun trackerTrafficScheduleAdjustsShadowSendInterval() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONE1")
+        coordinator.onLiveTrackCreated(FakeLiveTrack("DRONE1"), drone, 50.0, 1234L)
+        transport.sentMessages.clear()
+
+        coordinator.onWaypointReceived(drone, 39.1, -121.1, 120.0, 50.0, 2_000L, null)
+        val firstTraffic = transport.sentMessages
+            .map { JSONObject(it) }
+            .first { it.optString("type") == "traffic_position" }
+        transport.receive(JSONObject().apply {
+            put("type", "traffic_schedule")
+            put("remoteId", "DRONE1")
+            put("source", "rid")
+            put("sourceEpoch", firstTraffic.getString("sourceEpoch"))
+            put("seq", 1)
+            put("shadowIntervalMs", 4_000)
+        }.toString())
+
+        clock.advanceBy(1_000L)
+        coordinator.onWaypointReceived(drone, 39.2, -121.2, 121.0, 50.0, 3_000L, null)
+        clock.advanceBy(3_000L)
+        coordinator.onWaypointReceived(drone, 39.3, -121.3, 122.0, 50.0, 6_000L, null)
+
+        val traffic = transport.sentMessages
+            .map { JSONObject(it) }
+            .filter { it.optString("type") == "traffic_position" }
+        assertEquals(2, traffic.size)
+        assertEquals(6_000L, traffic[1].optLong("sampleTs"))
+    }
+
+    @Test
     fun ownerTelemetrySuppressesBackupHeartbeatUntilLivenessWindowAges() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         coordinator.stopBackgroundTimersForTesting()

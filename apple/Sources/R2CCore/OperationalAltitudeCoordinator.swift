@@ -41,6 +41,19 @@ public struct OperationalAircraftAltitudeDisplay: Sendable, Equatable {
     }
 }
 
+public struct OperationalPeerAltitudeReference: Sendable, Equatable {
+    public let takeoffCoordinate: OperationalAltitudeCoordinator.Coordinate
+    public let reportedGroundAltitudeMeters: Double
+
+    public init(
+        takeoffCoordinate: OperationalAltitudeCoordinator.Coordinate,
+        reportedGroundAltitudeMeters: Double
+    ) {
+        self.takeoffCoordinate = takeoffCoordinate
+        self.reportedGroundAltitudeMeters = reportedGroundAltitudeMeters
+    }
+}
+
 /// Per-aircraft altitude state matching Android's takeoff-reference and DEM correction rules.
 public struct OperationalAltitudeCoordinator: Sendable {
     public enum SeedSource: Sendable, Equatable {
@@ -147,6 +160,14 @@ public struct OperationalAltitudeCoordinator: Sendable {
 
     public var canManualCalibrate: Bool { currentAltitudeMeters != nil }
     public var seedSource: SeedSource? { calibration?.seedSource }
+
+    public var peerTrafficReference: OperationalPeerAltitudeReference? {
+        guard let takeoffCoordinate, let calibration else { return nil }
+        return OperationalPeerAltitudeReference(
+            takeoffCoordinate: takeoffCoordinate,
+            reportedGroundAltitudeMeters: calibration.takeoffTrackAltitudeMeters
+        )
+    }
 
     public var display: OperationalAircraftAltitudeDisplay {
         let atoMeters: Double? = {

@@ -53,6 +53,22 @@ public interface PeerCoordinator {
                             double distMeters,
                             long timestampMsec,
                             @Nullable CtDroneSpec.PositionTelemetry telemetry);
+    default void onTrafficPositionReceived(@NonNull CtDroneSpec droneSpec,
+                                           double droneLat,
+                                           double droneLon,
+                                           double droneAlt,
+                                           long timestampMsec,
+                                           @Nullable CtDroneSpec.PositionTelemetry telemetry) {
+    }
+    default void onSEIPositionReceived(@NonNull String remoteId,
+                                       @NonNull String mappedId,
+                                       double droneLat,
+                                       double droneLon,
+                                       double droneAlt,
+                                       long timestampMsec,
+                                       long altitudeTimestampMsec,
+                                       @Nullable Double headingDegrees) {
+    }
     void onDroneLost(@NonNull String remoteId);
     default void onDroneConfirmed(@NonNull String remoteId,
                                   @NonNull String org,

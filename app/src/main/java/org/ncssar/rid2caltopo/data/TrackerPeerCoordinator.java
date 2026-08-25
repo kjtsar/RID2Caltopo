@@ -12,6 +12,7 @@ import android.content.Context;
 import android.os.Build;
 
 import org.ncssar.rid2caltopo.BuildConfig;
+import org.ncssar.rid2caltopo.video.PeerTrafficMapRegistry;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecording;
@@ -31,6 +32,7 @@ import java.util.List;
 import java.util.Locale;
 import java.time.ZoneId;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,6 +67,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private static final long ACK_WATCHDOG_INTERVAL_MS = 5_000L;
     private static final long HEARTBEAT_MIN_SEND_GAP_MS = 1_000L;
     private static final long SIGHTING_SEND_INTERVAL_MS = 3_000L;
+    private static final long TRAFFIC_SEND_INTERVAL_MS = 1_000L;
+    private static final long TRAFFIC_SEND_INTERVAL_MAX_MS = 16_000L;
+    private static final long TRAFFIC_DIAGNOSTIC_INTERVAL_MS = 5_000L;
     private static final long OWNER_ACTIVITY_HEARTBEAT_SUPPRESS_MS = 30_000L;
     private static final long OWNER_ACTIVITY_MAX_HEARTBEAT_SILENCE_MS = 45_000L;
     private static final long DEFAULT_IDLE_PARK_DELAY_MS = 30_000L;
@@ -117,6 +122,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private final DelayedExec idleParkTimer = new DelayedExec(false);
     @NonNull private final DelayedExec videoPresenceTimer = new DelayedExec(false);
     @NonNull private final ConcurrentHashMap<String, Long> lastSightingSentByRemoteId = new ConcurrentHashMap<>();
+    @NonNull private final String trafficSourceEpoch = UUID.randomUUID().toString();
+    @NonNull private final ConcurrentHashMap<String, Long> trafficSequenceByKey = new ConcurrentHashMap<>();
+    @NonNull private final ConcurrentHashMap<String, Long> lastTrafficSentByKey = new ConcurrentHashMap<>();
+    @NonNull private final ConcurrentHashMap<String, Long> trafficSendIntervalByKey = new ConcurrentHashMap<>();
+    @NonNull private final ConcurrentHashMap<String, Long> lastTrafficSentLogByKey = new ConcurrentHashMap<>();
+    @NonNull private final ConcurrentHashMap<String, Long> lastTrafficShadowLogByKey = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, RecordingDownloadRequest>
             approvedRecordingUploads = new ConcurrentHashMap<>();
     @NonNull private final ManagedVideoPreflightPeer videoPreflightPeer;
@@ -358,6 +369,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         ownerByRemoteId.clear();
         leaseSeqByRemoteId.clear();
         lastSightingSentByRemoteId.clear();
+        trafficSequenceByKey.clear();
+        lastTrafficSentByKey.clear();
+        trafficSendIntervalByKey.clear();
+        lastTrafficSentLogByKey.clear();
+        lastTrafficShadowLogByKey.clear();
+        PeerTrafficMapRegistry.clear();
         approvedRecordingUploads.clear();
         notifyPeerListChanged();
         TrackerCoordinationTransport activeTransport = transport;
@@ -443,6 +460,18 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         lastWaypointRemoteIdForTesting = droneSpec.getRemoteId();
         wakeForCoordinationActivity("sighting");
         String remoteId = droneSpec.getRemoteId();
+        sendTrafficPositionIfEligible(
+                remoteId,
+                droneSpec.getMappedId(),
+                "rid",
+                droneLat,
+                droneLon,
+                droneAlt,
+                timestampMsec,
+                timestampMsec,
+                telemetry == null ? null : telemetry.aircraftTrackDeg,
+                telemetry == null ? null : telemetry.aircraftGsKnots,
+                telemetry == null ? null : telemetry.aircraftAltitudeRateFpm);
         boolean localOwner = isLocalOwner(remoteId);
         long nowMs = nowMs();
         if (!localOwner) {
@@ -482,6 +511,120 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public void onTrafficPositionReceived(@NonNull CtDroneSpec droneSpec,
+                                          double droneLat,
+                                          double droneLon,
+                                          double droneAlt,
+                                          long timestampMsec,
+                                          @Nullable CtDroneSpec.PositionTelemetry telemetry) {
+        sendTrafficPositionIfEligible(
+                droneSpec.getRemoteId(),
+                droneSpec.getMappedId(),
+                "rid",
+                droneLat,
+                droneLon,
+                droneAlt,
+                timestampMsec,
+                timestampMsec,
+                telemetry == null ? null : telemetry.aircraftTrackDeg,
+                telemetry == null ? null : telemetry.aircraftGsKnots,
+                telemetry == null ? null : telemetry.aircraftAltitudeRateFpm);
+    }
+
+    @Override
+    public void onSEIPositionReceived(@NonNull String remoteId,
+                                      @NonNull String mappedId,
+                                      double droneLat,
+                                      double droneLon,
+                                      double droneAlt,
+                                      long timestampMsec,
+                                      long altitudeTimestampMsec,
+                                      @Nullable Double headingDegrees) {
+        sendTrafficPositionIfEligible(
+                remoteId, mappedId, "sei", droneLat, droneLon, droneAlt,
+                timestampMsec, altitudeTimestampMsec, headingDegrees, null, null);
+    }
+
+    private void sendTrafficPositionIfEligible(@NonNull String remoteId,
+                                               @NonNull String mappedId,
+                                               @NonNull String source,
+                                               double droneLat,
+                                               double droneLon,
+                                               double droneAlt,
+                                               long timestampMsec,
+                                               long altitudeTimestampMsec,
+                                               @Nullable Double headingDegrees,
+                                               @Nullable Double groundSpeedKnots,
+                                               @Nullable Double verticalRateFpm) {
+        String key = source + "|" + remoteId;
+        long nowMs = nowMs();
+        Long lastSent = lastTrafficSentByKey.get(key);
+        long sendIntervalMs = trafficSendIntervalByKey.getOrDefault(key, TRAFFIC_SEND_INTERVAL_MS);
+        if (lastSent != null && nowMs - lastSent < sendIntervalMs) return;
+        long sequence = trafficSequenceByKey.merge(key, 1L, Long::sum);
+        JSONObject jo = new JSONObject();
+        try {
+            jo.put("type", "traffic_position");
+            jo.put("mapId", mapId);
+            jo.put("zoneId", myGuid);
+            jo.put("guid", myGuid);
+            jo.put("remoteId", remoteId);
+            jo.put("mappedId", mappedId);
+            jo.put("source", source);
+            jo.put("sourceEpoch", trafficSourceEpoch);
+            jo.put("seq", sequence);
+            jo.put("sampleTs", timestampMsec);
+            putFinite(jo, "lat", droneLat);
+            putFinite(jo, "lng", droneLon);
+            putFinite(jo, "altM", droneAlt);
+            jo.put("altSampleTs", altitudeTimestampMsec);
+            jo.put("padFt", CaltopoClient.GetProximityAlertSpacingFeet());
+            PeerTrafficAltitudeNormalizer.Metadata altitude =
+                    PeerTrafficAltitudeNormalizer.metadata(remoteId, droneAlt, altitudeTimestampMsec);
+            jo.put("altCalibrationState", altitude.getState());
+            if (altitude.getFlightEpoch() != null) {
+                jo.put("flightEpoch", altitude.getFlightEpoch());
+            }
+            if (altitude.getMslAltitudeMeters() != null) {
+                putFinite(jo, "mslAltM", altitude.getMslAltitudeMeters());
+                jo.put("mslAltSampleTs", altitude.getMslAltitudeSampleTimestampMsec());
+                putFinite(jo, "altCorrectionM", altitude.getCorrectionMeters());
+                jo.put("altCalibrationTs", altitude.getCalibrationTimestampMsec());
+                if (altitude.getDemSource() != null) jo.put("demSource", altitude.getDemSource());
+                if (altitude.getDemResolutionMeters() != null) {
+                    putFinite(jo, "demResolutionM", altitude.getDemResolutionMeters());
+                }
+            }
+            if (headingDegrees != null) putFinite(jo, "headingDeg", headingDegrees);
+            if (groundSpeedKnots != null) putFinite(jo, "groundSpeedKnots", groundSpeedKnots);
+            if (verticalRateFpm != null) putFinite(jo, "verticalRateFpm", verticalRateFpm);
+            if (sendJson(jo)) {
+                lastTrafficSentByKey.put(key, nowMs);
+                Long lastLogMs = lastTrafficSentLogByKey.get(key);
+                if (lastLogMs != null && nowMs - lastLogMs < TRAFFIC_DIAGNOSTIC_INTERVAL_MS) return;
+                lastTrafficSentLogByKey.put(key, nowMs);
+                CTDebug(TAG, String.format(Locale.US,
+                        "Peer traffic sent remoteId=%s source=%s seq=%d sourceAgeMs=%d headingDeg=%s speedKt=%s altAgeMs=%d altState=%s mslAltM=%s mslAltAgeMs=%s correctionM=%s flightEpoch=%s intervalMs=%d",
+                        remoteId,
+                        source,
+                        sequence,
+                        Math.max(0L, nowMs - timestampMsec),
+                        String.valueOf(headingDegrees),
+                        String.valueOf(groundSpeedKnots),
+                        Math.max(0L, nowMs - altitudeTimestampMsec),
+                        altitude.getState(),
+                        String.valueOf(altitude.getMslAltitudeMeters()),
+                        altitude.getMslAltitudeSampleTimestampMsec() == null ? "null" : String.valueOf(Math.max(0L, nowMs - altitude.getMslAltitudeSampleTimestampMsec())),
+                        String.valueOf(altitude.getCorrectionMeters()),
+                        String.valueOf(altitude.getFlightEpoch()),
+                        sendIntervalMs));
+            }
+        } catch (Exception e) {
+            CTError(TAG, "sendTrafficPositionIfEligible() raised", e);
+        }
+    }
+
+    @Override
     public void onDroneLost(@NonNull String remoteId) {
         PendingDrone pending = pendingDrones.remove(remoteId);
         boolean localArchiveOnly = pending != null && pending.droneSpec.isLocalArchiveOnly();
@@ -494,6 +637,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         leaseSeqByRemoteId.remove(remoteId);
         locallyConfirmedRemoteIds.remove(remoteId);
         lastSightingSentByRemoteId.remove(remoteId);
+        trafficSequenceByKey.keySet().removeIf(key -> key.endsWith("|" + remoteId));
+        lastTrafficSentByKey.keySet().removeIf(key -> key.endsWith("|" + remoteId));
+        trafficSendIntervalByKey.keySet().removeIf(key -> key.endsWith("|" + remoteId));
+        lastTrafficSentLogByKey.keySet().removeIf(key -> key.endsWith("|" + remoteId));
+        PeerTrafficAltitudeNormalizer.clear(remoteId);
         wakeForCoordinationActivity("drone_lost");
         JSONObject jo = new JSONObject();
         try {
@@ -517,6 +665,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         JSONObject jo = new JSONObject();
         try {
             locallyConfirmedRemoteIds.put(remoteId, true);
+            CtDroneSpec confirmedSpec = CaltopoClient.GetDroneSpec(remoteId);
+            if (confirmedSpec != null) {
+                PeerTrafficAltitudeNormalizer.lockAtConfirmation(confirmedSpec, nowMs());
+            }
             jo.put("type", "drone_confirmed");
             jo.put("mapId", mapId != null ? mapId : "");
             jo.put("zoneId", myGuid != null ? myGuid : "");
@@ -904,6 +1056,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     private void onTransportOpen(boolean reconnecting) {
         reconnectPending = false;
+        lastTrafficSentByKey.clear();
+        trafficSendIntervalByKey.clear();
+        lastTrafficSentLogByKey.clear();
+        lastTrafficShadowLogByKey.clear();
+        PeerTrafficMapRegistry.clear();
         suppressScheduledHeartbeatRequestsForTesting = false;
         nextReconnectDelayMs = RECONNECT_BASE_DELAY_MS;
         lastReconnectCause = reconnecting ? "reconnected" : "connected";
@@ -1015,7 +1172,6 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         try {
             heartbeatSendQueued = false;
             if (shouldSkipIntervalHeartbeat()) {
-                CTDebug(TAG, "sendHeartbeat(): suppressed because active owner traffic refreshed lease recently");
                 return;
             }
             if (lastHeartbeatSeqSent > lastHeartbeatSeqAcked) {
@@ -1059,10 +1215,6 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 ? 0L
                 : (HEARTBEAT_MIN_SEND_GAP_MS - gapMs);
         heartbeatSendQueued = true;
-        if (delayMs > 0L) {
-            CTDebug(TAG, String.format(Locale.US,
-                    "requestHeartbeat(): coalescing reason=%s delayMs=%d", reason, delayMs));
-        }
         heartbeatCoalesceTimer.start(this::sendScheduledHeartbeat, delayMs, 0L);
     }
 
@@ -1314,6 +1466,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     break;
                 case "relay_sighting":
                     onRelaySighting(jo);
+                    break;
+                case "peer_traffic_position":
+                    onPeerTrafficShadow(jo);
+                    break;
+                case "traffic_schedule":
+                    onTrafficSchedule(jo);
                     break;
                 case "drone_confirmed":
                     onDroneConfirmedByPeer(jo);
@@ -1891,6 +2049,74 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 jo.optLong("droneTs", 0L),
                 parseTelemetry(jo.optJSONObject("telemetry"))
         );
+    }
+
+    private void onPeerTrafficShadow(@NonNull JSONObject jo) {
+        String remoteId = jo.optString("remoteId");
+        String sourceZoneId = jo.optString("fromZoneId");
+        String source = jo.optString("source");
+        if (remoteId.isEmpty() || sourceZoneId.isEmpty() || sourceZoneId.equals(myGuid)) return;
+        long nowMs = nowMs();
+        PeerTrafficMapRegistry.update(
+                sourceZoneId,
+                remoteId,
+                jo.optString("mappedId", remoteId),
+                source,
+                jo.optLong("seq", -1L),
+                jo.optLong("sampleTs", 0L),
+                nowMs,
+                jo.optDouble("lat", Double.NaN),
+                jo.optDouble("lng", Double.NaN),
+                jo.has("mslAltM") ? jo.optDouble("mslAltM") : null,
+                jo.has("headingDeg") ? jo.optDouble("headingDeg") : null,
+                jo.has("groundSpeedKnots") ? jo.optDouble("groundSpeedKnots") : null);
+        String logKey = sourceZoneId + "|" + source + "|" + remoteId;
+        Long lastLogMs = lastTrafficShadowLogByKey.get(logKey);
+        if (lastLogMs != null && nowMs - lastLogMs < TRAFFIC_DIAGNOSTIC_INTERVAL_MS) return;
+        lastTrafficShadowLogByKey.put(logKey, nowMs);
+        CTDebug(TAG, String.format(Locale.US,
+                "Peer traffic shadow remoteId=%s source=%s fromZoneId=%s seq=%d sourceAgeMs=%d trackerAgeMs=%d headingDeg=%s speedKt=%s altAgeMs=%d altState=%s mslAltM=%s mslAltAgeMs=%s correctionM=%s demSource=%s demResolutionM=%s incidentPadFt=%s nearestDistanceM=%s schedulingPadFt=%s shadowIntervalMs=%d",
+                remoteId,
+                source,
+                sourceZoneId,
+                jo.optLong("seq", -1L),
+                Math.max(0L, nowMs - jo.optLong("sampleTs", 0L)),
+                Math.max(0L, nowMs - jo.optLong("receivedTs", 0L)),
+                jo.has("headingDeg") ? String.valueOf(jo.optDouble("headingDeg")) : "null",
+                jo.has("groundSpeedKnots") ? String.valueOf(jo.optDouble("groundSpeedKnots")) : "null",
+                Math.max(0L, nowMs - jo.optLong("altSampleTs", jo.optLong("sampleTs", 0L))),
+                jo.optString("altCalibrationState", "unavailable"),
+                jo.has("mslAltM") ? String.valueOf(jo.optDouble("mslAltM")) : "null",
+                jo.has("mslAltSampleTs") ? String.valueOf(Math.max(0L, nowMs - jo.optLong("mslAltSampleTs"))) : "null",
+                jo.has("altCorrectionM") ? String.valueOf(jo.optDouble("altCorrectionM")) : "null",
+                jo.optString("demSource", ""),
+                jo.has("demResolutionM") ? String.valueOf(jo.optDouble("demResolutionM")) : "null",
+                jo.has("incidentPadFt") ? String.valueOf(jo.optDouble("incidentPadFt")) : "null",
+                jo.has("shadowNearestDistanceM") ? String.valueOf(jo.optDouble("shadowNearestDistanceM")) : "null",
+                jo.has("shadowSchedulingPadFt") ? String.valueOf(jo.optDouble("shadowSchedulingPadFt")) : "null",
+                jo.optLong("shadowIntervalMs", 0L)));
+    }
+
+    private void onTrafficSchedule(@NonNull JSONObject jo) {
+        if (!trafficSourceEpoch.equals(jo.optString("sourceEpoch"))) return;
+        String remoteId = jo.optString("remoteId");
+        String source = jo.optString("source");
+        if (remoteId.isEmpty() || (!"rid".equals(source) && !"sei".equals(source))) return;
+        long intervalMs = Math.max(TRAFFIC_SEND_INTERVAL_MS,
+                Math.min(TRAFFIC_SEND_INTERVAL_MAX_MS,
+                        jo.optLong("shadowIntervalMs", TRAFFIC_SEND_INTERVAL_MS)));
+        String key = source + "|" + remoteId;
+        Long previousIntervalMs = trafficSendIntervalByKey.put(key, intervalMs);
+        if (previousIntervalMs != null && previousIntervalMs == intervalMs) return;
+        CTDebug(TAG, String.format(Locale.US,
+                "Peer traffic schedule remoteId=%s source=%s seq=%d intervalMs=%d incidentPadFt=%s nearestDistanceM=%s schedulingPadFt=%s",
+                remoteId,
+                source,
+                jo.optLong("seq", -1L),
+                intervalMs,
+                jo.has("incidentPadFt") ? String.valueOf(jo.optDouble("incidentPadFt")) : "null",
+                jo.has("shadowNearestDistanceM") ? String.valueOf(jo.optDouble("shadowNearestDistanceM")) : "null",
+                jo.has("shadowSchedulingPadFt") ? String.valueOf(jo.optDouble("shadowSchedulingPadFt")) : "null"));
     }
 
     private void onDroneConfirmedByPeer(@NonNull JSONObject jo) {

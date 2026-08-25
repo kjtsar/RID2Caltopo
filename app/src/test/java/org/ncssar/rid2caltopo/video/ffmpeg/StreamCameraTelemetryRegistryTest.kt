@@ -31,9 +31,7 @@ class StreamCameraTelemetryRegistryTest {
             "mtrc4td",
             nowMs = 12_999,
         )
-        // Host Android stubs return zero declination; production GeomagneticField
-        // supplies the location/date-specific magnetic-to-true correction.
-        assertEquals(338.54, fresh?.azimuthDeg ?: 0.0, 1e-9)
+        assertEquals(21.46, fresh?.azimuthDeg ?: 0.0, 1e-9)
         assertEquals(21.46, fresh?.fovAzimuthDeg ?: 0.0, 1e-9)
         assertNull(fresh?.courseDeg)
         assertEquals(-26.768848384424192, fresh?.tiltDeg ?: 0.0, 1e-9)
@@ -84,7 +82,7 @@ class StreamCameraTelemetryRegistryTest {
         assertEquals(4.0, sample?.eastMeters ?: 0.0, 0.0)
         assertEquals(2.5, sample?.relativeUpMeters ?: 0.0, 0.0)
         assertEquals(45.0, sample?.courseDeg ?: 0.0, 1e-9)
-        assertEquals(14.7, sample?.azimuthDeg ?: 0.0, 1e-9)
+        assertEquals(345.3, sample?.azimuthDeg ?: 0.0, 1e-9)
         assertEquals(345.3, sample?.fovAzimuthDeg ?: 0.0, 1e-9)
         StreamCameraTelemetryRegistry.clear("WRAP")
     }
@@ -168,7 +166,7 @@ class StreamCameraTelemetryRegistryTest {
         )
         assertNull(anchored?.latitudeDeg)
         assertNull(anchored?.longitudeDeg)
-        assertEquals(15.0, anchored?.azimuthDeg ?: 0.0, 1e-9)
+        assertEquals(345.0, anchored?.azimuthDeg ?: 0.0, 1e-9)
         StreamCameraTelemetryRegistry.clear("AMBIGUOUS")
     }
 
@@ -207,6 +205,44 @@ class StreamCameraTelemetryRegistryTest {
     }
 
     @Test
+    fun seiRelativeUpRequiresRidAgreementBeforeItContinues() {
+        val base = FfmpegTelemetry(
+            sourceTag = "dji-sei-245",
+            sourceTimestampUs = 1_000_000,
+            gimbalPitchDeg = -90.0,
+            cameraYawDeg = 75.0,
+            horizontalFovDeg = 37.7,
+            verticalFovDeg = 21.2,
+            latitude = 39.0,
+            longitude = -121.0,
+            altitudeMeters = 500.0,
+            djiNorthMm = 0,
+            djiEastMm = 0,
+            djiDownMm = -580_000,
+        )
+        StreamCameraTelemetryRegistry.update("VERTICAL", base, nowMs = 1_000)
+        assertNull(StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
+            "VERTICAL", 39.0, -121.0,
+            anchorAltitudeMeters = 510.0,
+            takeoffReportedAltitudeMeters = 500.0,
+            nowMs = 1_000,
+        )?.relativeUpMeters)
+
+        StreamCameraTelemetryRegistry.update(
+            "VERTICAL",
+            base.copy(sourceTimestampUs = 2_000_000, djiDownMm = -510_000),
+            nowMs = 2_000,
+        )
+        assertEquals(10.0, StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
+            "VERTICAL", 39.0, -121.0,
+            anchorAltitudeMeters = 510.0,
+            takeoffReportedAltitudeMeters = 500.0,
+            nowMs = 2_000,
+        )?.relativeUpMeters ?: 0.0, 1e-9)
+        StreamCameraTelemetryRegistry.clear("VERTICAL")
+    }
+
+    @Test
     fun unvalidatedSeiPositionIsWithheldButAzimuthRemainsAvailable() {
         StreamCameraTelemetryRegistry.update(
             "UNVALIDATED",
@@ -231,7 +267,7 @@ class StreamCameraTelemetryRegistryTest {
         )
         assertNull(sample?.latitudeDeg)
         assertNull(sample?.longitudeDeg)
-        assertEquals(15.0, sample?.azimuthDeg ?: 0.0, 1e-9)
+        assertEquals(345.0, sample?.azimuthDeg ?: 0.0, 1e-9)
         StreamCameraTelemetryRegistry.clear("UNVALIDATED")
     }
 
@@ -268,16 +304,14 @@ class StreamCameraTelemetryRegistryTest {
     }
 
     @Test
-    fun orientationNormalizesSeiAzimuthAndUsesTwoPointTiltCalibration() {
-        assertEquals(99.13, DjiCameraOrientation.trueAzimuthDeg(5.0, 14.13) ?: 0.0, 1e-9)
-        assertEquals(23.33, DjiCameraOrientation.trueAzimuthDeg(80.8, 14.13) ?: 0.0, 1e-9)
-        assertEquals(105.0, DjiCameraOrientation.trueAzimuthDeg(-1.0, 14.0) ?: 0.0, 0.0)
-        assertNull(DjiCameraOrientation.trueAzimuthDeg(null, 14.0))
-        assertNull(DjiCameraOrientation.trueAzimuthDeg(80.8, null))
-        assertEquals(289.13, DjiCameraOrientation.clockwiseFovAzimuthDeg(5.0, 14.13) ?: 0.0, 1e-9)
-        assertEquals(4.93, DjiCameraOrientation.clockwiseFovAzimuthDeg(80.8, 14.13) ?: 0.0, 1e-9)
-        assertNull(DjiCameraOrientation.clockwiseFovAzimuthDeg(null, 14.0))
-        assertNull(DjiCameraOrientation.clockwiseFovAzimuthDeg(80.8, null))
+    fun orientationMatchesControllerHeadingAndUsesTwoPointTiltCalibration() {
+        assertEquals(275.0, DjiCameraOrientation.controllerAzimuthDeg(5.0) ?: 0.0, 1e-9)
+        assertEquals(350.8, DjiCameraOrientation.controllerAzimuthDeg(80.8) ?: 0.0, 1e-9)
+        assertEquals(269.0, DjiCameraOrientation.controllerAzimuthDeg(-1.0) ?: 0.0, 0.0)
+        assertNull(DjiCameraOrientation.controllerAzimuthDeg(null))
+        // August 24 M4TD clue: controller reported 288 degrees and -17 degrees.
+        assertEquals(286.733, DjiCameraOrientation.controllerAzimuthDeg(16.733) ?: 0.0, 1e-9)
+        assertEquals(-17.54, DjiCameraOrientation.calibratedTiltDeg(-29.264) ?: 0.0, 0.01)
         assertEquals(-90.0, DjiCameraOrientation.calibratedTiltDeg(-90.0) ?: 0.0, 0.0)
         assertEquals(0.0, DjiCameraOrientation.calibratedTiltDeg(-14.5625) ?: 1.0, 0.0)
         assertEquals(-11.86, DjiCameraOrientation.calibratedTiltDeg(-24.5) ?: 0.0, 0.02)

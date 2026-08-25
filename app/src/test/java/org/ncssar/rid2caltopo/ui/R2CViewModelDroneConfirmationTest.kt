@@ -416,7 +416,7 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
-    fun saveBlocksPilotCallsignAlreadyAssignedToAnotherActiveDrone() {
+    fun saveWarnsButAllowsPilotCallsignAlreadyAssignedToAnotherActiveDrone() {
         val activeDrone = activeDrone("DRONEACTIVEPILOT", waypointTimestampMsec = 151617L).apply {
             setMappedId("1SAR7m3")
             setOwner("1SAR7")
@@ -433,14 +433,14 @@ class R2CViewModelDroneConfirmationTest {
         )
 
         assertEquals(
-            "Pilot callsign 1sar7 is already assigned to active drone 1SAR7m3.",
-            viewModel.pendingDroneConfirmation.value?.pilotCallsignError
+            "Warning: pilot callsign 1sar7 is already assigned to active drone 1SAR7m3. Confirm only if this is intentional.",
+            viewModel.pendingDroneConfirmation.value?.pilotCallsignWarning
         )
 
         viewModel.savePendingDroneConfirmation()
 
-        assertEquals("DRONECANDIDATE", viewModel.pendingDroneConfirmation.value?.remoteId)
-        assertNull(CaltopoClient.GetDroneSpec("DRONECANDIDATE"))
+        assertNull(viewModel.pendingDroneConfirmation.value)
+        assertEquals("1sar7", CaltopoClient.GetDroneSpec("DRONECANDIDATE")?.owner)
     }
 
     @Test
@@ -460,14 +460,14 @@ class R2CViewModelDroneConfirmationTest {
             droneDescription = "DJI Matrice 4TD"
         )
         assertEquals(
-            "Pilot callsign 1SAR8 is already assigned to active drone 1SAR8m3.",
-            viewModel.pendingDroneConfirmation.value?.pilotCallsignError
+            "Warning: pilot callsign 1SAR8 is already assigned to active drone 1SAR8m3. Confirm only if this is intentional.",
+            viewModel.pendingDroneConfirmation.value?.pilotCallsignWarning
         )
 
         previousDrone.reset()
         viewModel.onDroneSpecsChanged(listOf(previousDrone, candidate))
 
-        assertNull(viewModel.pendingDroneConfirmation.value?.pilotCallsignError)
+        assertNull(viewModel.pendingDroneConfirmation.value?.pilotCallsignWarning)
         viewModel.savePendingDroneConfirmation()
 
         assertNull(viewModel.pendingDroneConfirmation.value)

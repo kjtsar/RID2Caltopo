@@ -24,6 +24,7 @@ import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.app.ScanningService
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.CaltopoCredentials
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
@@ -579,14 +580,10 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             return
         }
         findActivePilotCallsignConflict(remoteId, callsign)?.let { conflict ->
-            val message = pilotCallsignConflictMessage(callsign, conflict)
-            CTDebug(
+            CTWarn(
                 tag,
-                "savePendingDroneConfirmation(): blocked by pilot callsign conflict remoteId=$remoteId callsign='$callsign' conflictRemoteId=${conflict.remoteId}"
+                "savePendingDroneConfirmation(): allowing pilot callsign conflict remoteId=$remoteId callsign='$callsign' conflictRemoteId=${conflict.remoteId}"
             )
-            _pendingDroneConfirmation.value = current.copy(pilotCallsignError = message)
-            CaltopoClient.ShowToast(message)
-            return
         }
         if (current.usesUnknownOrganizationDefault) {
             lastUnknownDroneConfirmationOrganization = organization
@@ -823,7 +820,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         val callsign = state.pilotCallsign.trim()
         val conflict = findActivePilotCallsignConflict(state.remoteId, callsign)
         return state.copy(
-            pilotCallsignError = conflict?.let { pilotCallsignConflictMessage(callsign, it) }
+            pilotCallsignWarning = conflict?.let { pilotCallsignConflictMessage(callsign, it) }
         )
     }
 
@@ -847,7 +844,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         val label = conflict.mappedId
             .takeIf { it.isNotBlank() && it != conflict.remoteId }
             ?: conflict.remoteId
-        return "Pilot callsign $pilotCallsign is already assigned to active drone $label."
+        return "Warning: pilot callsign $pilotCallsign is already assigned to active drone $label. Confirm only if this is intentional."
     }
 
     private fun hasKnownDroneSpec(drone: CtDroneSpec): Boolean {

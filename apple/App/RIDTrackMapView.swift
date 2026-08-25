@@ -435,6 +435,7 @@ struct RIDTrackMapView: View {
     @State private var expandedStreamID: String?
     @State private var pairingStreamID: String?
     @State private var cameraTelemetryRefreshToken = 0
+    @State private var seiTrackPointsByAircraftID: [String: [AppleSEIMapPoint]] = [:]
 
     private var baseLayer: OperationalMapBaseLayer {
         get { OperationalMapBaseLayer(rawValue: storedBaseLayer) ?? .openStreetMap }
@@ -654,6 +655,7 @@ struct RIDTrackMapView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { break }
+                refreshSEIMapTails()
                 cameraTelemetryRefreshToken &+= 1
             }
         }
@@ -1005,9 +1007,11 @@ struct RIDTrackMapView: View {
             [peerCoordinator.localZoneID]
         )
         let cameraFovByAircraftID = self.cameraFovByAircraftID
+        let activeSEITrackPointsByAircraftID = self.activeSEITrackPointsByAircraftID
         return ZStack(alignment: .bottomTrailing) {
             OperationalMKMapView(
-                tracks: model.tracks,
+                tracks: mapTracks,
+                seiTrackPointsByAircraftID: activeSEITrackPointsByAircraftID,
                 aircraftDisplay: aircraftDisplay,
                 altitudeDisplay: model.altitudeDisplayByAircraftID,
                 cameraFovByAircraftID: cameraFovByAircraftID,
@@ -1136,17 +1140,39 @@ struct RIDTrackMapView: View {
 
     private var aircraftDisplay: [String: AircraftMapDisplay] {
         _ = pilotDisplay.revision
-        return Dictionary(uniqueKeysWithValues: model.tracks.map { track in
+        return Dictionary(uniqueKeysWithValues: mapTracks.map { track in
             let identity = identityStore.identity(for: track.aircraftID)
             return (
                 track.aircraftID,
                 AircraftMapDisplay(
-                    title: identity?.mappedID ?? track.aircraftID,
+                    title: identity?.mappedID
+                        ?? model.peerTrafficMappedIDByAircraftID[track.aircraftID]
+                        ?? track.aircraftID,
                     preference: pilotDisplay.preference(for: identity?.pilotCallsign),
                     showFullFlightTrack: identityStore.isCurrentFlightConfirmed(track.aircraftID)
                 )
             )
         })
+    }
+
+    private var mapTracks: [RidAircraftTrack] {
+        let localByID = Dictionary(uniqueKeysWithValues: model.tracks.map { ($0.aircraftID, $0) })
+        let latestPeerByID = Dictionary(
+            model.peerTrafficTracks.map { ($0.aircraftID, $0) },
+            uniquingKeysWith: { current, candidate in
+                candidate.lastObservation.receivedAt > current.lastObservation.receivedAt
+                    ? candidate
+                    : current
+            }
+        )
+        let peerPreferredIDs = Set(latestPeerByID.compactMap { aircraftID, peerTrack in
+            OperationalMapTrackFreshness.prefersPeer(
+                localSampleAt: localByID[aircraftID]?.lastObservation.receivedAt,
+                peerSampleAt: peerTrack.lastObservation.receivedAt
+            ) ? aircraftID : nil
+        })
+        return model.tracks.filter { !peerPreferredIDs.contains($0.aircraftID) } +
+            model.peerTrafficTracks.filter { peerPreferredIDs.contains($0.aircraftID) }
     }
 
     private var offlineBoundaryOptions: [AppleOfflineMapPreparationView.BoundaryOption] {
@@ -1282,10 +1308,7 @@ struct RIDTrackMapView: View {
         for session in streamRegistry.sessions {
             guard let aircraftID = aircraftID(for: session.id),
                   let telemetry = session.model.freshDJICameraTelemetry(),
-                  let azimuth = OperationalClueGeometry.djiClockwiseFovAzimuthDegrees(
-                    seiCameraAzimuthDegrees: telemetry.rawAzimuthCandidateDegrees,
-                    magneticDeclinationDegrees: AppleMagneticNorth.declinationDegrees
-                  ),
+                  let azimuth = telemetry.cameraAzimuthDegrees,
                   let boundaries = OperationalMapGeometry.cameraFovBoundaryBearings(
                     cameraAzimuthDegrees: azimuth,
                     horizontalFovDegrees: telemetry.horizontalFovDegrees
@@ -1294,6 +1317,55 @@ struct RIDTrackMapView: View {
             result[aircraftID] = boundaries
         }
         return result
+    }
+
+    private var activeSEITrackPointsByAircraftID: [String: [AppleSEIMapPoint]] {
+        _ = cameraTelemetryRefreshToken
+        let cutoff = Date().addingTimeInterval(-30)
+        return seiTrackPointsByAircraftID.filter { _, points in
+            points.last?.receivedAt ?? .distantPast >= cutoff
+        }
+    }
+
+    private func refreshSEIMapTails(now: Date = Date()) {
+        let activeAircraftIDs = Set(model.tracks.map(\.aircraftID))
+        seiTrackPointsByAircraftID = seiTrackPointsByAircraftID.filter {
+            activeAircraftIDs.contains($0.key)
+        }
+        let telemetryByAircraftID = streamRegistry.freshValidatedDJIPositionByAircraftID(
+            tracks: model.tracks,
+            at: now
+        )
+        for (aircraftID, telemetry) in telemetryByAircraftID {
+            guard let latitude = telemetry.latitudeDegrees,
+                  let longitude = telemetry.longitudeDegrees,
+                  let track = model.tracks.first(where: { $0.aircraftID == aircraftID })
+            else { continue }
+            var points = seiTrackPointsByAircraftID[aircraftID, default: []]
+            guard points.last?.receivedAt != telemetry.receivedAt else { continue }
+            points.append(AppleSEIMapPoint(
+                latitude: latitude,
+                longitude: longitude,
+                altitudeMeters: track.lastObservation.altitudeMeters,
+                courseDegrees: telemetry.courseDegrees,
+                receivedAt: telemetry.receivedAt
+            ))
+            peerCoordinator.observeSEITraffic(
+                remoteID: aircraftID,
+                mappedID: aircraftID,
+                latitude: latitude,
+                longitude: longitude,
+                altitudeMeters: track.lastObservation.altitudeMeters,
+                relativeUpMeters: telemetry.relativeUpMeters,
+                headingDegrees: telemetry.courseDegrees,
+                sampledAt: telemetry.receivedAt,
+                altitudeSampledAt: track.lastObservation.receivedAt
+            )
+            if points.count > 10_000 {
+                points.removeFirst(points.count - 10_000)
+            }
+            seiTrackPointsByAircraftID[aircraftID] = points
+        }
     }
 
     private func streamTelemetryText(_ streamID: String) -> String? {
@@ -1350,10 +1422,7 @@ struct RIDTrackMapView: View {
               aglFeet.isFinite,
               let session = streamRegistry.sessions.first(where: { $0.id == streamID }),
               let camera = session.model.freshDJICameraTelemetry(),
-              let bearing = OperationalClueGeometry.djiClockwiseFovAzimuthDegrees(
-                seiCameraAzimuthDegrees: camera.rawAzimuthCandidateDegrees,
-                magneticDeclinationDegrees: AppleMagneticNorth.declinationDegrees
-              )
+              let bearing = camera.cameraAzimuthDegrees
         else { return nil }
         return await model.centerpointElevationFeet(
             streamID: streamID,
@@ -2191,12 +2260,8 @@ private struct ClueSubmissionView: View {
                 String(
                     format: "DJI calibrated camera azimuth: %.1f°",
                     telemetry.cameraAzimuthDegrees ?? .nan
-                ),
-                "DJI tag-4 angle candidates (same SEI frame):"
+                )
             ]
-            for (index, angle) in telemetry.attitudeAnglesDegrees.enumerated() where angle.isFinite {
-                summaryLines.append(String(format: "  offset %d: %.3f°", 3 + index * 4, angle))
-            }
             if let timestamp = telemetry.sourceTimestampMicroseconds {
                 summaryLines.append("  Telemetry timestamp(us): \(timestamp)")
             }
@@ -2498,6 +2563,37 @@ private struct AircraftMapDisplay: Equatable {
     let showFullFlightTrack: Bool
 }
 
+private struct AppleSEIMapPoint: Equatable {
+    let latitude: Double
+    let longitude: Double
+    let altitudeMeters: Double?
+    let courseDegrees: Double?
+    let receivedAt: Date
+}
+
+private struct AircraftMapPoint: Equatable {
+    let latitude: Double
+    let longitude: Double
+    let altitudeMeters: Double?
+    let headingDegrees: Double?
+    let receivedAt: Date
+}
+
+private func aircraftTravelBearingDegrees(points: [AircraftMapPoint]) -> Double? {
+    guard let latest = points.last else { return nil }
+    for earlier in points.dropLast().reversed() {
+        guard let relative = RidGeometry.relativePosition(
+            fromLatitude: earlier.latitude,
+            longitude: earlier.longitude,
+            toLatitude: latest.latitude,
+            longitude: latest.longitude
+        ), relative.distanceMeters >= OperationalMapGeometry.minimumTravelBearingDisplacementMeters
+        else { continue }
+        return relative.bearingDegrees
+    }
+    return points.last?.headingDegrees
+}
+
 private struct StaticMapRenderState: Equatable {
     let clues: [OperationalClueRecord]
     let artifacts: CaltopoArtifactSnapshot
@@ -2513,13 +2609,29 @@ private struct StaticMapRenderState: Equatable {
 
 private struct AircraftTrackRenderInput: Equatable {
     let aircraftID: String
-    let points: [RidTrackPoint]
+    let points: [AircraftMapPoint]
     let operatorLatitude: Double?
     let operatorLongitude: Double?
 
-    init(_ track: RidAircraftTrack) {
+    init(track: RidAircraftTrack, seiPoints: [AppleSEIMapPoint]) {
         aircraftID = track.aircraftID
-        points = track.points
+        points = track.points.map {
+            AircraftMapPoint(
+                latitude: $0.latitude,
+                longitude: $0.longitude,
+                altitudeMeters: $0.altitudeMeters,
+                headingDegrees: $0.headingDegrees,
+                receivedAt: $0.receivedAt
+            )
+        } + seiPoints.map {
+            AircraftMapPoint(
+                latitude: $0.latitude,
+                longitude: $0.longitude,
+                altitudeMeters: $0.altitudeMeters,
+                headingDegrees: $0.courseDegrees,
+                receivedAt: $0.receivedAt
+            )
+        }
         operatorLatitude = track.lastObservation.operatorLatitude
         operatorLongitude = track.lastObservation.operatorLongitude
     }
@@ -2667,6 +2779,7 @@ private final class ViewportPreservingMKMapView: MKMapView {
 
 private struct OperationalMKMapView: UIViewRepresentable {
     let tracks: [RidAircraftTrack]
+    let seiTrackPointsByAircraftID: [String: [AppleSEIMapPoint]]
     let aircraftDisplay: [String: AircraftMapDisplay]
     let altitudeDisplay: [String: OperationalAircraftAltitudeDisplay]
     let cameraFovByAircraftID: [String: CameraFovBoundaryBearings]
@@ -2769,9 +2882,10 @@ private struct OperationalMKMapView: UIViewRepresentable {
                     coordinates.append(operatorCoordinate)
                 }
             }
+            let latestSEI = seiTrackPointsByAircraftID[track.aircraftID]?.last
             let aircraftCoordinate = CLLocationCoordinate2D(
-                latitude: track.lastObservation.latitude,
-                longitude: track.lastObservation.longitude
+                latitude: latestSEI?.latitude ?? track.lastObservation.latitude,
+                longitude: latestSEI?.longitude ?? track.lastObservation.longitude
             )
             if CLLocationCoordinate2DIsValid(aircraftCoordinate) {
                 coordinates.append(aircraftCoordinate)
@@ -2808,6 +2922,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
         context.coordinator.updateOperationalOverlays(
             on: map,
             tracks: tracks,
+            seiTrackPointsByAircraftID: seiTrackPointsByAircraftID,
             aircraftDisplay: aircraftDisplay,
             altitudeDisplay: altitudeDisplay,
             cameraFovByAircraftID: cameraFovByAircraftID,
@@ -3059,6 +3174,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
         func updateOperationalOverlays(
             on map: MKMapView,
             tracks: [RidAircraftTrack],
+            seiTrackPointsByAircraftID: [String: [AppleSEIMapPoint]],
             aircraftDisplay: [String: AircraftMapDisplay],
             altitudeDisplay: [String: OperationalAircraftAltitudeDisplay],
             cameraFovByAircraftID: [String: CameraFovBoundaryBearings],
@@ -3103,11 +3219,20 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
             let now = Date()
             let region = map.region
+            let renderInputs = tracks.map { track in
+                AircraftTrackRenderInput(
+                    track: track,
+                    seiPoints: seiTrackPointsByAircraftID[track.aircraftID] ?? []
+                )
+            }
+            let renderInputByAircraftID = Dictionary(
+                uniqueKeysWithValues: renderInputs.map { ($0.aircraftID, $0) }
+            )
             // Camera FOV is intentionally excluded from this state. SEI changes
             // several times per second and is updated on the existing annotation
             // below so the aircraft icon and labels do not flash.
             let nextAircraftState = AircraftMapRenderState(
-                tracks: tracks.map(AircraftTrackRenderInput.init),
+                tracks: renderInputs,
                 display: aircraftDisplay,
                 altitude: altitudeDisplay,
                 inset: inset,
@@ -3136,15 +3261,17 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
             if aircraftChanged {
             let renderCoordinates = Dictionary(uniqueKeysWithValues: tracks.compactMap { track -> (String, CLLocationCoordinate2D)? in
-                guard let latest = track.points.last else { return nil }
+                guard let points = renderInputByAircraftID[track.aircraftID]?.points,
+                      let latest = points.last else { return nil }
                 let actual = MapCoordinate(latitude: latest.latitude, longitude: latest.longitude)
-                let predicted = predictiveHeadEnabled && track.points.count >= 2
+                let usingSEI = !(seiTrackPointsByAircraftID[track.aircraftID]?.isEmpty ?? true)
+                let predicted = predictiveHeadEnabled && !usingSEI && points.count >= 2
                     ? OperationalAircraftDisplay.predictedCoordinate(
                         previous: MapCoordinate(
-                            latitude: track.points[track.points.count - 2].latitude,
-                            longitude: track.points[track.points.count - 2].longitude
+                            latitude: points[points.count - 2].latitude,
+                            longitude: points[points.count - 2].longitude
                         ),
-                        previousTime: track.points[track.points.count - 2].receivedAt,
+                        previousTime: points[points.count - 2].receivedAt,
                         current: actual,
                         currentTime: latest.receivedAt,
                         now: now
@@ -3161,7 +3288,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
                         aglFeet: altitude?.aglFeet,
                         aglStale: altitude?.aglStale == true,
                         rangeFeet: altitude?.rangeFeet,
-                        headingDegrees: track.points.last?.headingDegrees
+                        headingDegrees: renderInputByAircraftID[track.aircraftID]?.points.last?.headingDegrees
                     )
                 )
             })
@@ -3204,7 +3331,10 @@ private struct OperationalMKMapView: UIViewRepresentable {
                     if aglFeet >= 180 { return UIColor(hex: "#FBC02D") ?? .systemYellow }
                     return activeColor
                 }()
-                let coordinates = track.points.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+                let renderedPoints = renderInputByAircraftID[track.aircraftID]?.points ?? []
+                let coordinates = renderedPoints.map {
+                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                }
                 if display.showFullFlightTrack, coordinates.count > 1 {
                     map.addOverlay(
                         StyledPolyline(
@@ -3218,8 +3348,8 @@ private struct OperationalMKMapView: UIViewRepresentable {
                     )
                 }
                 let cutoff = Date().addingTimeInterval(-30)
-                let firstRecentIndex = track.points.firstIndex { $0.receivedAt >= cutoff }
-                let activeStartIndex = max((firstRecentIndex ?? max(track.points.count - 1, 0)) - 1, 0)
+                let firstRecentIndex = renderedPoints.firstIndex { $0.receivedAt >= cutoff }
+                let activeStartIndex = max((firstRecentIndex ?? max(renderedPoints.count - 1, 0)) - 1, 0)
                 let activeCoordinates = Array(coordinates.dropFirst(activeStartIndex))
                 if activeCoordinates.count > 1 {
                     map.addOverlay(
@@ -3233,9 +3363,9 @@ private struct OperationalMKMapView: UIViewRepresentable {
                         level: .aboveLabels
                     )
                 }
-                if !track.points.isEmpty,
+                if !renderedPoints.isEmpty,
                    let aircraftCoordinate = renderCoordinates[track.aircraftID] {
-                    let travelBearingDegrees = OperationalMapGeometry.travelBearingDegrees(points: track.points)
+                    let travelBearingDegrees = aircraftTravelBearingDegrees(points: renderedPoints)
                     if display.preference.bearingEnabled,
                        let end = bearingEndpoint(on: map, from: aircraftCoordinate, headingDegrees: travelBearingDegrees) {
                         map.addOverlay(

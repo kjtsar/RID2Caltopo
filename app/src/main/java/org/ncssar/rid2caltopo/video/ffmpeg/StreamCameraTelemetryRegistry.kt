@@ -1,12 +1,11 @@
 package org.ncssar.rid2caltopo.video.ffmpeg
 
-import android.hardware.GeomagneticField
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
 
 data class StreamCameraTelemetrySample(
-    /** True-north camera azimuth converted from DJI's magnetic tag-4 angle. */
+    /** Camera azimuth aligned with the heading shown by the DJI controller. */
     val azimuthDeg: Double?,
     /** Course from recent SEI position motion; not camera azimuth. */
     val courseDeg: Double?,
@@ -44,6 +43,7 @@ object StreamCameraTelemetryRegistry {
     private val samples = mutableMapOf<String, StreamCameraTelemetrySample>()
     private val courseStates = mutableMapOf<String, CourseState>()
     private val positionValidated = mutableSetOf<String>()
+    private val relativeUpValidated = mutableSetOf<String>()
 
     private data class CourseState(
         var anchorNorthMm: Int,
@@ -72,16 +72,7 @@ object StreamCameraTelemetryRegistry {
         val referenceLatitude = telemetry.latitude?.takeIf { it.isFinite() && it in -90.0..90.0 }
         val referenceLongitude = telemetry.longitude?.takeIf { it.isFinite() && it in -180.0..180.0 }
         val referenceAltitude = telemetry.altitudeMeters?.takeIf { it.isFinite() && it in -1000.0..30000.0 }
-        val declination = if (referenceLatitude != null && referenceLongitude != null) {
-            GeomagneticField(
-                referenceLatitude.toFloat(),
-                referenceLongitude.toFloat(),
-                (referenceAltitude ?: 0.0).toFloat(),
-                nowMs,
-            ).declination.toDouble()
-        } else null
-        val absoluteAzimuth = DjiCameraOrientation.trueAzimuthDeg(rawAzimuth, declination) ?: return
-        val fovAzimuth = DjiCameraOrientation.clockwiseFovAzimuthDeg(rawAzimuth, declination) ?: return
+        val controllerAzimuth = DjiCameraOrientation.controllerAzimuthDeg(rawAzimuth) ?: return
         val northMm = telemetry.djiNorthMm
         val eastMm = telemetry.djiEastMm
         val downMm = telemetry.djiDownMm
@@ -94,7 +85,10 @@ object StreamCameraTelemetryRegistry {
                     telemetry.sourceTimestampUs?.let { current -> current + 1_000_000L < previous } ?: false
                 } ?: false
                 if (prior == null || sourceRestarted) {
-                    if (sourceRestarted) positionValidated.remove(key)
+                    if (sourceRestarted) {
+                        positionValidated.remove(key)
+                        relativeUpValidated.remove(key)
+                    }
                     CourseState(northMm, eastMm, telemetry.sourceTimestampUs).also {
                         courseStates[key] = it
                     }
@@ -115,7 +109,7 @@ object StreamCameraTelemetryRegistry {
                 referenceLongitude + Math.toDegrees(eastMeters / (EARTH_RADIUS_METERS * cos(Math.toRadians(referenceLatitude))))
             } else null
             samples[key] = StreamCameraTelemetrySample(
-                azimuthDeg = absoluteAzimuth,
+                azimuthDeg = controllerAzimuth,
                 courseDeg = courseState?.courseDeg,
                 tiltDeg = tilt,
                 horizontalFovDeg = width,
@@ -137,7 +131,7 @@ object StreamCameraTelemetryRegistry {
                 rawTiltDeg = rawTilt,
                 attitudeAnglesDeg = telemetry.djiAttitudeAnglesDeg.takeIf { it.size == 9 }
                     ?: List(9) { Double.NaN },
-                fovAzimuthDeg = fovAzimuth,
+                fovAzimuthDeg = controllerAzimuth,
             )
         }
     }
@@ -215,6 +209,8 @@ object StreamCameraTelemetryRegistry {
         designator: String,
         anchorLatitudeDeg: Double,
         anchorLongitudeDeg: Double,
+        anchorAltitudeMeters: Double? = null,
+        takeoffReportedAltitudeMeters: Double? = null,
         nowMs: Long = System.currentTimeMillis(),
         maxAgeMs: Long = DEFAULT_MAX_AGE_MS,
     ): StreamCameraTelemetrySample? {
@@ -236,11 +232,22 @@ object StreamCameraTelemetryRegistry {
                     positionValidated.add(key)
                 }
             }
-            return if (positionValidated.contains(key)) sample else sample.copy(
-                latitudeDeg = null,
-                longitudeDeg = null,
-                northMeters = null,
-                eastMeters = null,
+            val relativeUp = sample.relativeUpMeters
+            if (!relativeUpValidated.contains(key) && relativeUp?.isFinite() == true &&
+                anchorAltitudeMeters?.isFinite() == true &&
+                takeoffReportedAltitudeMeters?.isFinite() == true &&
+                kotlin.math.abs(
+                    relativeUp - (anchorAltitudeMeters - takeoffReportedAltitudeMeters)
+                ) <= MAX_RID_VERTICAL_RESIDUAL_METERS
+            ) {
+                relativeUpValidated.add(key)
+            }
+            return sample.copy(
+                latitudeDeg = sample.latitudeDeg.takeIf { positionValidated.contains(key) },
+                longitudeDeg = sample.longitudeDeg.takeIf { positionValidated.contains(key) },
+                northMeters = sample.northMeters.takeIf { positionValidated.contains(key) },
+                eastMeters = sample.eastMeters.takeIf { positionValidated.contains(key) },
+                relativeUpMeters = relativeUp.takeIf { relativeUpValidated.contains(key) },
             )
         }
     }
@@ -251,6 +258,7 @@ object StreamCameraTelemetryRegistry {
             samples.remove(key)
             courseStates.remove(key)
             positionValidated.remove(key)
+            relativeUpValidated.remove(key)
         }
     }
 }

@@ -3,6 +3,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlinx.coroutines.runBlocking
 import kotlin.math.cos
+import org.ncssar.rid2caltopo.video.ffmpeg.DjiCameraOrientation
 
 class ClueProjectionTest {
     @Test
@@ -41,6 +42,24 @@ class ClueProjectionTest {
         assertEquals(40.0, latMeters, 2.0)
         assertEquals(0.0, lngMeters, 1.0)
         assertEquals(110.0, projection.alt, 1e-9)
+    }
+
+    @Test
+    fun m4tdControllerHeading_projectsAugust24ClueIntoNorthwestQuadrant() {
+        val droneLat = 39.154044
+        val droneLng = -121.131754
+        val heading = DjiCameraOrientation.controllerAzimuthDeg(16.733)
+        val projection = projectClueLocation(
+            droneLat = droneLat,
+            droneLng = droneLng,
+            droneAlt = 531.9,
+            headingDeg = heading,
+            aglMeters = 22.0,
+            gimbalAngleDeg = -17.5,
+        )
+
+        assertTrue("expected northward projection", projection.lat > droneLat)
+        assertTrue("expected westward projection", projection.lng < droneLng)
     }
 
     @Test

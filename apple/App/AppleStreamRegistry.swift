@@ -59,6 +59,7 @@ final class AppleStreamRegistry: ObservableObject {
     private var presenceSubscriptions: [ObjectIdentifier: AnyCancellable] = [:]
     private var presenceEligibility: [ObjectIdentifier: Bool] = [:]
     private var flightActivity = PairedVideoFlightActivityStore()
+    private var seiPositionContinuationByStreamID: [String: OperationalSEIPositionContinuation] = [:]
 
     let primaryModel: AppleVideoFrameSource
 
@@ -90,6 +91,7 @@ final class AppleStreamRegistry: ObservableObject {
         case let .streamStarted(path, publisherID), let .streamPublisherHandoff(path, publisherID):
             let session = admit(path: path, state: .live, publisherID: publisherID)
             if let session {
+                seiPositionContinuationByStreamID.removeValue(forKey: session.id)
                 flightActivity.publisherStarted(streamID: session.id, at: observedAt)
             }
             session?.errorDetail = nil
@@ -104,6 +106,7 @@ final class AppleStreamRegistry: ObservableObject {
             startDecoderIfNeeded(for: session)
         case let .streamStopped(path, publisherID), let .rtmpSessionClosed(path, publisherID, _):
             if let stoppedSession = stop(path: path, publisherID: publisherID) {
+                seiPositionContinuationByStreamID.removeValue(forKey: stoppedSession.id)
                 flightActivity.publisherStopped(streamID: stoppedSession.id, at: observedAt)
             }
         case let .streamError(path, publisherID, detail):
@@ -127,6 +130,7 @@ final class AppleStreamRegistry: ObservableObject {
     }
 
     func pair(streamID: String, aircraftID: String) {
+        seiPositionContinuationByStreamID.removeValue(forKey: streamID)
         flightActivity.pair(streamID: streamID, aircraftID: aircraftID)
         objectWillChange.send()
         AppleLog.info("Streams", "Paired stream \(streamID) to Remote ID \(aircraftID)")
@@ -143,6 +147,7 @@ final class AppleStreamRegistry: ObservableObject {
     }
 
     func unpair(streamID: String) {
+        seiPositionContinuationByStreamID.removeValue(forKey: streamID)
         flightActivity.unpair(streamID: streamID)
         objectWillChange.send()
         AppleLog.info("Streams", "Unpaired stream \(streamID) for the current app session")
@@ -169,6 +174,44 @@ final class AppleStreamRegistry: ObservableObject {
         }
     }
 
+    func freshValidatedDJIPositionByAircraftID(
+        tracks: [RidAircraftTrack],
+        at date: Date = Date(),
+        maximumAge: TimeInterval = 3
+    ) -> [String: AppleDJICameraTelemetry] {
+        let tracksByAircraftID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.aircraftID, $0) })
+        var result: [String: AppleDJICameraTelemetry] = [:]
+        for session in sessions {
+            guard let aircraftID = flightActivity.boundAircraftID(for: session.id),
+                  let track = tracksByAircraftID[aircraftID],
+                  let telemetry = session.model.freshDJICameraTelemetry(now: date, maximumAge: maximumAge)
+            else { continue }
+            var continuation = seiPositionContinuationByStreamID[session.id]
+                ?? OperationalSEIPositionContinuation()
+            let accepted = continuation.acceptHorizontalPosition(
+                latitudeDegrees: telemetry.latitudeDegrees,
+                longitudeDegrees: telemetry.longitudeDegrees,
+                ridLatitudeDegrees: track.lastObservation.latitude,
+                ridLongitudeDegrees: track.lastObservation.longitude,
+                sourceTimestampMicroseconds: telemetry.sourceTimestampMicroseconds
+            )
+            let relativeUpAccepted = continuation.acceptRelativeUp(
+                observedRelativeUpMeters: telemetry.relativeUpMeters,
+                ridAltitudeMeters: track.lastObservation.altitudeMeters,
+                takeoffReportedAltitudeMeters: track.points.first?.altitudeMeters
+            )
+            seiPositionContinuationByStreamID[session.id] = continuation
+            guard accepted else { continue }
+            if let existing = result[aircraftID], existing.receivedAt >= telemetry.receivedAt {
+                continue
+            }
+            result[aircraftID] = telemetry.replacingRelativeUpMeters(
+                relativeUpAccepted ? telemetry.relativeUpMeters : nil
+            )
+        }
+        return result
+    }
+
     func allAircraftHaveFreshPairedSEI(
         aircraftIDs: [String],
         at date: Date = Date(),
@@ -185,6 +228,7 @@ final class AppleStreamRegistry: ObservableObject {
 
     func close(_ id: String) {
         guard let session = sessions.first(where: { $0.id == id }) else { return }
+        seiPositionContinuationByStreamID.removeValue(forKey: id)
         session.model.stop()
         if id == Self.placeholderID {
             session.state = .stopped
@@ -206,6 +250,7 @@ final class AppleStreamRegistry: ObservableObject {
         presenceEligibility.removeAll()
         rejectedPaths.removeAll()
         flightActivity = PairedVideoFlightActivityStore()
+        seiPositionContinuationByStreamID.removeAll()
         sessions = [AppleLiveStreamSession(path: "demo", model: primaryModel, state: .stopped)]
         focusedID = "demo"
     }

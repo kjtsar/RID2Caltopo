@@ -245,6 +245,10 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         if (registration == null ||
                 !registration.coordinatorActivated ||
                 !CaltopoClient.IsCurrentPeerDroneConfirmed(droneSpec.getRemoteId())) {
+            if (trackerSelected) {
+                activeCoordinator.onTrafficPositionReceived(
+                        droneSpec, droneLat, droneLon, droneAlt, timestampMsec, telemetry);
+            }
             return;
         }
         activeCoordinator.onWaypointReceived(
@@ -256,6 +260,21 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                 timestampMsec,
                 telemetry
         );
+    }
+
+    @Override
+    public void onSEIPositionReceived(@NonNull String remoteId,
+                                      @NonNull String mappedId,
+                                      double droneLat,
+                                      double droneLon,
+                                      double droneAlt,
+                                      long timestampMsec,
+                                      long altitudeTimestampMsec,
+                                      @Nullable Double headingDegrees) {
+        if (!trackerSelected) return;
+        activeCoordinator.onSEIPositionReceived(
+                remoteId, mappedId, droneLat, droneLon, droneAlt,
+                timestampMsec, altitudeTimestampMsec, headingDegrees);
     }
 
     @Override

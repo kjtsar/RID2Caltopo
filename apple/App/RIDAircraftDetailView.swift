@@ -265,6 +265,14 @@ final class AppleDroneConfirmationStore: ObservableObject {
         sessionIdentities[remoteID] != nil || peerIdentities[remoteID] != nil
     }
 
+    func activePilotCallsignConflict(remoteID: String, callsign: String) -> RidAircraftIdentity? {
+        let active = sessionIdentities.merging(peerIdentities) { peer, _ in peer }
+        return active.values.first { identity in
+            identity.remoteID != remoteID &&
+                PilotDisplayPreference.callsignsMatch(identity.pilotCallsign, callsign)
+        }
+    }
+
     /// Prompt once per current flight. RID-only gaps do not reach this method as an ended
     /// flight until the shared 30-second RID/video activity timeout removes the track.
     func reconcileActiveFlights(_ orderedRemoteIDs: [String]) -> String? {
@@ -471,6 +479,15 @@ struct DroneConfirmationView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                if let conflict = pilotCallsignConflict {
+                    Section {
+                        Text(PilotDisplayPreference.activeAssignmentWarning(
+                            callsign: pilotCallsign,
+                            aircraftLabel: conflict.mappedID.isEmpty ? conflict.remoteID : conflict.mappedID
+                        ))
+                        .foregroundStyle(.orange)
+                    }
+                }
             }
             .navigationTitle("Confirm Drone")
             .navigationBarTitleDisplayMode(.inline)
@@ -505,6 +522,10 @@ struct DroneConfirmationView: View {
             droneDescription: droneDescription,
             mappedIDOverride: mappedIDOverride
         )
+    }
+
+    private var pilotCallsignConflict: RidAircraftIdentity? {
+        identityStore.activePilotCallsignConflict(remoteID: remoteID, callsign: pilotCallsign)
     }
 }
 

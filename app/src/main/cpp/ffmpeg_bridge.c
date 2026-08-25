@@ -5289,11 +5289,82 @@ static void emit_telemetry_values(ffmpeg_session_t *session,
             "");
 }
 
+typedef struct {
+    ffmpeg_session_t *session;
+    int64_t packet_ts_us;
+    size_t message_index;
+} dji_sei_payload_dump_context_t;
+
+static void dump_dji_sei_payload(
+        size_t payload_type,
+        const uint8_t *payload,
+        size_t payload_size,
+        void *opaque) {
+    dji_sei_payload_dump_context_t *context = opaque;
+    if (context == NULL || context->session == NULL || payload == NULL) return;
+
+    const size_t message_index = context->message_index++;
+    enum { DJI_SEI_DUMP_CHUNK_BYTES = 256 };
+    if (payload_size == 0) {
+        ct_debug(
+                "DjiSeiPayload",
+                "DJI_SEI_PAYLOAD designator=%s sessionId=%lld role=%s ptsUs=%lld messageIndex=%zu type=%zu len=0 chunkOffset=0 chunkLen=0 payload=",
+                context->session->designator,
+                (long long) context->session->session_id,
+                context->session->is_render ? "render" : "probe",
+                (long long) context->packet_ts_us,
+                message_index,
+                payload_type);
+        return;
+    }
+
+    for (size_t chunk_offset = 0;
+         chunk_offset < payload_size;
+         chunk_offset += DJI_SEI_DUMP_CHUNK_BYTES) {
+        size_t chunk_size = payload_size - chunk_offset;
+        if (chunk_size > DJI_SEI_DUMP_CHUNK_BYTES) chunk_size = DJI_SEI_DUMP_CHUNK_BYTES;
+        char payload_hex[DJI_SEI_DUMP_CHUNK_BYTES * 2 + 1];
+        if (!R2CDJIHexEncode(
+                payload + chunk_offset,
+                chunk_size,
+                payload_hex,
+                sizeof(payload_hex))) {
+            return;
+        }
+        ct_debug(
+                "DjiSeiPayload",
+                "DJI_SEI_PAYLOAD designator=%s sessionId=%lld role=%s ptsUs=%lld messageIndex=%zu type=%zu len=%zu chunkOffset=%zu chunkLen=%zu payload=%s",
+                context->session->designator,
+                (long long) context->session->session_id,
+                context->session->is_render ? "render" : "probe",
+                (long long) context->packet_ts_us,
+                message_index,
+                payload_type,
+                payload_size,
+                chunk_offset,
+                chunk_size,
+                payload_hex);
+    }
+}
+
 static void emit_dji_camera_telemetry(
         ffmpeg_session_t *session,
         const AVPacket *packet) {
     if (session == NULL || packet == NULL || packet->data == NULL || packet->size <= 0) return;
     int64_t packet_ts_us = pts_to_us(packet->pts, session->video_time_base);
+    if (atomic_load_explicit(&g_dji_sei_hex_dump_enabled, memory_order_relaxed)) {
+        dji_sei_payload_dump_context_t dump_context = {
+                .session = session,
+                .packet_ts_us = packet_ts_us,
+                .message_index = 0,
+        };
+        R2CDJIVisitH264SEIPayloads(
+                packet->data,
+                (size_t) packet->size,
+                4,
+                dump_dji_sei_payload,
+                &dump_context);
+    }
     R2CDJICameraTelemetry camera = {0};
     if (!R2CDJIDecodeH264Packet(
             packet->data,

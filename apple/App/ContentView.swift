@@ -182,6 +182,7 @@ struct ContentView: View {
     @State private var pendingDroneConfirmation: DroneConfirmationRequest?
     @State private var controllerRTMPURL = "Connect this device to Wi-Fi"
     @State private var appStartedAt = Date()
+    @State private var lastBridgePacketDiagnosticLogAt = Date.distantPast
     @State private var dismissedUpdateVersionCode = 0
     @State private var pendingCredentialProfileID: String?
     @State private var showCredentialSwitchConfirmation = false
@@ -571,7 +572,7 @@ struct ContentView: View {
                     remoteID: request.id,
                     existing: droneConfirmations.identity(for: request.id),
                     identityStore: droneConfirmations,
-                    onConfirm: peerCoordinator.confirm,
+                    onConfirm: confirmDrone,
                     onIgnore: {
                         droneConfirmations.ignore(request.id)
                         ridTracks.suppressCaltopoPublication(remoteID: request.id)
@@ -883,6 +884,9 @@ struct ContentView: View {
             }
             .onChange(of: bluetoothScanner.bridgeEventCount) { _, _ in
                 guard let diagnostic = bluetoothScanner.lastBridgePacketDiagnostic else { return }
+                let now = Date()
+                guard now.timeIntervalSince(lastBridgePacketDiagnosticLogAt) >= 5 else { return }
+                lastBridgePacketDiagnosticLogAt = now
                 AppleLog.info(
                     "DroneScoutBridge",
                     "Bridge event=\(diagnostic.eventCount) " +
@@ -1057,6 +1061,9 @@ struct ContentView: View {
                 }
             }
             .onChange(of: proximityConfigurationFingerprint) { _, _ in
+                peerCoordinator.updateProximityAlertDistanceFeet(
+                    Double(orgConfigSettings.proximityAlertSpacingFeet)
+                )
                 updateProximityAlerts()
             }
             .onChange(of: trackPolicyConfigurationFingerprint) { _, _ in
@@ -1138,7 +1145,7 @@ struct ContentView: View {
                 track: track,
                 operatorLocation: locationProvider.lastLocation,
                 identityStore: droneConfirmations,
-                onConfirm: peerCoordinator.confirm
+                onConfirm: confirmDrone
             )
         } else {
             ContentUnavailableView("Aircraft no longer active", systemImage: "airplane")
@@ -1579,7 +1586,7 @@ struct ContentView: View {
                             track: track,
                             operatorLocation: locationProvider.lastLocation,
                             identityStore: droneConfirmations,
-                            onConfirm: peerCoordinator.confirm
+                            onConfirm: confirmDrone
                         )
                     } label: {
                         RIDAircraftSummaryRow(
@@ -2023,6 +2030,9 @@ struct ContentView: View {
             }
         )
         peerCoordinator.updatePosition(locationProvider.lastLocation)
+        peerCoordinator.updateProximityAlertDistanceFeet(
+            Double(orgConfigSettings.proximityAlertSpacingFeet)
+        )
         peerCoordinator.configure(
             usePeers: arguments.contains("--tracker-use-peers") || orgConfigSettings.usePeers,
             standaloneR2CCoordinationEnabled:
@@ -2092,6 +2102,28 @@ struct ContentView: View {
               let remoteID = droneConfirmations.reconcileActiveFlights(ridTracks.tracks.map(\.aircraftID))
         else { return }
         pendingDroneConfirmation = DroneConfirmationRequest(id: remoteID)
+    }
+
+    private func confirmDrone(_ identity: RidAircraftIdentity) {
+        peerCoordinator.confirm(identity)
+        guard let flightEpoch = ridTracks.peerTrafficFlightEpoch(remoteID: identity.remoteID) else {
+            return
+        }
+        peerCoordinator.beginPeerTrafficAltitudeCalibration(
+            remoteID: identity.remoteID,
+            flightEpoch: flightEpoch
+        )
+        Task { @MainActor in
+            let calibration = await ridTracks.lockPeerTrafficAltitudeCalibration(
+                remoteID: identity.remoteID,
+                flightEpoch: flightEpoch
+            )
+            peerCoordinator.finishPeerTrafficAltitudeCalibration(
+                remoteID: identity.remoteID,
+                flightEpoch: flightEpoch,
+                calibration: calibration
+            )
+        }
     }
 
     private func updateProximityAlerts() {

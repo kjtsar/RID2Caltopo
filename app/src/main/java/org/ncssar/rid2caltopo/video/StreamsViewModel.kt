@@ -2718,7 +2718,7 @@ class StreamsViewModel(
             }
             diagnosticYaw?.let { raw ->
                 lines += if (telemetry.sourceTag == "dji-sei-245") {
-                    String.format(Locale.US, "  DJI raw magnetic azimuth encoder: %.1f\u00b0", raw)
+                    String.format(Locale.US, "  DJI raw azimuth encoder: %.1f\u00b0", raw)
                 } else {
                     String.format(Locale.US, "  Camera yaw: %.1f\u00b0", raw)
                 }
@@ -2754,20 +2754,6 @@ class StreamsViewModel(
                 )
             }
         }
-        djiCameraSample?.attitudeAnglesDeg
-            ?.takeIf { it.size == 9 }
-            ?.let { angles ->
-                lines += "  DJI tag-4 angle candidates (same SEI frame):"
-                angles.forEachIndexed { index, value ->
-                    val offset = 3 + index * 4
-                    lines += String.format(
-                        Locale.US,
-                        "    offset %d: %s",
-                        offset,
-                        if (value.isFinite()) String.format(Locale.US, "%.3f°", value) else "N/A",
-                    )
-                }
-            }
         return lines.joinToString("\n")
     }
 

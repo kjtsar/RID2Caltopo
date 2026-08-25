@@ -402,6 +402,7 @@ fun MainScreen(
     onSetExternalDisplayContent: ((ExternalDisplayContentMode) -> Unit)? = null,
     openDeveloperToolsOnStart: Boolean = false,
     onDeveloperToolsOpened: () -> Unit = {},
+    onRequestExit: () -> Unit,
 ) {
     val tag = "MainScreen"
     val mainHorizontalScrollState = rememberSaveable(saver = ScrollState.Saver) {
@@ -410,7 +411,6 @@ fun MainScreen(
     var menuExpanded by remember { mutableStateOf(false) }
     var credentialMenuExpanded by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
-    var showConfirmExitDialog by remember { mutableStateOf(false) }
     var showAboutPrivacyDialog by remember { mutableStateOf(false) }
     var showDebugTagDialog by remember { mutableStateOf(false) }
     var knownDebugTags by remember { mutableStateOf(listOf<String>()) }
@@ -1080,35 +1080,6 @@ fun MainScreen(
         )
     }
 
-    if (showConfirmExitDialog) {
-        AlertDialog(
-            onDismissRequest = { showConfirmExitDialog = false },
-            title = { Text("Confirm Exit") },
-            text = { Text("Do you really want to close this application?") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showConfirmExitDialog = false
-                        CaltopoClient.CTEvent(tag,"QuitConfirmed", null)
-                        CaltopoClient.QuitApplication()
-                    }
-                ) {
-                    Text("OK")
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showConfirmExitDialog = false
-                        CaltopoClient.CTEvent(tag,"QuitCancelled", null)
-                    }
-                ) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
     if (showConfirmDialog) {
         AlertDialog(
             onDismissRequest = { showConfirmDialog = false },
@@ -1494,9 +1465,8 @@ fun MainScreen(
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Quit") }, onClick = {
-                            showConfirmExitDialog = true
-                            CaltopoClient.CTEvent(tag,"QuitMenuSelected", null)
                             menuExpanded = false
+                            onRequestExit()
                         })
                     }
                 }

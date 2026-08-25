@@ -1,10 +1,23 @@
 package org.ncssar.rid2caltopo.app
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.ncssar.rid2caltopo.ui.ActiveScreen
 
 class R2CActivityShutdownPolicyTest {
+    @Test
+    fun systemBackOnlyRequestsExitFromMainScreen() {
+        assertEquals(
+            AppBackAction.REQUEST_EXIT_CONFIRMATION,
+            appBackAction(ActiveScreen.MAIN),
+        )
+        listOf(ActiveScreen.STREAMS, ActiveScreen.SETTINGS, ActiveScreen.SCANNER).forEach {
+            assertEquals(AppBackAction.RETURN_TO_MAIN, appBackAction(it))
+        }
+    }
+
     @Test
     fun taskRemovalShutsDownWithoutExplicitQuitRequest() {
         assertTrue(

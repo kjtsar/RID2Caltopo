@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -37,6 +39,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.mandatorySystemGestures
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Notifications
@@ -378,6 +381,13 @@ fun StreamsScreen(
     var showCompliancePanel by remember { mutableStateOf(false) }
     var showSignalLossPanel by remember { mutableStateOf(false) }
     var streamsFullScreen by remember { mutableStateOf(false) }
+    BackHandler(enabled = showNavigation) {
+        if (streamsFullScreen) {
+            streamsFullScreen = false
+        } else {
+            handleBack()
+        }
+    }
     val fullScreenChrome = streamsFullScreenChrome(
         fullScreen = streamsFullScreen,
         externalContentActive = externalContentMode != null
@@ -1025,6 +1035,32 @@ internal const val MAX_SPLIT_FRACTION = 1f
 internal const val SPLIT_EDGE_SNAP_HANDLE_WIDTHS = 2f
 internal const val SPLIT_DIVIDER_TOUCH_SIZE_DP = 96
 internal const val SPLIT_DIVIDER_SNAP_WIDTH_DP = 48
+internal const val SPLIT_EDGE_RESTORE_TOUCH_HEIGHT_DP = 192
+internal const val SPLIT_BOTTOM_GESTURE_CLEARANCE_DP = 12
+
+internal fun splitDividerTouchHeightDp(fraction: Float): Int =
+    if (fraction <= MIN_SPLIT_FRACTION || fraction >= MAX_SPLIT_FRACTION) {
+        SPLIT_EDGE_RESTORE_TOUCH_HEIGHT_DP
+    } else {
+        SPLIT_DIVIDER_TOUCH_SIZE_DP
+    }
+
+internal fun portraitSplitDividerTouchOffsetPx(
+    fraction: Float,
+    availablePx: Float,
+    dividerTouchSizePx: Float,
+    mandatoryBottomGestureInsetPx: Float,
+    bottomClearancePx: Float,
+): Float {
+    val normalOffset = splitDividerTouchOffsetPx(
+        fraction = fraction,
+        availablePx = availablePx,
+        dividerThicknessPx = dividerTouchSizePx,
+    )
+    if (fraction < MAX_SPLIT_FRACTION) return normalOffset
+    return (normalOffset - mandatoryBottomGestureInsetPx.coerceAtLeast(0f) -
+        bottomClearancePx.coerceAtLeast(0f)).coerceAtLeast(0f)
+}
 
 internal fun layoutModeForSplitFraction(fraction: Float): StreamsLayoutMode =
     when {
@@ -1103,8 +1139,19 @@ private fun SplitStreamsAndMap(
         val currentOnSplitFractionChange by rememberUpdatedState(onSplitFractionChange)
 
         if (isPortrait) {
+            val mandatoryBottomGestureInsetPx =
+                WindowInsets.mandatorySystemGestures.getBottom(density).toFloat()
+            val bottomGestureClearancePx = with(density) {
+                SPLIT_BOTTOM_GESTURE_CLEARANCE_DP.dp.toPx()
+            }
             val dividerOffsetDp = with(density) {
-                splitDividerTouchOffsetPx(clamped, maxHeightPx, dividerTouchSizePx).toDp()
+                portraitSplitDividerTouchOffsetPx(
+                    fraction = clamped,
+                    availablePx = maxHeightPx,
+                    dividerTouchSizePx = dividerTouchSizePx,
+                    mandatoryBottomGestureInsetPx = mandatoryBottomGestureInsetPx,
+                    bottomClearancePx = bottomGestureClearancePx,
+                ).toDp()
             }
             val dividerLineOffsetDp = with(density) {
                 (clamped * maxHeightPx - dividerLinePx / 2f).toDp()
@@ -1154,6 +1201,7 @@ private fun SplitStreamsAndMap(
                         .offset(y = dividerOffsetDp)
                         .size(dividerTouchSize)
                         .background(Color.Transparent)
+                        .systemGestureExclusion()
                         .semantics {
                             contentDescription = "Resize video and map panes"
                             progressBarRangeInfo = ProgressBarRangeInfo(
@@ -1183,12 +1231,6 @@ private fun SplitStreamsAndMap(
                             )
                         }
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .matchParentSize()
-                            .systemGestureExclusion()
-                    )
                     SplitDragHandle(
                         horizontalDivider = true,
                         modifier = when {
@@ -1197,13 +1239,15 @@ private fun SplitStreamsAndMap(
                                 .offset(y = (-14).dp)
                             clamped >= MAX_SPLIT_FRACTION -> Modifier
                                 .align(Alignment.BottomCenter)
-                                .offset(y = 14.dp)
+                                // Android's bottom Home gesture cannot be excluded. Keep the
+                                // visible handle fully inside the inset-adjusted touch target.
                             else -> Modifier.align(Alignment.Center)
                         },
                     )
                 }
             }
         } else {
+            val dividerTouchHeight = splitDividerTouchHeightDp(clamped).dp
             val dividerOffsetDp = with(density) {
                 splitDividerTouchOffsetPx(clamped, maxWidthPx, dividerTouchSizePx).toDp()
             }
@@ -1253,8 +1297,10 @@ private fun SplitStreamsAndMap(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
                         .offset(x = dividerOffsetDp)
-                        .size(dividerTouchSize)
+                        .width(dividerTouchSize)
+                        .height(dividerTouchHeight)
                         .background(Color.Transparent)
+                        .systemGestureExclusion()
                         .semantics {
                             contentDescription = "Resize video and map panes"
                             progressBarRangeInfo = ProgressBarRangeInfo(
@@ -1284,12 +1330,6 @@ private fun SplitStreamsAndMap(
                             )
                         }
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .matchParentSize()
-                            .systemGestureExclusion()
-                    )
                     SplitDragHandle(
                         horizontalDivider = false,
                         modifier = when {

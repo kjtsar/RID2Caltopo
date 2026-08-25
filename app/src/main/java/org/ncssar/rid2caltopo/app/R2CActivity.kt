@@ -28,6 +28,7 @@ import android.view.Display
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -178,6 +179,56 @@ internal fun shouldShutdownOnActivityDestroy(
     isFinishing: Boolean,
     isChangingConfigurations: Boolean,
 ): Boolean = isPrimaryActivity && isFinishing && !isChangingConfigurations
+
+internal enum class AppBackAction {
+    REQUEST_EXIT_CONFIRMATION,
+    RETURN_TO_MAIN,
+}
+
+internal fun appBackAction(activeScreen: ActiveScreen): AppBackAction =
+    if (activeScreen == ActiveScreen.MAIN) {
+        AppBackAction.REQUEST_EXIT_CONFIRMATION
+    } else {
+        AppBackAction.RETURN_TO_MAIN
+    }
+
+private enum class AppExitRequestSource(val logValue: String) {
+    SYSTEM_BACK("system_back"),
+    QUIT_MENU("quit_menu"),
+    BLUETOOTH_DISABLED("bluetooth_disabled"),
+    DISCLAIMER_DECLINED("disclaimer_declined"),
+}
+
+@Composable
+private fun ConfirmAppExitDialog(
+    onCancel: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = false,
+        ),
+        title = { Text("Close RID2Caltopo?") },
+        text = {
+            Text(
+                "Closing the app stops active tracking, Remote ID reception, and video. " +
+                    "Keep it open during a flight."
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Close app")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) {
+                Text("Keep app open")
+            }
+        },
+    )
+}
 
 @Composable
 private fun BluetoothDisabledDialog(
@@ -909,17 +960,64 @@ class R2CActivity :
 
         setContent {
             RID2CaltopoTheme content@ {
+                var pendingAppExitSource by remember {
+                    mutableStateOf<AppExitRequestSource?>(null)
+                }
+                val requestAppExit: (AppExitRequestSource) -> Unit = { source ->
+                    if (pendingAppExitSource == null) {
+                        pendingAppExitSource = source
+                        CaltopoClient.CTEvent(
+                            TAG,
+                            "QuitConfirmationRequested source=${source.logValue}",
+                            null,
+                        )
+                    }
+                }
+                val cancelAppExit = {
+                    val source = pendingAppExitSource
+                    pendingAppExitSource = null
+                    CaltopoClient.CTEvent(
+                        TAG,
+                        "QuitCancelled source=${source?.logValue ?: "unknown"}",
+                        null,
+                    )
+                }
+                val confirmAppExit = {
+                    val source = pendingAppExitSource
+                    pendingAppExitSource = null
+                    CaltopoClient.CTEvent(
+                        TAG,
+                        "QuitConfirmed source=${source?.logValue ?: "unknown"}",
+                        null,
+                    )
+                    CaltopoClient.QuitApplication()
+                }
                 if (!launchDisclaimerAccepted) {
                     LaunchDisclaimerScreen(
                         onAgree = ::acceptLaunchDisclaimer,
-                        onDisagree = ::declineLaunchDisclaimer,
+                        onDisagree = {
+                            requestAppExit(AppExitRequestSource.DISCLAIMER_DECLINED)
+                        },
                     )
+                    if (pendingAppExitSource != null) {
+                        ConfirmAppExitDialog(
+                            onCancel = cancelAppExit,
+                            onConfirm = confirmAppExit,
+                        )
+                    }
                     return@content
                 }
                 val localContext = LocalContext.current
                 val activeScreen by localViewModel
                     .activeScreen
                     .collectAsState()
+                BackHandler(enabled = pendingAppExitSource == null) {
+                    when (appBackAction(activeScreen)) {
+                        AppBackAction.REQUEST_EXIT_CONFIRMATION ->
+                            requestAppExit(AppExitRequestSource.SYSTEM_BACK)
+                        AppBackAction.RETURN_TO_MAIN -> localViewModel.showMain()
+                    }
+                }
                 var openDeveloperToolsWhenMainOpens by remember { mutableStateOf(false) }
                 val pendingDroneConfirmation by localViewModel
                     .pendingDroneConfirmation
@@ -1017,6 +1115,9 @@ class R2CActivity :
                             openDeveloperToolsOnStart = openDeveloperToolsWhenMainOpens,
                             onDeveloperToolsOpened = {
                                 openDeveloperToolsWhenMainOpens = false
+                            },
+                            onRequestExit = {
+                                requestAppExit(AppExitRequestSource.QUIT_MENU)
                             },
                         )
                     }
@@ -1209,7 +1310,9 @@ class R2CActivity :
                 if (bluetoothDisabled) {
                     BluetoothDisabledDialog(
                         onOpenBluetoothSettings = { openBluetoothSettings() },
-                        onQuit = { CaltopoClient.QuitApplication() },
+                        onQuit = {
+                            requestAppExit(AppExitRequestSource.BLUETOOTH_DISABLED)
+                        },
                     )
                 }
                 pendingTrackerReauthenticationUrl?.let {
@@ -1218,6 +1321,12 @@ class R2CActivity :
                         onContinueOffline = {
                             pendingTrackerReauthenticationUrl = null
                         },
+                    )
+                }
+                if (pendingAppExitSource != null) {
+                    ConfirmAppExitDialog(
+                        onCancel = cancelAppExit,
+                        onConfirm = confirmAppExit,
                     )
                 }
             }
@@ -1271,11 +1380,6 @@ class R2CActivity :
                 initialize()
             }
         }
-    }
-
-    private fun declineLaunchDisclaimer() {
-        CTDebug(TAG, "Launch disclaimer declined; exiting")
-        CaltopoClient.QuitApplication()
     }
 
     fun openUri(uriString : String?, mimeType: String? = null) {

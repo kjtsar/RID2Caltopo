@@ -9,6 +9,39 @@ import org.junit.Test
 
 class StreamPipInsetFrameTest {
     @Test
+    fun collapsedSplitDividerGetsFullEdgeRestoreTarget() {
+        assertEquals(192, splitDividerTouchHeightDp(0f))
+        assertEquals(96, splitDividerTouchHeightDp(0.5f))
+        assertEquals(192, splitDividerTouchHeightDp(1f))
+    }
+
+    @Test
+    fun bottomCollapsedDividerStaysAboveMandatoryHomeGesture() {
+        assertEquals(
+            860f,
+            portraitSplitDividerTouchOffsetPx(
+                fraction = 1f,
+                availablePx = 1000f,
+                dividerTouchSizePx = 96f,
+                mandatoryBottomGestureInsetPx = 32f,
+                bottomClearancePx = 12f,
+            ),
+            0f,
+        )
+        assertEquals(
+            452f,
+            portraitSplitDividerTouchOffsetPx(
+                fraction = 0.5f,
+                availablePx = 1000f,
+                dividerTouchSizePx = 96f,
+                mandatoryBottomGestureInsetPx = 32f,
+                bottomClearancePx = 12f,
+            ),
+            0f,
+        )
+    }
+
+    @Test
     fun splitDividerDrag_changesFractionUsingScreenPixels() {
         assertEquals(0.6f, adjustedSplitFraction(0.5f, 100f, 1000f), 0.0001f)
         assertEquals(0.4f, adjustedSplitFraction(0.5f, -100f, 1000f), 0.0001f)

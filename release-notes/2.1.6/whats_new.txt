@@ -3,6 +3,7 @@ Latest changes:
 
 Platform-specific changes:
 - Android now prevents temporary video-render sessions from replacing the continuous packet-probe telemetry used for operational map position.
+- Android now confirms every operator-requested app exit, treats Back as navigation inside Live View, and keeps collapsed split-view restore handles clear of system gestures on every edge.
 - Apple continues to use one reusable decoder and operational telemetry timeline for each publisher.
 
 Known platform differences:

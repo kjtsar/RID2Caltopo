@@ -307,8 +307,6 @@ object FfmpegBridge {
             djiAttitudeAnglesCsv = djiAttitudeAnglesCsv,
         )
 
-        StreamCameraTelemetryRegistry.update(designator, telemetry)
-
         val snapshot = synchronized(listenerLock) { probeListeners.toList() }
         snapshot.forEach { callback ->
             try {

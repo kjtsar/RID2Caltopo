@@ -40,7 +40,8 @@ public enum LiveStreamSelectionPolicy {
     }
 }
 
-/// Keeps the reusable primary decoder bound to the publisher that owns it.
+/// Keeps the reusable primary decoder, and therefore the stream's sole operational telemetry
+/// timeline, bound to the publisher that owns it.
 /// A terminal publisher removal must release that decoder before a different
 /// stream can inherit it, while a same-path republish can use normal recovery.
 public enum LiveStreamDecoderLifecyclePolicy {

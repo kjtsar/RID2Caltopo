@@ -298,6 +298,16 @@ class FfmpegProbeService(
             return@probeListener
         }
         if (eventType == "telemetry") {
+            val telemetryProbeSessionId = synchronized(stateLock) {
+                telemetryProbeSessions[designator]
+            }
+            if (OperationalTelemetryAuthorityPolicy.accepts(
+                    sessionId = sessionId,
+                    telemetryProbeSessionId = telemetryProbeSessionId,
+                )
+            ) {
+                StreamCameraTelemetryRegistry.update(designator, telemetry)
+            }
             mergeTelemetry(designator, telemetry)
         }
         when (eventType) {
@@ -2034,6 +2044,17 @@ class FfmpegProbeService(
         }
         FfmpegBridge.setLocalPlaybackPaused(sessionId, paused)
     }
+}
+
+/**
+ * Operational DJI telemetry has exactly one authority per live stream. The packet-only probe is
+ * continuous across Streams UI and render-surface changes, while render sessions can start,
+ * suspend, recover, and restart on their own source-timestamp timelines. Renderer telemetry may
+ * still feed presentation diagnostics, but it must not reset RID-validated map position state.
+ */
+internal object OperationalTelemetryAuthorityPolicy {
+    fun accepts(sessionId: Long, telemetryProbeSessionId: Long?): Boolean =
+        telemetryProbeSessionId != null && sessionId == telemetryProbeSessionId
 }
 
 internal fun PersonRelevanceMode.toFfmpegBridgeMode(): FfmpegBridge.PersonRelevanceMode =

@@ -1883,6 +1883,14 @@ private func proximityDrone(
     ))
 }
 
+@Test func samePublisherReusesItsSingleOperationalTelemetryDecoder() {
+    #expect(!LiveStreamDecoderLifecyclePolicy.shouldStartDecoder(
+        publisherPath: "/1sar7djmtrc4td",
+        decoderPath: "1sar7djmtrc4td",
+        decoderIsIdle: false
+    ))
+}
+
 @Test func operationalMapTileSourcesMatchAndroidContracts() throws {
     #expect(OperationalMapBaseLayer.openStreetMap.tileURL(zoom: 12, x: 657, y: 1582)?.absoluteString
         == "https://tile.openstreetmap.org/12/657/1582.png")

@@ -1,5 +1,6 @@
 Latest changes:
 - Paired DJI aircraft now remain continuously visible on the map through weak or interrupted Remote ID reception by using one authoritative video-telemetry timeline.
+- The startup acknowledgment now uses the same responsibility, developer hold-harmless, and California Civil Code section 1542 waiver language as the managed-access request.
 
 Platform-specific changes:
 - Android now prevents temporary video-render sessions from replacing the continuous packet-probe telemetry used for operational map position.

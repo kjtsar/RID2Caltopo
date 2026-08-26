@@ -5024,20 +5024,17 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
 }
 
 @Test func applicationLaunchDisclaimerUsesApprovedSafetyLanguage() {
-    #expect(
-        ApplicationLaunchDisclaimer.text ==
-            "RID2Caltopo is provided on a best-effort, \"as is,\" and \"as available\" basis, " +
-            "with no express or implied warranties or guarantees, including merchantability, " +
-            "fitness for a particular purpose, non-infringement, suitability, reliability, " +
-            "availability, accuracy, or completeness. Features and information may be unavailable, " +
-            "inaccurate, incomplete, or delayed. This app provides supplemental situational awareness " +
-            "only and must not be used as the sole source for navigation, flight safety, communications, " +
-            "or incident-command decisions. RID2Caltopo is an independent project and is not affiliated " +
-            "with or endorsed by CalTopo. It uses the CalTopo Teams API. The RID2Caltopo developer thanks " +
-            "the CalTopo team for its excellent product and support of the Teams API. By selecting I agree, " +
-            "I accept responsibility for safe use " +
-            "and for independently verifying safety-critical information."
-    )
+    var hash: UInt64 = 14_695_981_039_346_656_037
+    for byte in ApplicationLaunchDisclaimer.text.utf8 {
+        hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211
+    }
+
+    #expect(hash == 0xf4ee5506e5afb21a)
+    #expect(ApplicationLaunchDisclaimer.text.contains("accept full responsibility"))
+    #expect(ApplicationLaunchDisclaimer.text.contains("hold harmless Ken Taylor"))
+    #expect(ApplicationLaunchDisclaimer.text.contains("California Civil Code section 1542"))
+    #expect(ApplicationLaunchDisclaimer.text.contains("expressly waive all rights and benefits"))
+    #expect(ApplicationLaunchDisclaimer.text.contains("unknown or unsuspected"))
 }
 
 @Test func applicationIdleTimeoutUsesRemainingTimeSinceLatestRIDMessage() {

@@ -101,6 +101,11 @@ struct CaltopoSettingsView: View {
                     mode: .credential,
                     secure: true
                 )
+                AppleScannableTextField(
+                    title: "Connect Key",
+                    text: $settings.connectKey,
+                    mode: .credential
+                )
                 Text("Enter the CalTopo team ID, credential ID, and credential secret tuple. The secret is stored in Apple Keychain when the configuration is saved or the map browser is opened.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -449,6 +454,7 @@ private struct AppleMutualAidTupleSection: View {
     @State private var domainAndPort: String
     @State private var sourceLabel: String
     @State private var targetFolderHint: String
+    @State private var connectKey: String
     @State private var status = ""
 
     init(settings: AppleOrgConfigSettings) {
@@ -460,6 +466,7 @@ private struct AppleMutualAidTupleSection: View {
         _domainAndPort = State(initialValue: template?.domainAndPort ?? "caltopo.com")
         _sourceLabel = State(initialValue: template?.sourceLabel ?? settings.organizationName)
         _targetFolderHint = State(initialValue: template?.targetFolderHint ?? "MAI")
+        _connectKey = State(initialValue: template?.connectKey ?? "")
     }
 
     var body: some View {
@@ -483,6 +490,9 @@ private struct AppleMutualAidTupleSection: View {
             TextField("Domain and port", text: $domainAndPort)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+            TextField("Connect Key", text: $connectKey)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
             TextField("Source organization label", text: $sourceLabel)
             TextField("Target folder hint", text: $targetFolderHint)
             Button("Save Mutual Aid Account") {
@@ -497,14 +507,15 @@ private struct AppleMutualAidTupleSection: View {
                         sourceLabel: sourceLabel.trimmingCharacters(in: .whitespacesAndNewlines),
                         targetFolderHint: targetFolderHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             ? "MAI"
-                            : targetFolderHint.trimmingCharacters(in: .whitespacesAndNewlines)
+                            : targetFolderHint.trimmingCharacters(in: .whitespacesAndNewlines),
+                        connectKey: connectKey.trimmingCharacters(in: .whitespacesAndNewlines)
                     ))
                     status = "Mutual Aid account saved securely."
                 } catch {
                     status = "Unable to save Mutual Aid account: \(error.localizedDescription)"
                 }
             }
-            Text("These are the same six values accepted by ct_mutual_aid_credentials JSON. Credential values are stored in Apple Keychain.")
+            Text("These values are accepted by ct_mutual_aid_credentials JSON. The Mutual Aid account may use the same Connect Key when both CalTopo teams share that key. Credential values are stored in Apple Keychain.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             if !status.isEmpty {
@@ -553,6 +564,7 @@ private final class AppleDeveloperToolsManager: ObservableObject {
                 "credential_id": caltopo.credentialID,
                 "credential_secret": caltopo.credentialSecret,
                 "domain_and_port": caltopo.domainAndPort,
+                "connect_key": caltopo.connectKey,
                 "track_folder": organization.trackFolder,
                 "incident": organization.incident,
                 "op_period": organization.operationalPeriod,
@@ -585,6 +597,7 @@ private final class AppleDeveloperToolsManager: ObservableObject {
                     "credential_id": template.credentialID,
                     "credential_secret": template.credentialSecret,
                     "domain_and_port": template.domainAndPort,
+                    "connect_key": template.connectKey,
                     "source_label": template.sourceLabel,
                     "target_folder_hint": template.targetFolderHint,
                 ]

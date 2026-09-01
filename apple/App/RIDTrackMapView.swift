@@ -21,6 +21,41 @@ private struct ArtifactInspection: Identifiable {
     let description: String?
 }
 
+private struct ClueSelectionCandidates: Identifiable {
+    let id = UUID()
+    let clueIDs: [UUID]
+}
+
+private struct ClueSelectionDialogModifier: ViewModifier {
+    @Binding var selection: ClueSelectionCandidates?
+    let clues: [OperationalClueRecord]
+    let onSelect: (UUID) -> Void
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "Select Clue",
+            isPresented: Binding(
+                get: { selection != nil },
+                set: { if !$0 { selection = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let selection {
+                ForEach(selection.clueIDs, id: \.self) { clueID in
+                    if let clue = clues.first(where: { $0.id == clueID }) {
+                        Button(clue.title.isEmpty ? "Clue" : clue.title) {
+                            onSelect(clueID)
+                        }
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("More than one clue is at this map location.")
+        }
+    }
+}
+
 enum AppleOperationalStatusChipTone {
     case accent
     case danger
@@ -393,7 +428,7 @@ struct RIDTrackMapView: View {
 
     @StateObject private var artifacts = AppleMapArtifactModel()
     @StateObject private var pilotDisplay = ApplePilotDisplayStore()
-    @StateObject private var offlineMaps = AppleMapOfflineManager()
+    @ObservedObject private var offlineMaps = AppleMapOfflineManager.shared
     @StateObject private var viewportMemory = AppleMapViewportMemory()
     @AppStorage("map.baseLayer") private var storedBaseLayer = OperationalMapBaseLayer.openStreetMap.rawValue
     // Match Android's session-scoped StreamsLayoutMode: every app process starts
@@ -418,6 +453,7 @@ struct RIDTrackMapView: View {
     @State private var operatorAdjustedViewport = false
     @State private var pendingSnapshot: PendingClueSnapshot?
     @State private var selectedClueID: UUID?
+    @State private var clueSelectionCandidates: ClueSelectionCandidates?
     @State private var selectedArtifactInspection: ArtifactInspection?
     @State private var capturingSnapshot = false
     @State private var clueError: String?
@@ -558,6 +594,11 @@ struct RIDTrackMapView: View {
                 dismissButton: .default(Text("Close"))
             )
         }
+        .modifier(ClueSelectionDialogModifier(
+            selection: $clueSelectionCandidates,
+            clues: clueStore.records,
+            onSelect: { selectedClueID = $0 }
+        ))
         .sheet(isPresented: pairingSheetPresented) {
             if let pairingStreamID {
                 StreamAircraftPairingView(
@@ -722,6 +763,9 @@ struct RIDTrackMapView: View {
             artifacts.configure(configuration)
         }
         .onAppear {
+            if offlineMaps.isRunning {
+                showOfflinePreparation = true
+            }
             if ProcessInfo.processInfo.arguments.contains("--show-anomaly")
                 || ProcessInfo.processInfo.arguments.contains("--show-streams") {
                 layout = .video
@@ -1003,8 +1047,14 @@ struct RIDTrackMapView: View {
     }
 
     private func mapPane(inset: Bool) -> some View {
+        let localClueArtifactIDs = Set(clueStore.records.flatMap { clue in
+            [
+                clue.caltopoMarkerID,
+                clue.caltopoMediaID.uuidString,
+            ].compactMap { $0 }
+        })
         let renderedArtifacts = artifacts.visibleSnapshot.excludingRenderedPointIDs(
-            [peerCoordinator.localZoneID]
+            localClueArtifactIDs.union([peerCoordinator.localZoneID])
         )
         let cameraFovByAircraftID = self.cameraFovByAircraftID
         let activeSEITrackPointsByAircraftID = self.activeSEITrackPointsByAircraftID
@@ -1036,7 +1086,16 @@ struct RIDTrackMapView: View {
                 followFocusedDrone: followFocusedDrone,
                 artifactZoomRequest: artifacts.zoomRequest,
                 operatorAdjustedViewport: $operatorAdjustedViewport,
-                onSelectClue: { selectedClueID = $0 },
+                onSelectClue: { clueIDs in
+                    let available = clueIDs.filter { clueID in
+                        clueStore.records.contains { $0.id == clueID }
+                    }
+                    if available.count == 1 {
+                        selectedClueID = available[0]
+                    } else if !available.isEmpty {
+                        clueSelectionCandidates = ClueSelectionCandidates(clueIDs: available)
+                    }
+                },
                 onSelectArtifact: { title, description in
                     guard !inset else { return }
                     selectedArtifactInspection = ArtifactInspection(title: title, description: description)
@@ -1118,7 +1177,9 @@ struct RIDTrackMapView: View {
             Button("Predictive Head: \(orgSettings.predictiveHeadEnabled ? "On" : "Off")") {
                 orgSettings.setPredictiveHeadEnabled(!orgSettings.predictiveHeadEnabled)
             }
-            Button("Download Map…") { showOfflinePreparation = true }
+            Button(
+                offlineMaps.downloadMenuStatus.map { "Download Map: \($0)" } ?? "Download Map…"
+            ) { showOfflinePreparation = true }
             Button("Map Folders…") { showMapItems = true }
                 .disabled(artifacts.snapshot.folders.isEmpty)
             Button("Map Management…") { showMapManagement = true }
@@ -2802,7 +2863,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     let followFocusedDrone: Bool
     let artifactZoomRequest: ArtifactZoomRequest?
     @Binding var operatorAdjustedViewport: Bool
-    let onSelectClue: (UUID) -> Void
+    let onSelectClue: ([UUID]) -> Void
     let onSelectArtifact: (String, String?) -> Void
     let onSelectAircraft: (String) -> Void
     let onOperatorViewportGesture: () -> Void
@@ -2965,7 +3026,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
         private let pendingVisibleMapRect: MKMapRect?
         private var restoredViewportBounds = false
         private var regionChangeWasUserGesture = false
-        var onSelectClue: (UUID) -> Void
+        var onSelectClue: ([UUID]) -> Void
         var onSelectArtifact: (String, String?) -> Void
         var onSelectAircraft: (String) -> Void
         var onOperatorViewportGesture: () -> Void
@@ -2975,7 +3036,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             viewport: Binding<MKCoordinateRegion>,
             viewportMemory: AppleMapViewportMemory,
             operatorAdjustedViewport: Binding<Bool>,
-            onSelectClue: @escaping (UUID) -> Void,
+            onSelectClue: @escaping ([UUID]) -> Void,
             onSelectArtifact: @escaping (String, String?) -> Void,
             onSelectAircraft: @escaping (String) -> Void,
             onOperatorViewportGesture: @escaping () -> Void,
@@ -3855,7 +3916,28 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             if let clue = view.annotation as? ClueAnnotation {
-                onSelectClue(clue.clueID)
+                let tappedPoint = mapView.convert(clue.coordinate, toPointTo: mapView)
+                let candidates = mapView.annotations
+                    .compactMap { $0 as? ClueAnnotation }
+                    .compactMap { candidate -> (clue: ClueAnnotation, distance: CGFloat)? in
+                        let point = mapView.convert(candidate.coordinate, toPointTo: mapView)
+                        let distance = hypot(point.x - tappedPoint.x, point.y - tappedPoint.y)
+                        return distance <= 44 ? (candidate, distance) : nil
+                    }
+                    .sorted { lhs, rhs in
+                        if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
+                        return (lhs.clue.title ?? "").localizedCaseInsensitiveCompare(
+                            rhs.clue.title ?? ""
+                        ) == .orderedAscending
+                    }
+                    .map { $0.clue.clueID }
+                mapView.deselectAnnotation(clue, animated: false)
+                onSelectClue(candidates.isEmpty ? [clue.clueID] : candidates)
+                return
+            }
+            if let artifact = view.annotation as? ArtifactAnnotation {
+                guard !currentInset else { return }
+                onSelectArtifact(artifact.title ?? "Map item", artifact.subtitle ?? nil)
                 return
             }
             guard let aircraft = view.annotation as? AircraftAnnotation else { return }
@@ -4290,7 +4372,7 @@ private final class CachedMapTileOverlay: MKTileOverlay {
 
         let requestURL = url(forTilePath: sourcePath)
         var request = URLRequest(url: requestURL)
-        request.setValue("RID2Caltopo/Apple (contact: kjtsar@kjt.us)", forHTTPHeaderField: "User-Agent")
+        request.setValue("RID2Caltopo/Apple (contact: kjt@uas4sar.com)", forHTTPHeaderField: "User-Agent")
         URLSession.shared.dataTask(with: request) { data, response, error in
             guard let data, (response as? HTTPURLResponse)?.statusCode == 200,
                   AppleMapOfflineManager.dataIsUsableTile(data), !AppleBadTilePolicy.isBlocked(data)

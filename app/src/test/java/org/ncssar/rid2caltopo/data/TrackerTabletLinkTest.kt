@@ -46,11 +46,12 @@ class TrackerTabletLinkTest {
     @Test
     fun thumbnailUrl_matchesTrackerCapabilityContract() {
         assertEquals(
-            "https://r2c-tracker.com/r2c-thumbnail/Bz2DZg/00000000-0000-0000-0000-000000000001.jpg",
+            "https://r2c-tracker.com/r2c-thumbnail/Bz2DZg/00000000-0000-0000-0000-000000000001.jpg?timestamp=frame-42",
             TrackerTabletLink.thumbnailUrl(
                 "https://r2c-tracker.com/ncssar/",
                 "Kjt A5 Pro",
                 "00000000-0000-0000-0000-000000000001",
+                "frame-42",
             ),
         )
     }

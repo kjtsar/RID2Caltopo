@@ -1,11 +1,17 @@
 Latest changes:
-- Paired DJI aircraft now remain continuously visible on the map through weak or interrupted Remote ID reception by using one authoritative video-telemetry timeline.
+- Local clue reports and images now reopen reliably after restart, including files created with localized timestamps.
+- Tapping overlapping clues on Apple now presents a chooser; Android clue details include an obvious close button, and the video clue-capture button has a larger reliable touch target.
+- Log, GeoJSON, track, and clue-report filenames now use the same operator-local timestamp convention on Android and Apple while remaining readable by existing lookup and archive workflows.
+- Offline-map preparation now remains active across pane changes and exposes recoverable progress instead of appearing to disappear.
+- Paired DJI aircraft remain visible on the map and in CalTopo through weak or interrupted Remote ID reception by preferring fresh validated video telemetry and falling back to Remote ID.
+- Live Feed previews refresh while a matching CalTopo LiveTrack and stream are active, and remote viewing retries once if a connection starts without delivering video.
+- Video archive and playback handling now preserves frame-associated metadata and improves pacing and recovery for recorded and remote video.
+- CalTopo configuration now supports Connect Keys, more resilient position reporting, and retry when converting completed LiveTracks to archived flight paths.
 - The startup acknowledgment now uses the same responsibility, developer hold-harmless, and California Civil Code section 1542 waiver language as the managed-access request.
 
 Platform-specific changes:
-- Android now prevents temporary video-render sessions from replacing the continuous packet-probe telemetry used for operational map position.
-- Android now confirms every operator-requested app exit, treats Back as navigation inside Live View, and keeps collapsed split-view restore handles clear of system gestures on every edge.
-- Apple continues to use one reusable decoder and operational telemetry timeline for each publisher.
+- Android prevents temporary render sessions from replacing operational telemetry, improves remote-video frame pacing, and confirms operator-requested exits.
+- Apple keeps clue selection and details accessible when markers overlap and retains one reusable decoder and telemetry timeline per publisher.
 
 Known platform differences:
 - Apple uses iCloud Drive and Files for backup and transfer; Google Drive remains selectable through Files when installed.

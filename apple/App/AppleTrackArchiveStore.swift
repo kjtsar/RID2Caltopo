@@ -90,7 +90,9 @@ actor AppleTrackArchiveStore {
                 track: track,
                 title: metadata.mappedID.isEmpty ? track.aircraftID : metadata.mappedID,
                 clues: clues,
-                destination: destination.deletingPathExtension().appendingPathExtension("kmz")
+                destination: directory.appendingPathComponent(
+                    RidTrackGeoJSON.suggestedClueReportFilename(for: track)
+                )
             )
         }
         let result = await process(data: data, file: destination)

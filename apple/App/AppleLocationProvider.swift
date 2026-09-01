@@ -28,6 +28,7 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
     private var physicalLocation: CLLocation?
     private var physicalLocationIsProvisional = false
     private var started = false
+    private var incidentMapBackgroundMonitoringEnabled = false
 
     // A Wi-Fi-only iPad can temporarily have no live Core Location fix even
     // though Location Services remain authorized. Prefer the device's recent
@@ -56,7 +57,9 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
         manager.distanceFilter = 5
+        manager.activityType = .otherNavigation
         self.manager = manager
+        applyBackgroundMonitoringConfiguration(to: manager)
         return manager
     }
 
@@ -92,6 +95,25 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
         @unknown default:
             errorMessage = "Unknown location authorization state"
         }
+    }
+
+    /// A map connection is an operator-started location session. Keep that
+    /// session alive after display lock so relocation and inactivity policy do
+    /// not depend on a SwiftUI view remaining active.
+    func setIncidentMapBackgroundMonitoringEnabled(_ enabled: Bool) {
+        incidentMapBackgroundMonitoringEnabled = enabled
+        let manager = makeManager()
+        applyBackgroundMonitoringConfiguration(to: manager)
+        if enabled,
+           started,
+           (manager.authorizationStatus == .authorizedWhenInUse
+            || manager.authorizationStatus == .authorizedAlways) {
+            manager.startUpdatingLocation()
+        }
+        AppleLog.info(
+            "Location",
+            "Incident-map background monitoring \(enabled ? "enabled" : "disabled")"
+        )
     }
 
     func setLocationOverride(latitude: Double, longitude: Double) {
@@ -189,6 +211,12 @@ final class AppleLocationProvider: NSObject, ObservableObject, @preconcurrency C
             manager?.stopUpdatingLocation()
             errorMessage = "Unknown location authorization state"
         }
+    }
+
+    private func applyBackgroundMonitoringConfiguration(to manager: CLLocationManager) {
+        manager.allowsBackgroundLocationUpdates = incidentMapBackgroundMonitoringEnabled
+        manager.showsBackgroundLocationIndicator = incidentMapBackgroundMonitoringEnabled
+        manager.pausesLocationUpdatesAutomatically = !incidentMapBackgroundMonitoringEnabled
     }
 
     private func publishProvisionalLocationIfUsable(_ location: CLLocation?, source: String) {

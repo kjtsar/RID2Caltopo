@@ -57,4 +57,4 @@ of coordination data. Deleting the app removes its local app-install zone
 identifier.
 
 Questions about this policy or deletion of a diagnostic bundle can be sent to
-`kjtsar@kjt.us`.
+`kjt@uas4sar.com`.

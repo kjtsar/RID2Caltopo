@@ -1580,14 +1580,14 @@ fun MainScreen(
                         onClick = {
                             try {
                                 context.startActivity(
-                                    Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:kjtsar@kjt.us"))
+                                    Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:kjt@uas4sar.com"))
                                 )
                             } catch (_: ActivityNotFoundException) {
                                 CaltopoClient.ShowToast("No email app is available.")
                             }
                         }
                     ) {
-                        Text("kjtsar@kjt.us")
+                        Text("kjt@uas4sar.com")
                     }
                 }
             },

@@ -95,20 +95,23 @@ public enum TrackerTabletLink {
     public static func thumbnailURL(
         trackerURLPrefix: String,
         tabletName: String,
-        streamSessionID: String
+        streamSessionID: String,
+        thumbnailRevision: String
     ) -> URL? {
         let trimmedPrefix = trackerURLPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionID = streamSessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let revision = thumbnailRevision.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let organization = organizationDesignator(from: trimmedPrefix),
               !normalize(tabletName).isEmpty,
               !sessionID.isEmpty,
+              !revision.isEmpty,
               var components = URLComponents(string: trimmedPrefix),
               components.scheme != nil,
               components.host != nil
         else { return nil }
         let tabletCode = code(organization: organization, tabletName: tabletName)
         components.path = "/r2c-thumbnail/\(tabletCode)/\(sessionID).jpg"
-        components.query = nil
+        components.queryItems = [URLQueryItem(name: "timestamp", value: revision)]
         components.fragment = nil
         return components.url
     }

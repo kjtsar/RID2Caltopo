@@ -35,7 +35,9 @@ actor AppleDiagnosticLogStore {
         let day = Self.dayName(for: Date())
         let directory = root.appendingPathComponent(day, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let destination = directory.appendingPathComponent("Log_\(Self.fileTimestamp()).txt")
+        let destination = directory.appendingPathComponent(
+            "Log_\(OperationalDiagnosticLogFormat.filenameTimestamp(Date())).txt"
+        )
         FileManager.default.createFile(atPath: destination.path, contents: nil)
         let handle = try FileHandle(forWritingTo: destination)
         self.rootURL = root
@@ -155,14 +157,6 @@ actor AppleDiagnosticLogStore {
         formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
-    }
-
-    private static func fileTimestamp() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "ddMMMyyyy-HHmmss"
-        return formatter.string(from: Date())
     }
 
 }

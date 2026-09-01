@@ -10,6 +10,11 @@ import java.io.File
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
+import java.time.DateTimeException
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
 import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog
@@ -17,6 +22,7 @@ import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog
 object MediaMTXRecordingSync {
     private const val TAG = "MediaMTXRecordingSync"
     private const val DEFAULT_SAMPLE_BUFFER_SIZE = 1024 * 1024
+    private const val NORMALIZED_VIDEO_FPS = 30
 
     @JvmStatic
     fun getRecordingStagingDir(context: Context): File =
@@ -78,11 +84,13 @@ object MediaMTXRecordingSync {
         try {
             remuxMp4Sequence(fragments, mergedFile)
             if (todaysTrackDir != null) {
+                val targetDir = ensureTargetDir(todaysTrackDir, streamPath)
+                val preferredName = archiveRecordingFileName(streamPath, fragments.first())
                 copyFileInto(
                     resolver = context.contentResolver,
                     sourceFile = mergedFile,
-                    targetDir = ensureTargetDir(todaysTrackDir, streamPath),
-                    targetName = archiveRecordingFileName(streamPath, fragments.first()),
+                    targetDir = targetDir,
+                    targetName = availableTargetName(targetDir, preferredName),
                 )
             } else {
                 CaltopoClient.CTWarn(
@@ -119,19 +127,27 @@ object MediaMTXRecordingSync {
         val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         val muxerTrackMap = LinkedHashMap<Int, Int>()
         firstLayout.trackIndices.forEach { trackIndex ->
-            muxerTrackMap[trackIndex] = muxer.addTrack(firstLayout.formats.getValue(trackIndex))
+            val format = firstLayout.formats.getValue(trackIndex)
+            if (format.getString(MediaFormat.KEY_MIME) == MediaFormat.MIMETYPE_VIDEO_AVC) {
+                format.setInteger(MediaFormat.KEY_FRAME_RATE, NORMALIZED_VIDEO_FPS)
+            }
+            muxerTrackMap[trackIndex] = muxer.addTrack(format)
         }
         muxer.start()
 
         try {
-            val buffer = ByteBuffer.allocateDirect(maxSampleBufferSize(inputFiles, firstLayout.trackIndices))
+            val maximumSampleSize = maxSampleBufferSize(inputFiles, firstLayout.trackIndices)
+            val readBuffer = ByteBuffer.allocateDirect(maximumSampleSize)
+            val writeBuffer = ByteBuffer.allocateDirect(maximumSampleSize * 2)
             var nextSegmentOffsetUs = 0L
             inputFiles.forEach { inputFile ->
                 nextSegmentOffsetUs = appendMp4IntoMuxer(
                     inputFile = inputFile,
                     muxer = muxer,
                     muxerTrackMap = muxerTrackMap,
-                    buffer = buffer,
+                    trackFormats = firstLayout.formats,
+                    readBuffer = readBuffer,
+                    writeBuffer = writeBuffer,
                     segmentOffsetUs = nextSegmentOffsetUs,
                 )
             }
@@ -145,7 +161,9 @@ object MediaMTXRecordingSync {
         inputFile: File,
         muxer: MediaMuxer,
         muxerTrackMap: Map<Int, Int>,
-        buffer: ByteBuffer,
+        trackFormats: Map<Int, MediaFormat>,
+        readBuffer: ByteBuffer,
+        writeBuffer: ByteBuffer,
         segmentOffsetUs: Long,
     ): Long {
         val extractor = MediaExtractor()
@@ -154,8 +172,49 @@ object MediaMTXRecordingSync {
 
         return try {
             var segmentFirstPtsUs = Long.MIN_VALUE
-            var lastWrittenPtsUs = segmentOffsetUs
+            var segmentLastWrittenPtsUs = segmentOffsetUs
+            val lastWrittenPtsUsByTrack = mutableMapOf<Int, Long>()
+            val h264Assemblers = trackFormats.mapNotNull { (trackIndex, format) ->
+                if (format.getString(MediaFormat.KEY_MIME) == MediaFormat.MIMETYPE_VIDEO_AVC) {
+                    trackIndex to H264ArchiveAccessUnitAssembler()
+                } else {
+                    null
+                }
+            }.toMap()
+            val h264Cadences = h264Assemblers.keys.associateWith {
+                H264ArchiveCadence(NORMALIZED_VIDEO_FPS)
+            }
             val bufferInfo = android.media.MediaCodec.BufferInfo()
+
+            fun writeSample(trackIndex: Int, sample: H264ArchiveAccessUnitAssembler.Sample) {
+                val muxerTrackIndex = muxerTrackMap.getValue(trackIndex)
+                val cadence = h264Cadences[trackIndex]
+                val requestedPresentationTimeUs = if (
+                    cadence != null && sample.data.hasVclAvccNalUnit()
+                ) {
+                    cadence.nextPresentationTimeUs(segmentOffsetUs)
+                } else {
+                    sample.presentationTimeUs
+                }
+                val lastTrackPtsUs = lastWrittenPtsUsByTrack[trackIndex]
+                val presentationTimeUs = if (
+                    lastTrackPtsUs != null && requestedPresentationTimeUs <= lastTrackPtsUs
+                ) {
+                    lastTrackPtsUs + 1L
+                } else {
+                    requestedPresentationTimeUs
+                }
+                require(sample.data.size <= writeBuffer.capacity()) {
+                    "Combined media sample exceeds archive buffer capacity"
+                }
+                writeBuffer.clear()
+                writeBuffer.put(sample.data)
+                writeBuffer.flip()
+                bufferInfo.set(0, sample.data.size, presentationTimeUs, sample.flags)
+                muxer.writeSampleData(muxerTrackIndex, writeBuffer, bufferInfo)
+                lastWrittenPtsUsByTrack[trackIndex] = presentationTimeUs
+                segmentLastWrittenPtsUs = maxOf(segmentLastWrittenPtsUs, presentationTimeUs)
+            }
 
             while (true) {
                 val trackIndex = extractor.sampleTrackIndex
@@ -166,29 +225,46 @@ object MediaMTXRecordingSync {
                     continue
                 }
 
-                val sampleSize = extractor.readSampleData(buffer, 0)
+                readBuffer.clear()
+                val sampleSize = extractor.readSampleData(readBuffer, 0)
                 if (sampleSize < 0) break
 
                 val sampleTimeUs = extractor.sampleTime
                 if (segmentFirstPtsUs == Long.MIN_VALUE) {
                     segmentFirstPtsUs = if (sampleTimeUs >= 0L) sampleTimeUs else 0L
                 }
-                var presentationTimeUs = segmentOffsetUs + maxOf(0L, sampleTimeUs - segmentFirstPtsUs)
-                if (presentationTimeUs <= lastWrittenPtsUs) {
-                    presentationTimeUs = lastWrittenPtsUs + 1L
-                }
-                bufferInfo.set(
-                    0,
-                    sampleSize,
-                    presentationTimeUs,
-                    extractor.sampleFlags,
+                val presentationTimeUs = segmentOffsetUs + maxOf(0L, sampleTimeUs - segmentFirstPtsUs)
+                val sampleData = ByteArray(sampleSize)
+                readBuffer.position(0)
+                readBuffer.get(sampleData)
+                val sample = H264ArchiveAccessUnitAssembler.Sample(
+                    data = sampleData,
+                    presentationTimeUs = presentationTimeUs,
+                    flags = extractor.sampleFlags,
                 )
-                muxer.writeSampleData(muxerTrackIndex, buffer, bufferInfo)
-                lastWrittenPtsUs = presentationTimeUs
+                val readySamples = h264Assemblers[trackIndex]?.offer(sample) ?: listOf(sample)
+                readySamples.forEach { ready -> writeSample(trackIndex, ready) }
                 extractor.advance()
             }
 
-            lastWrittenPtsUs + 1L
+            h264Assemblers.forEach { (trackIndex, assembler) ->
+                assembler.discardTrailingSei()
+                CaltopoClient.CTDebug(
+                    TAG,
+                    "Normalized recording segment file=${inputFile.name}" +
+                        " track=$trackIndex frames=${h264Cadences.getValue(trackIndex).pictureCount}" +
+                        " mergedSei=${assembler.mergedSeiCount}" +
+                        " discardedSei=${assembler.discardedSeiCount}" +
+                        " fps=$NORMALIZED_VIDEO_FPS",
+                )
+            }
+
+            maxOf(
+                segmentLastWrittenPtsUs + 1L,
+                h264Cadences.values.maxOfOrNull { cadence ->
+                    cadence.endOffsetUs(segmentOffsetUs)
+                } ?: segmentOffsetUs,
+            )
         } finally {
             extractor.release()
         }
@@ -260,25 +336,52 @@ object MediaMTXRecordingSync {
     }
 
     private fun fallbackTimestamp(): String =
-        SimpleDateFormat("ddMMMyyyy_HHmmss", Locale.US).format(Date())
+        SimpleDateFormat("ddMMMyyyy_HHmmss_z", Locale.US).format(Date())
 
-    internal fun archiveTimestampFromFragmentName(name: String): String? {
-        Regex("""(?:^|_)(\d{2}[A-Z][a-z]{2}\d{4})_(\d{6})(?:-|\.)""")
+    internal fun archiveTimestampFromFragmentName(
+        name: String,
+        localZone: ZoneId = ZoneId.systemDefault(),
+    ): String? {
+        Regex("""(?:^|_)(\d{2}[A-Z][a-z]{2}\d{4}_\d{6}_[A-Za-z]{1,8}[+-]\d{4})(?:-|\.)""")
             .find(name)
-            ?.let { return "${it.groupValues[1]}_${it.groupValues[2]}" }
+            ?.let { return it.groupValues[1] }
+        Regex("""(?:^|_)(\d{2}[A-Z][a-z]{2}\d{4}_\d{6}_[A-Za-z]{1,8})(?:-|\.)""")
+            .find(name)
+            ?.let { return it.groupValues[1] }
+        Regex("""(?:^|_)(\d{2}[A-Z][a-z]{2}\d{4}_\d{6})(?:-|\.)""")
+            .find(name)
+            ?.let { match ->
+                return try {
+                    LocalDateTime.parse(
+                        match.groupValues[1],
+                        DateTimeFormatter.ofPattern("ddMMMyyyy_HHmmss", Locale.US),
+                    ).atZone(localZone).format(
+                        DateTimeFormatter.ofPattern("ddMMMyyyy_HHmmss_z", Locale.US)
+                    )
+                } catch (_: DateTimeException) {
+                    null
+                }
+            }
         val match = Regex(
             """(?:^|_)(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})"""
         ).find(name) ?: return null
-        val month = listOf(
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ).getOrNull(match.groupValues[2].toIntOrNull()?.minus(1) ?: -1) ?: return null
-        return buildString {
-            append(match.groupValues[3])
-            append(month)
-            append(match.groupValues[1])
-            append('_')
-            append(match.groupValues.drop(4).joinToString(separator = ""))
+        return try {
+            val utcTimestamp = LocalDateTime.of(
+                match.groupValues[1].toInt(),
+                match.groupValues[2].toInt(),
+                match.groupValues[3].toInt(),
+                match.groupValues[4].toInt(),
+                match.groupValues[5].toInt(),
+                match.groupValues[6].toInt(),
+            )
+            utcTimestamp
+                .atZone(ZoneOffset.UTC)
+                .withZoneSameInstant(localZone)
+                .format(DateTimeFormatter.ofPattern("ddMMMyyyy_HHmmss_z", Locale.US))
+        } catch (_: DateTimeException) {
+            null
+        } catch (_: NumberFormatException) {
+            null
         }
     }
 
@@ -294,6 +397,17 @@ object MediaMTXRecordingSync {
                     ?: throw IllegalStateException("Unable to create recording directory '$segment'")
             }
         return current
+    }
+
+    private fun availableTargetName(targetDir: DocumentFile, preferredName: String): String {
+        if (targetDir.findFile(preferredName) == null) return preferredName
+        val extension = preferredName.substringAfterLast('.', missingDelimiterValue = "")
+        val stem = if (extension.isEmpty()) preferredName else preferredName.removeSuffix(".$extension")
+        for (sequence in 2..999) {
+            val candidate = if (extension.isEmpty()) "$stem-$sequence" else "$stem-$sequence.$extension"
+            if (targetDir.findFile(candidate) == null) return candidate
+        }
+        throw IllegalStateException("Unable to allocate recording filename for '$preferredName'")
     }
 
     private fun copyFileInto(

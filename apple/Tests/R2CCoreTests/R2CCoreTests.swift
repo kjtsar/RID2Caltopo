@@ -915,6 +915,156 @@ func caltopoLocalDevicePointCanBeSuppressedWithoutRemovingItsFolderItem() {
 }
 
 @Test
+func staleR2CDeviceMarkersRequireExplicitOwnershipAndExpiredHeartbeat() throws {
+    let nowMilliseconds: Int64 = 1_700_000_500_000
+    let data = Data(#"""
+    {"state":{"features":[
+      {"id":"stale","geometry":{"type":"Point","coordinates":[-105,39]},"properties":{"class":"Marker","title":"R2C: Old tablet","folderId":"tracks","r2c-guid":"old-guid","r2c-last-seen-epoch-ms":1700000000000}},
+      {"id":"fresh","geometry":{"type":"Point","coordinates":[-105,39]},"properties":{"class":"Marker","title":"R2C: Current tablet","folderId":"tracks","r2c-guid":"new-guid","r2c-last-seen-epoch-ms":1700000400000}},
+      {"id":"manual","geometry":{"type":"Point","coordinates":[-105,39]},"properties":{"class":"Marker","title":"R2C: Manually named","folderId":"tracks","updated":1600000000000}}
+    ]}}
+    """#.utf8)
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+
+    #expect(snapshot.staleR2CDeviceMarkerIDs(
+        now: Date(timeIntervalSince1970: Double(nowMilliseconds) / 1_000),
+        staleAfter: 180
+    ) == ["stale"])
+}
+
+@Test
+func incidentMapAutoDisconnectRequiresFiveQuietMinutesAndNoOperationalWork() {
+    let connectedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let idle = IncidentMapOperationalState(
+        connectedToIncidentMap: true,
+        activeFlightCount: 0,
+        lastRIDMessageAt: nil,
+        mapConnectedAt: connectedAt,
+        hasManagedVideoOrTransfer: false,
+        offlineMapPreparationActive: false
+    )
+    #expect(!IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
+        idle,
+        now: connectedAt.addingTimeInterval(299)
+    ))
+    #expect(IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
+        idle,
+        now: connectedAt.addingTimeInterval(300)
+    ))
+
+    let activeFlight = IncidentMapOperationalState(
+        connectedToIncidentMap: true,
+        activeFlightCount: 1,
+        lastRIDMessageAt: connectedAt,
+        mapConnectedAt: connectedAt,
+        hasManagedVideoOrTransfer: false,
+        offlineMapPreparationActive: false
+    )
+    #expect(!IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
+        activeFlight,
+        now: connectedAt.addingTimeInterval(3_600)
+    ))
+}
+
+@Test
+func incidentMapRelocationRequiresAccurateFiftyFootMovementAfterQuietPeriod() {
+    let connectedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let now = connectedAt.addingTimeInterval(301)
+    let state = IncidentMapOperationalState(
+        connectedToIncidentMap: true,
+        activeFlightCount: 0,
+        lastRIDMessageAt: nil,
+        mapConnectedAt: connectedAt,
+        hasManagedVideoOrTransfer: false,
+        offlineMapPreparationActive: false
+    )
+    var guardState = IncidentMapRelocationGuard()
+
+    let firstEvaluation = guardState.evaluate(
+        latitude: 39.153,
+        longitude: -121.132,
+        horizontalAccuracyMeters: 5,
+        operationalState: state,
+        now: now
+    )
+    let secondEvaluation = guardState.evaluate(
+        latitude: 39.1532,
+        longitude: -121.132,
+        horizontalAccuracyMeters: 5,
+        operationalState: state,
+        now: now
+    )
+    #expect(!firstEvaluation)
+    #expect(secondEvaluation)
+}
+
+@Test
+func incidentMapBackgroundFlightProtectionSurvivesScreenOffBluetoothThrottling() {
+    let connectedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let protectedUntil = connectedAt.addingTimeInterval(120 * 60)
+    let protected = IncidentMapOperationalState(
+        connectedToIncidentMap: true,
+        activeFlightCount: 0,
+        lastRIDMessageAt: connectedAt,
+        mapConnectedAt: connectedAt.addingTimeInterval(-600),
+        hasManagedVideoOrTransfer: false,
+        offlineMapPreparationActive: false,
+        backgroundFlightProtectedUntil: protectedUntil
+    )
+    #expect(!IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
+        protected,
+        now: protectedUntil.addingTimeInterval(-1)
+    ))
+    #expect(IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
+        protected,
+        now: protectedUntil
+    ))
+}
+
+@Test
+func incidentMapScreenOffAnchorSurvivesActiveFlightUntilPolicyBecomesIdle() {
+    let connectedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    var guardState = IncidentMapRelocationGuard()
+    guardState.arm(
+        latitude: 39.153,
+        longitude: -121.132,
+        horizontalAccuracyMeters: 5
+    )
+    let active = IncidentMapOperationalState(
+        connectedToIncidentMap: true,
+        activeFlightCount: 1,
+        lastRIDMessageAt: connectedAt,
+        mapConnectedAt: connectedAt,
+        hasManagedVideoOrTransfer: false,
+        offlineMapPreparationActive: false
+    )
+    let disconnectedWhileActive = guardState.evaluate(
+        latitude: 39.1532,
+        longitude: -121.132,
+        horizontalAccuracyMeters: 5,
+        operationalState: active,
+        now: connectedAt.addingTimeInterval(600)
+    )
+    #expect(!disconnectedWhileActive)
+    let idle = IncidentMapOperationalState(
+        connectedToIncidentMap: true,
+        activeFlightCount: 0,
+        lastRIDMessageAt: connectedAt,
+        mapConnectedAt: connectedAt,
+        hasManagedVideoOrTransfer: false,
+        offlineMapPreparationActive: false
+    )
+    let disconnectedWhenIdle = guardState.evaluate(
+        latitude: 39.1532,
+        longitude: -121.132,
+        horizontalAccuracyMeters: 5,
+        operationalState: idle,
+        now: connectedAt.addingTimeInterval(600)
+    )
+    #expect(disconnectedWhenIdle)
+}
+
+@Test
 func operationalDeviceNameUpgradesGenericAppleFallback() {
     #expect(OperationalDeviceName.preferredDisplayName(
         stored: "iPad",
@@ -2741,6 +2891,23 @@ private func proximityDrone(
     #expect(snapshot.occurrenceCount(ofItemID: "") == 0)
 }
 
+@Test func localClueArtifactSuppressionRemovesMarkerAndAttachedMedia() throws {
+    let data = Data(#"""
+    {"state":{"features":[
+      {"id":"clues","properties":{"class":"Folder","title":"Clues"}},
+      {"id":"local-marker","geometry":{"type":"Point","coordinates":[-121.13,39.15]},"properties":{"class":"Marker","title":"Cows","description":"Full clue details","folderId":"clues"}},
+      {"id":"local-media","geometry":{"type":"Point","coordinates":[-121.13,39.15]},"properties":{"class":"MapMediaObject","title":"Cows","parentId":"Marker:local-marker","backendMediaId":"photo-id"}},
+      {"id":"other-marker","geometry":{"type":"Point","coordinates":[-121.14,39.16]},"properties":{"class":"Marker","title":"Other","folderId":"clues"}}
+    ]}}
+    """#.utf8)
+
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+    let rendered = snapshot.excludingRenderedPointIDs(["LOCAL-MARKER", "LOCAL-MEDIA"])
+
+    #expect(rendered.points.map(\.id) == ["other-marker"])
+    #expect(rendered.items.count == snapshot.items.count)
+}
+
 @Test func caltopoArtifactVisibilitySuppressesOnlyGeometrylessReplacementAssignments() throws {
     let data = Data(#"""
     {"state":{"features":[
@@ -2803,7 +2970,8 @@ private func proximityDrone(
         domainAndPort: "caltopo.com",
         mapID: "map123",
         credentialID: "credential",
-        credentialSecretBase64: "c2VjcmV0"
+        credentialSecretBase64: "c2VjcmV0",
+        connectKey: "NCSSAR-UAS"
     ))
     let request = try await client.makeMapSnapshotRequest(now: Date(timeIntervalSince1970: 1_700_000_000))
     #expect(request.httpMethod == "GET")
@@ -3644,6 +3812,33 @@ private func proximityDrone(
     #expect(r2c["BUILD_TIME"] as? String == "02Aug2026:092559")
 }
 
+@Test func operatorArchiveFilenamesUseOneLocalizedTimestampContract() async throws {
+    let pacific = try #require(TimeZone(identifier: "America/Los_Angeles"))
+    let start = try #require(ISO8601DateFormatter().date(from: "2026-08-31T17:54:45Z"))
+    let store = RidTrackStore()
+    _ = await store.ingest(trackObservation(
+        id: "ARCHIVE01",
+        at: start,
+        latitude: 39.7392,
+        longitude: -104.9903
+    ))
+    let track = try #require(await store.snapshot().first)
+
+    let timestamp = OperationalDiagnosticLogFormat.filenameTimestamp(
+        start,
+        timeZone: pacific
+    )
+    #expect(timestamp == "31Aug2026-105445-PDT-0700")
+    #expect(
+        RidTrackGeoJSON.suggestedFilename(for: track, timeZone: pacific)
+            == "ARCHIVE01-31Aug2026-105445-PDT-0700.json"
+    )
+    #expect(
+        RidTrackGeoJSON.suggestedClueReportFilename(for: track, timeZone: pacific)
+            == "ARCHIVE01-31Aug2026-105445-PDT-0700.kmz"
+    )
+}
+
 @Test func buildTimeMatchesAndroidArchiveFormat() throws {
     let date = try #require(ISO8601DateFormatter().date(from: "2026-08-02T16:25:59Z"))
     let timeZone = try #require(TimeZone(secondsFromGMT: -7 * 60 * 60))
@@ -3735,7 +3930,8 @@ private func proximityDrone(
         domainAndPort: "caltopo.com",
         mapID: "map123",
         credentialID: "credential",
-        credentialSecretBase64: "c2VjcmV0"
+        credentialSecretBase64: "c2VjcmV0",
+        connectKey: "NCSSAR-UAS"
     ))
     let observation = RidObservation(
         source: .bluetoothLegacy,
@@ -3764,12 +3960,13 @@ private func proximityDrone(
     let url = try #require(request.url)
     #expect(request.httpMethod == "GET")
     let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
-    #expect(components.path == "/api/v1/position/report/DRONE")
+    #expect(components.path == "/api/v1/position/report/NCSSAR-UAS")
     let values = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
     #expect(values["id"] == "RID01")
     #expect(values["lat"] == "39.7392000")
     #expect(values["lng"] == "-104.9903000")
     #expect(values["elevation"] == "1600")
+    #expect(values["aircraft:altitude"] == "5252")
     #expect(request.httpBody == nil)
     #expect(abs((Double(values["aircraft:gs"] ?? "") ?? 0) - 19.4384449) < 0.000001)
     #expect(values["aircraft:track"] == "92.0")
@@ -3781,6 +3978,30 @@ private func proximityDrone(
     #expect(values["camera:fov_height"] == "21.207031")
     #expect(values["aircraft"] == nil)
     #expect(values["camera"] == nil)
+}
+
+@Test func caltopoPointRequestOmitsAircraftAltitudeWhenUnavailable() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let observation = RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "RID01",
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        latitude: 39.7392,
+        longitude: -104.9903,
+        altitudeMeters: nil
+    )
+
+    let request = try await client.makePointRequest(remoteID: "RID01", observation: observation)
+    let url = try #require(request.url)
+    let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    let values = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+
+    #expect(values["elevation"] == "-1000")
+    #expect(values["aircraft:altitude"] == nil)
 }
 
 @Test func djiCameraOrientationMatchesControllerHeadingAndUsesTiltCalibration() {
@@ -3967,7 +4188,8 @@ private func proximityDrone(
     let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
         mapID: "map123",
         credentialID: "credential",
-        credentialSecretBase64: "c2VjcmV0"
+        credentialSecretBase64: "c2VjcmV0",
+        connectKey: "NCSSAR-UAS"
     ))
     let request = try await client.makeStartLiveTrackRequest(
         remoteID: "RID01",
@@ -3981,6 +4203,26 @@ private func proximityDrone(
     let properties = try #require(root["properties"] as? [String: Any])
     #expect(properties["folderId"] as? String == "drone-folder")
     #expect(properties["stroke"] as? String == "#0000ff")
+    #expect(properties["deviceId"] as? String == "FLEET:NCSSAR-UAS-RID01")
+}
+
+@Test func caltopoLiveTrackUsesDroneWhenConnectKeyIsEmpty() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let request = try await client.makeStartLiveTrackRequest(
+        remoteID: "RID01",
+        label: "ALPHA1",
+        folderID: nil,
+        now: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    let fields = decodeFormBody(try #require(request.httpBody))
+    let payload = try #require(fields["json"]?.data(using: .utf8))
+    let root = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+    let properties = try #require(root["properties"] as? [String: Any])
+    #expect(properties["deviceId"] as? String == "FLEET:DRONE-RID01")
 }
 
 @Test func caltopoArchiveFolderIsCreatedHiddenLikeAndroid() async throws {
@@ -4101,8 +4343,9 @@ private func proximityDrone(
     #expect(TrackerTabletLink.thumbnailURL(
         trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
         tabletName: "Kjt A5 Pro",
-        streamSessionID: "00000000-0000-0000-0000-000000000001"
-    )?.absoluteString == "https://r2c-tracker.com/r2c-thumbnail/Bz2DZg/00000000-0000-0000-0000-000000000001.jpg")
+        streamSessionID: "00000000-0000-0000-0000-000000000001",
+        thumbnailRevision: "frame-42"
+    )?.absoluteString == "https://r2c-tracker.com/r2c-thumbnail/Bz2DZg/00000000-0000-0000-0000-000000000001.jpg?timestamp=frame-42")
     #expect(TrackerTabletLink.streamShortURL(
         trackerURLPrefix: "https://r2c-tracker.com/ncssar/",
         tabletName: "Kjt A5 Pro",
@@ -4172,13 +4415,73 @@ private func proximityDrone(
     let date = try #require(ManagedVideoRecordingIdentity.recordingStartedAt(
         forPath: "/CapturedStreams/1SAR7/1SAR7_2026-08-14_17-32-47-123456.mp4"
     ))
-    let calendar = Calendar.current
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(secondsFromGMT: 0))
     #expect(calendar.component(.year, from: date) == 2026)
     #expect(calendar.component(.month, from: date) == 8)
     #expect(calendar.component(.day, from: date) == 14)
     #expect(calendar.component(.hour, from: date) == 17)
     #expect(calendar.component(.minute, from: date) == 32)
     #expect(calendar.component(.second, from: date) == 47)
+}
+
+@Test func managedVideoRecordingIdentityTreatsMediaMTXTimestampAsUTC() throws {
+    let date = try #require(ManagedVideoRecordingIdentity.recordingStartedAt(
+        forPath: "/CapturedStreams/1SAR7/1SAR7_2026-08-31_16-16-55-835879.mp4"
+    ))
+    let expected = try #require(ISO8601DateFormatter().date(from: "2026-08-31T16:16:55Z"))
+    // DateFormatter may retain only millisecond precision for the six-digit
+    // MediaMTX suffix. This assertion is about the UTC wall-clock convention.
+    #expect(abs(date.timeIntervalSince(expected)) < 1)
+}
+
+@Test func managedVideoRecordingIdentityLocalizesMediaMTXUTCFileName() throws {
+    let pacific = try #require(TimeZone(identifier: "America/Los_Angeles"))
+    let source = URL(fileURLWithPath:
+        "/CapturedStreams/1SAR7/1SAR7_2026-08-27_04-41-11-123456.mp4"
+    )
+    let localized = try #require(ManagedVideoRecordingIdentity.localizedMediaMTXRecordingURL(
+        for: source,
+        timeZone: pacific
+    ))
+    #expect(localized.lastPathComponent == "1SAR7_26Aug2026_214111_PDT.mp4")
+}
+
+@Test func managedVideoRecordingIdentityParsesExplicitLocalZone() throws {
+    let date = try #require(ManagedVideoRecordingIdentity.recordingStartedAt(
+        forPath: "/CapturedStreams/1SAR7/1SAR7_26Aug2026_214111_PDT-0700-123456.mp4"
+    ))
+    let expected = try #require(ISO8601DateFormatter().date(from: "2026-08-27T04:41:11Z"))
+    #expect(abs(date.timeIntervalSince(expected)) < 1)
+}
+
+@Test func managedVideoRecordingIdentityParsesConciseLocalZone() throws {
+    let date = try #require(ManagedVideoRecordingIdentity.recordingStartedAt(
+        forPath: "/CapturedStreams/1SAR7/1SAR7_26Aug2026_214111_PDT.mp4"
+    ))
+    let expected = try #require(ISO8601DateFormatter().date(from: "2026-08-27T04:41:11Z"))
+    #expect(abs(date.timeIntervalSince(expected)) < 1)
+}
+
+@Test func managedVideoRecordingIdentityAvoidsConciseNameCollision() {
+    let preferred = URL(fileURLWithPath: "/CapturedStreams/1SAR7_31Aug2026_105601_PDT.mp4")
+    let existing = Set([preferred.path, "/CapturedStreams/1SAR7_31Aug2026_105601_PDT-2.mp4"])
+    let available = ManagedVideoRecordingIdentity.availableRecordingURL(
+        preferred: preferred,
+        fileExists: { existing.contains($0) }
+    )
+    #expect(available.lastPathComponent == "1SAR7_31Aug2026_105601_PDT-3.mp4")
+}
+
+@Test func managedVideoRecordingIdentityDoesNotRelocalizeArchiveFileName() throws {
+    let pacific = try #require(TimeZone(identifier: "America/Los_Angeles"))
+    let source = URL(fileURLWithPath:
+        "/CapturedStreams/1SAR7/1SAR7_26Aug2026_214111-123456.mp4"
+    )
+    #expect(ManagedVideoRecordingIdentity.localizedMediaMTXRecordingURL(
+        for: source,
+        timeZone: pacific
+    ) == nil)
 }
 
 @Test func caltopoArchiveDescriptionIncludesOnlyCapturedVideo() throws {
@@ -4473,6 +4776,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
         "credential_id": "credential-1",
         "credential_secret": "c2VjcmV0",
         "domain_and_port": "caltopo.example",
+        "connect_key": "NCSSAR-UAS",
         "incident": "Search 42",
         "op_period": "2",
         "tracker_enrollment_url": "https://r2c-tracker.com/ncssar/enroll?token=campaign-token",
@@ -4490,6 +4794,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
         "credential_secret": "ma-secret",
         "source_label": "Mutual Org",
         "target_folder_hint": "MAI",
+        "connect_key": "SHARED-UAS",
     ]
     let mutualAidJSON = String(decoding: try JSONSerialization.data(withJSONObject: mutualAidPlaintext), as: UTF8.self)
     let root: [String: Any] = [
@@ -4519,8 +4824,10 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(bundle.trackerEnrollmentURL == "https://r2c-tracker.com/ncssar/enroll?token=campaign-token")
     #expect(bundle.credentials?.usePeers == true)
     #expect(bundle.credentials?.predictiveHeadEnabled == false)
+    #expect(bundle.credentials?.connectKey == "NCSSAR-UAS")
     #expect(bundle.faaConfig == nil)
     #expect(bundle.mutualAidTemplate?.credentialID == "ma-credential")
+    #expect(bundle.mutualAidTemplate?.connectKey == "SHARED-UAS")
 }
 
 @Test func androidConfigTokenCodecRecognizesAllQrFamilies() throws {
@@ -5029,9 +5336,9 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
         hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211
     }
 
-    #expect(hash == 0xf4ee5506e5afb21a)
+    #expect(hash == 0xa459680b79193637)
     #expect(ApplicationLaunchDisclaimer.text.contains("accept full responsibility"))
-    #expect(ApplicationLaunchDisclaimer.text.contains("hold harmless Ken Taylor"))
+    #expect(ApplicationLaunchDisclaimer.text.contains("hold harmless UAS4SAR LLC"))
     #expect(ApplicationLaunchDisclaimer.text.contains("California Civil Code section 1542"))
     #expect(ApplicationLaunchDisclaimer.text.contains("expressly waive all rights and benefits"))
     #expect(ApplicationLaunchDisclaimer.text.contains("unknown or unsuspected"))

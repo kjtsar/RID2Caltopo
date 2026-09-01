@@ -1,6 +1,7 @@
 #include "R2CFFmpegMobile.h"
 #include "R2CH264Packet.h"
 #include "../../../native/R2CDJICameraTelemetry.h"
+#include "../../../native/R2CLocalPlaybackCadence.h"
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -15,7 +16,10 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +66,41 @@ struct R2CFFmpegSession {
 };
 
 static _Atomic(R2CFFmpegSession *) activeLogSession = NULL;
+
+static void set_operation_detail(char *detail, int detailCapacity, const char *format, ...) {
+    if (detail == NULL || detailCapacity <= 0 || format == NULL) {
+        return;
+    }
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(detail, (size_t) detailCapacity, format, arguments);
+    va_end(arguments);
+}
+
+static int prepend_packet_bytes(AVPacket *packet, const uint8_t *prefix, size_t prefixSize) {
+    if (packet == NULL || prefix == NULL || prefixSize == 0) {
+        return 0;
+    }
+    if (prefixSize > INT_MAX || packet->size < 0 || prefixSize > (size_t) (INT_MAX - packet->size)) {
+        return AVERROR(EINVAL);
+    }
+    AVPacket *merged = av_packet_alloc();
+    if (merged == NULL) {
+        return AVERROR(ENOMEM);
+    }
+    int result = av_new_packet(merged, (int) prefixSize + packet->size);
+    if (result >= 0) {
+        memcpy(merged->data, prefix, prefixSize);
+        memcpy(merged->data + prefixSize, packet->data, (size_t) packet->size);
+        result = av_packet_copy_props(merged, packet);
+    }
+    if (result >= 0) {
+        av_packet_unref(packet);
+        av_packet_move_ref(packet, merged);
+    }
+    av_packet_free(&merged);
+    return result;
+}
 
 static void capture_ffmpeg_log(void *context, int level, const char *format, va_list arguments) {
     if (level > AV_LOG_VERBOSE) {
@@ -236,8 +275,10 @@ static void *decode_worker(void *opaque) {
     int result = 0;
     int startupPacketErrors = 0;
     int nalLengthSize = 4;
-    int64_t playbackFirstTimestampMicroseconds = AV_NOPTS_VALUE;
     int64_t playbackStartedAtMicroseconds = 0;
+    int64_t playbackDueElapsedMicroseconds = 0;
+    R2CLocalPlaybackCadence playbackCadence;
+    R2CLocalPlaybackCadenceInit(&playbackCadence);
 
     avformat_network_init();
     atomic_store_explicit(&activeLogSession, session, memory_order_release);
@@ -450,18 +491,24 @@ static void *decode_worker(void *opaque) {
         }
         if (session->localPlayback) {
             int64_t packetTimestamp = packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
-            if (packetTimestamp != AV_NOPTS_VALUE) {
-                int64_t packetTimestampMicroseconds = av_rescale_q(
+            int64_t packetTimestampMicroseconds = packetTimestamp == AV_NOPTS_VALUE
+                ? 0
+                : av_rescale_q(
                     packetTimestamp,
                     stream->time_base,
                     (AVRational) {1, 1000000}
                 );
-                if (playbackFirstTimestampMicroseconds == AV_NOPTS_VALUE) {
-                    playbackFirstTimestampMicroseconds = packetTimestampMicroseconds;
+            int64_t playbackIntervalMicroseconds =
+                R2CLocalPlaybackCadenceNextIntervalUs(
+                    &playbackCadence,
+                    packetTimestampMicroseconds
+                );
+            if (playbackStartedAtMicroseconds == 0) {
                     playbackStartedAtMicroseconds = av_gettime_relative();
-                }
-                int64_t dueAtMicroseconds = playbackStartedAtMicroseconds +
-                    (packetTimestampMicroseconds - playbackFirstTimestampMicroseconds);
+            } else {
+                playbackDueElapsedMicroseconds += playbackIntervalMicroseconds;
+                int64_t dueAtMicroseconds =
+                    playbackStartedAtMicroseconds + playbackDueElapsedMicroseconds;
                 while (atomic_load_explicit(&session->running, memory_order_relaxed)) {
                     int64_t remaining = dueAtMicroseconds - av_gettime_relative();
                     if (remaining <= 0) break;
@@ -591,6 +638,201 @@ R2CFFmpegSession *R2CFFmpegSessionCreate(const char *url) {
 
 R2CFFmpegSession *R2CFFmpegSessionCreatePlayback(const char *url) {
     return create_session(url, true);
+}
+
+int R2CFFmpegNormalizeRecording(
+    const char *sourcePath,
+    const char *destinationPath,
+    char *detail,
+    int detailCapacity
+) {
+    AVFormatContext *input = NULL;
+    AVFormatContext *output = NULL;
+    AVPacket *packet = NULL;
+    uint8_t *pendingSei = NULL;
+    size_t pendingSeiSize = 0;
+    int *outputStreamIndexes = NULL;
+    int videoStreamIndex = -1;
+    int nalLengthSize = 4;
+    int result = 0;
+    int64_t pictureCount = 0;
+    int64_t mergedSeiCount = 0;
+    int64_t discardedSeiCount = 0;
+    bool wroteHeader = false;
+
+    if (sourcePath == NULL || destinationPath == NULL || sourcePath[0] == '\0' ||
+        destinationPath[0] == '\0') {
+        set_operation_detail(detail, detailCapacity, "Recording path missing");
+        return AVERROR(EINVAL);
+    }
+
+    result = avformat_open_input(&input, sourcePath, NULL, NULL);
+    if (result < 0) {
+        set_operation_detail(detail, detailCapacity, "Recording open failed error=%d", result);
+        goto finished;
+    }
+    result = avformat_find_stream_info(input, NULL);
+    if (result < 0) {
+        set_operation_detail(detail, detailCapacity, "Recording probe failed error=%d", result);
+        goto finished;
+    }
+    videoStreamIndex = av_find_best_stream(input, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    if (videoStreamIndex < 0 ||
+        input->streams[videoStreamIndex]->codecpar->codec_id != AV_CODEC_ID_H264) {
+        result = videoStreamIndex < 0 ? videoStreamIndex : AVERROR(EINVAL);
+        set_operation_detail(detail, detailCapacity, "H.264 recording stream not found");
+        goto finished;
+    }
+    AVStream *inputVideo = input->streams[videoStreamIndex];
+    if (inputVideo->codecpar->extradata != NULL &&
+        inputVideo->codecpar->extradata_size >= 5 &&
+        inputVideo->codecpar->extradata[0] == 1) {
+        nalLengthSize = (inputVideo->codecpar->extradata[4] & 0x03) + 1;
+    }
+
+    result = avformat_alloc_output_context2(&output, NULL, "mp4", destinationPath);
+    if (result < 0 || output == NULL) {
+        if (result >= 0) result = AVERROR_UNKNOWN;
+        set_operation_detail(detail, detailCapacity, "MP4 output allocation failed error=%d", result);
+        goto finished;
+    }
+    outputStreamIndexes = av_calloc(input->nb_streams, sizeof(*outputStreamIndexes));
+    if (outputStreamIndexes == NULL) {
+        result = AVERROR(ENOMEM);
+        set_operation_detail(detail, detailCapacity, "Stream map allocation failed");
+        goto finished;
+    }
+    for (unsigned int index = 0; index < input->nb_streams; ++index) {
+        AVStream *inputStream = input->streams[index];
+        AVStream *outputStream = avformat_new_stream(output, NULL);
+        if (outputStream == NULL) {
+            result = AVERROR(ENOMEM);
+            set_operation_detail(detail, detailCapacity, "Output stream allocation failed");
+            goto finished;
+        }
+        outputStreamIndexes[index] = outputStream->index;
+        result = avcodec_parameters_copy(outputStream->codecpar, inputStream->codecpar);
+        if (result < 0) {
+            set_operation_detail(detail, detailCapacity, "Codec parameter copy failed error=%d", result);
+            goto finished;
+        }
+        outputStream->codecpar->codec_tag = 0;
+        outputStream->time_base = index == (unsigned int) videoStreamIndex
+            ? (AVRational) {1, 30000}
+            : inputStream->time_base;
+        av_dict_copy(&outputStream->metadata, inputStream->metadata, 0);
+    }
+    av_dict_copy(&output->metadata, input->metadata, 0);
+    if ((output->oformat->flags & AVFMT_NOFILE) == 0) {
+        result = avio_open(&output->pb, destinationPath, AVIO_FLAG_WRITE);
+        if (result < 0) {
+            set_operation_detail(detail, detailCapacity, "MP4 output open failed error=%d", result);
+            goto finished;
+        }
+    }
+    AVDictionary *muxerOptions = NULL;
+    av_dict_set(&muxerOptions, "movflags", "+faststart", 0);
+    result = avformat_write_header(output, &muxerOptions);
+    av_dict_free(&muxerOptions);
+    if (result < 0) {
+        set_operation_detail(detail, detailCapacity, "MP4 header write failed error=%d", result);
+        goto finished;
+    }
+    wroteHeader = true;
+
+    packet = av_packet_alloc();
+    if (packet == NULL) {
+        result = AVERROR(ENOMEM);
+        set_operation_detail(detail, detailCapacity, "Packet allocation failed");
+        goto finished;
+    }
+    while ((result = av_read_frame(input, packet)) >= 0) {
+        int inputStreamIndex = packet->stream_index;
+        AVStream *inputStream = input->streams[inputStreamIndex];
+        AVStream *outputStream = output->streams[outputStreamIndexes[inputStreamIndex]];
+        if (inputStreamIndex == videoStreamIndex) {
+            R2CH264PacketContents contents = R2CH264InspectPacket(
+                packet->data,
+                (size_t) packet->size,
+                nalLengthSize
+            );
+            if (R2CH264PacketIsSeiOnly(contents)) {
+                if (packet->size > 0 && pendingSeiSize <= SIZE_MAX - (size_t) packet->size) {
+                    size_t expandedSize = pendingSeiSize + (size_t) packet->size;
+                    uint8_t *expanded = av_realloc(pendingSei, expandedSize);
+                    if (expanded == NULL) {
+                        result = AVERROR(ENOMEM);
+                        set_operation_detail(detail, detailCapacity, "SEI merge allocation failed");
+                        av_packet_unref(packet);
+                        goto finished;
+                    }
+                    pendingSei = expanded;
+                    memcpy(pendingSei + pendingSeiSize, packet->data, (size_t) packet->size);
+                    pendingSeiSize = expandedSize;
+                    mergedSeiCount += 1;
+                } else {
+                    discardedSeiCount += 1;
+                }
+                av_packet_unref(packet);
+                continue;
+            }
+            if (pendingSeiSize > 0) {
+                result = prepend_packet_bytes(packet, pendingSei, pendingSeiSize);
+                av_freep(&pendingSei);
+                pendingSeiSize = 0;
+                if (result < 0) {
+                    set_operation_detail(detail, detailCapacity, "SEI merge failed error=%d", result);
+                    av_packet_unref(packet);
+                    goto finished;
+                }
+            }
+            packet->pts = pictureCount * 1000;
+            packet->dts = packet->pts;
+            packet->duration = 1000;
+            pictureCount += 1;
+        } else {
+            av_packet_rescale_ts(packet, inputStream->time_base, outputStream->time_base);
+        }
+        packet->stream_index = outputStream->index;
+        packet->pos = -1;
+        result = av_interleaved_write_frame(output, packet);
+        av_packet_unref(packet);
+        if (result < 0) {
+            set_operation_detail(detail, detailCapacity, "MP4 packet write failed error=%d", result);
+            goto finished;
+        }
+    }
+    if (result == AVERROR_EOF) {
+        result = av_write_trailer(output);
+        if (result >= 0) {
+            wroteHeader = false;
+            if (pendingSeiSize > 0) discardedSeiCount += 1;
+            set_operation_detail(
+                detail,
+                detailCapacity,
+                "frames=%lld mergedSei=%lld discardedSei=%lld fps=30",
+                (long long) pictureCount,
+                (long long) mergedSeiCount,
+                (long long) discardedSeiCount
+            );
+        } else {
+            set_operation_detail(detail, detailCapacity, "MP4 trailer write failed error=%d", result);
+        }
+    }
+
+finished:
+    if (wroteHeader && output != NULL) {
+        av_write_trailer(output);
+    }
+    av_freep(&pendingSei);
+    av_freep(&outputStreamIndexes);
+    av_packet_free(&packet);
+    if (output != NULL && (output->oformat->flags & AVFMT_NOFILE) == 0 && output->pb != NULL) {
+        avio_closep(&output->pb);
+    }
+    avformat_free_context(output);
+    avformat_close_input(&input);
+    return result;
 }
 
 void R2CFFmpegSessionDestroy(R2CFFmpegSession *session) {

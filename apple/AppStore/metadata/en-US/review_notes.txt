@@ -8,4 +8,4 @@ The embedded MediaMTX server accepts a controller stream at the RTMP target disp
 
 Background execution is requested only for Bluetooth central events. Video and anomaly processing are foreground workflows.
 
-Contact: kjtsar@kjt.us
+Contact: kjt@uas4sar.com

@@ -4,13 +4,13 @@ import Testing
 
 struct OperationalDiagnosticLogFormatTests {
     @Test
-    func timestampUsesRequestedLocalTimeZoneAndNumericOffset() {
+    func timestampUsesRequestedLocalTimeZoneDesignationAndNumericOffset() throws {
         let date = Date(timeIntervalSince1970: 0)
-        let pacific = TimeZone(secondsFromGMT: -8 * 60 * 60)!
+        let pacific = try #require(TimeZone(identifier: "America/Los_Angeles"))
 
         #expect(
             OperationalDiagnosticLogFormat.localTimestamp(date, timeZone: pacific)
-                == "1969-12-31T16:00:00.000-08:00"
+                == "1969-12-31T16:00:00.000 PST -08:00"
         )
     }
 
@@ -25,7 +25,7 @@ struct OperationalDiagnosticLogFormatTests {
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
 
-        #expect(line == "1970-01-01T00:00:00.000Z [DEBUG][42-731:worker] [Tracker] first second\n")
+        #expect(line == "1970-01-01T00:00:00.000 GMT Z [DEBUG][42-731:worker] [Tracker] first second\n")
     }
 
     @Test

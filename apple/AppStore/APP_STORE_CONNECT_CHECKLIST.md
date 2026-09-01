@@ -98,12 +98,12 @@ rating of 4+ (with its standard regional equivalents).
 - Price: Free, unless the distribution plan changes.
 - Availability: decide whether the first build is TestFlight-only before
   selecting App Store territories.
-- TestFlight feedback email: `kjtsar@kjt.us`
+- TestFlight feedback email: `kjt@uas4sar.com`
 - TestFlight beta description, privacy URL, reviewer contact, no-sign-in
   selection, review notes, and build-specific test instructions — saved July
   19, 2026.
 - App Review contact saved July 19, 2026: Kenneth Taylor,
-  `+15305594250`, `kjtsar@kjt.us`.
+  `+15305594250`, `kjt@uas4sar.com`.
 - Sign-in required: No — saved July 19, 2026.
 - Review notes from `metadata/en-US/review_notes.txt` — saved July 19, 2026.
 - Release mode: manual — saved July 19, 2026.

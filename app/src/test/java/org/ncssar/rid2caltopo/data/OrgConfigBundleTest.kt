@@ -17,18 +17,32 @@ class OrgConfigBundleTest {
         CaltopoClient.ResetPersistedClientState()
         CaltopoClient.SetHomeOrgName("NCSSAR")
         CaltopoClient.SetCaltopoCredentials(CaltopoCredentials("team", "cred", "secret"))
+        CaltopoClient.SetConnectKey("NCSSAR-UAS")
         CaltopoClient.SetTrackerApiKey("tracker-token")
         CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
         CaltopoClient.SetTrackerFaaProxyUrl("https://tracker.example.org/faa/notams")
         CaltopoClient.SetTrackerEnrollmentUrl(
             "https://r2c-tracker.com/ncssar/enroll?token=campaign-token"
         )
+        CaltopoClient.SetMutualAidTemplate(
+            MutualAidTemplateRecord(
+                "ma-team",
+                "ma-cred",
+                "ma-secret",
+                "caltopo.com",
+                "Neighbor SAR",
+                "MAI"
+            ).also { it.connectKey = "SHARED-UAS" }
+        )
 
         val bundle = JSONObject(CaltopoClient.BuildOrgConfigBundle("NCSSAR"))
         val credentials = findConfig(bundle, "ct_credentials")
+        val mutualAidCredentials = findConfig(bundle, "ct_mutual_aid_credentials")
 
         assertEquals("NCSSAR", bundle.getString("org_name"))
         assertEquals("NCSSAR", credentials.getString("org_name"))
+        assertEquals("NCSSAR-UAS", credentials.getString("connect_key"))
+        assertEquals("SHARED-UAS", mutualAidCredentials.getString("connect_key"))
         assertEquals(2, bundle.getInt("version"))
         assertEquals(
             "https://r2c-tracker.com/ncssar/enroll?token=campaign-token",
@@ -37,6 +51,35 @@ class OrgConfigBundleTest {
         assertTrue(!credentials.has("tracker_api_key"))
         assertTrue(!credentials.has("tracker_faa_proxy_url"))
         assertTrue(!credentials.has("notam_client_secret"))
+    }
+
+    @Test
+    fun managedTrackerUploadIncludesPrimaryAndMutualAidConnectKeys() {
+        CaltopoClient.ResetPersistedClientState()
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        CaltopoClient.SetCaltopoCredentials(CaltopoCredentials("team", "cred", "secret"))
+        CaltopoClient.SetConnectKey("NCSSAR-UAS")
+        CaltopoClient.SetMutualAidTemplate(
+            MutualAidTemplateRecord(
+                "ma-team",
+                "ma-cred",
+                "ma-secret",
+                "caltopo.com",
+                "Neighbor SAR",
+                "MAI"
+            ).also { it.connectKey = "SHARED-UAS" }
+        )
+
+        val snapshot = OrgConfigManager.buildManagedSnapshot()
+        val credentials = JSONObject(
+            OrgConfigToken.decryptPayload(snapshot.getString("organizationCaltopoEnc"))
+        )
+        val mutualAidCredentials = JSONObject(
+            OrgConfigToken.decryptPayload(snapshot.getString("mutualAidCaltopoEnc"))
+        )
+
+        assertEquals("NCSSAR-UAS", credentials.getString("connect_key"))
+        assertEquals("SHARED-UAS", mutualAidCredentials.getString("connect_key"))
     }
 
     @Test
@@ -53,7 +96,7 @@ class OrgConfigBundleTest {
                 "caltopo.com",
                 "NCSSAR",
                 "MAI"
-            )
+            ).also { it.connectKey = "SHARED-UAS" }
         )
         val bundle = CaltopoClient.BuildOrgConfigBundle("NCSSAR")
         checkNotNull(bundle)
@@ -64,6 +107,7 @@ class OrgConfigBundleTest {
 
         assertTrue(CaltopoClient.ApplyOrgConfigBundle(json.toString()))
         assertEquals("NCSSAR", CaltopoClient.GetHomeOrgName())
+        assertEquals("SHARED-UAS", CaltopoClient.GetMutualAidTemplateConnectKey())
     }
 
     @Test

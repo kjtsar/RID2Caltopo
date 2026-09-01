@@ -31,17 +31,20 @@ public struct CaltopoLiveConfiguration: Sendable, Equatable {
     public let mapID: String
     public let credentialID: String
     public let credentialSecretBase64: String
+    public let connectKey: String
 
     public init(
         domainAndPort: String = "caltopo.com",
         mapID: String,
         credentialID: String,
-        credentialSecretBase64: String
+        credentialSecretBase64: String,
+        connectKey: String = ""
     ) {
         self.domainAndPort = domainAndPort
         self.mapID = mapID
         self.credentialID = credentialID
         self.credentialSecretBase64 = credentialSecretBase64
+        self.connectKey = connectKey
     }
 }
 
@@ -482,7 +485,7 @@ public actor CaltopoLiveClient {
             "marker-symbol": "icon-8T781R60-12-0.5-0.5-tf",
             "marker-size": 2,
             "class": "LiveTrack",
-            "deviceId": "FLEET:DRONE-\(remoteID)",
+            "deviceId": "FLEET:\(effectiveConnectKey)-\(remoteID)",
         ]
         if let folderID, !folderID.isEmpty {
             properties["folderId"] = folderID
@@ -615,13 +618,26 @@ public actor CaltopoLiveClient {
         components.scheme = "https"
         components.host = hostAndPort.host
         components.port = hostAndPort.port
-        components.path = "/api/v1/position/report/DRONE"
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard let encodedConnectKey = effectiveConnectKey.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw CaltopoLiveClientError.invalidURL
+        }
+        components.percentEncodedPath = "/api/v1/position/report/\(encodedConnectKey)"
         var queryItems = [
             URLQueryItem(name: "id", value: remoteID),
             URLQueryItem(name: "lat", value: String(format: "%.7f", observation.latitude)),
             URLQueryItem(name: "lng", value: String(format: "%.7f", observation.longitude)),
             URLQueryItem(name: "elevation", value: String(Int64(observation.altitudeMeters ?? -1_000))),
         ]
+        if let altitudeMeters = observation.altitudeMeters,
+           altitudeMeters.isFinite,
+           altitudeMeters != -1_000 {
+            let altitudeFeet = Int64((altitudeMeters * 3.280_839_895_013_123).rounded())
+            queryItems.append(URLQueryItem(
+                name: "aircraft:altitude",
+                value: String(altitudeFeet)
+            ))
+        }
         if let speed = observation.speedMetersPerSecond, speed.isFinite {
             queryItems.append(URLQueryItem(
                 name: "aircraft:gs",
@@ -661,6 +677,11 @@ public actor CaltopoLiveClient {
         request.httpMethod = "GET"
         request.setValue("RID2Caltopo/Apple", forHTTPHeaderField: "User-Agent")
         return request
+    }
+
+    private var effectiveConnectKey: String {
+        let connectKey = configuration.connectKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        return connectKey.isEmpty ? "DRONE" : connectKey
     }
 
     func makeStopLiveTrackRequest(liveTrackID: String, now: Date) throws -> URLRequest {

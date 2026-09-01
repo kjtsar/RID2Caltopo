@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "../../../../native/R2CDJICameraTelemetry.h"
+#include "../../../../native/R2CLocalPlaybackCadence.h"
 
 #if !defined(HAVE_FFMPEG)
 #define HAVE_FFMPEG 0
@@ -286,6 +287,8 @@ typedef struct ffmpeg_session_t {
     int64_t local_playback_last_admit_pts_us;
     int64_t local_playback_last_admit_at_ms;
     int64_t local_playback_nominal_interval_ms;
+    R2CLocalPlaybackCadence local_playback_render_cadence;
+    R2CLocalPlaybackCadence local_playback_admit_cadence;
     int64_t local_playback_pts_repair_count;
     int64_t local_playback_timing_pts_us[LOCAL_PLAYBACK_HISTORY_CAPACITY];
     int64_t local_playback_timing_render_at_ms[LOCAL_PLAYBACK_HISTORY_CAPACITY];
@@ -381,7 +384,9 @@ typedef struct ffmpeg_session_t {
     int remote_video_width;
     int remote_video_height;
     double remote_video_fps;
-    int64_t remote_video_next_due_ms;
+    // Keep the fractional cadence deadline. Rounding 30 fps up to a 34 ms
+    // integer interval makes a normal 33/34 ms source miss every other frame.
+    double remote_video_next_due_ms;
     struct SwsContext *remote_video_sws;
     uint8_t *remote_video_i420_buffer;
     int remote_video_i420_buffer_size;
@@ -675,13 +680,29 @@ static void dispatch_remote_video_frame(ffmpeg_session_t *session,
     int height = 0;
     double fps = 0.0;
     pthread_mutex_lock(&g_lock);
-    if (session->remote_video_enabled &&
-        decoded_at_ms >= session->remote_video_next_due_ms) {
-        width = session->remote_video_width;
-        height = session->remote_video_height;
+    if (session->remote_video_enabled) {
         fps = session->remote_video_fps;
-        session->remote_video_next_due_ms = decoded_at_ms +
-                (int64_t) llround(1000.0 / fmax(1.0, fps));
+        double interval_ms = 1000.0 / fmax(1.0, fps);
+        double deadline_ms = session->remote_video_next_due_ms;
+        // Select the first decoded frame within half an output interval of the
+        // accumulated deadline. Advancing the prior deadline instead of
+        // scheduling from decoded_at_ms prevents rounding and jitter from
+        // reducing 30 fps to 15 fps (and 15 fps to 10 fps).
+        if (deadline_ms <= 0.0 ||
+            (double) decoded_at_ms + interval_ms * 0.5 >= deadline_ms) {
+            width = session->remote_video_width;
+            height = session->remote_video_height;
+            if (deadline_ms <= 0.0 ||
+                (double) decoded_at_ms - deadline_ms > interval_ms * 4.0) {
+                deadline_ms = (double) decoded_at_ms + interval_ms;
+            } else {
+                do {
+                    deadline_ms += interval_ms;
+                } while (deadline_ms <=
+                         (double) decoded_at_ms + interval_ms * 0.5);
+            }
+            session->remote_video_next_due_ms = deadline_ms;
+        }
     }
     pthread_mutex_unlock(&g_lock);
     if (width <= 0 || height <= 0 || fps <= 0.0 ||
@@ -3595,6 +3616,8 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->local_playback_last_admit_pts_us = 0;
         session->local_playback_last_admit_at_ms = 0;
         session->local_playback_nominal_interval_ms = 0;
+        R2CLocalPlaybackCadenceInit(&session->local_playback_render_cadence);
+        R2CLocalPlaybackCadenceInit(&session->local_playback_admit_cadence);
         session->local_playback_pts_repair_count = 0;
         memset(session->local_playback_timing_pts_us, 0, sizeof(session->local_playback_timing_pts_us));
         memset(session->local_playback_timing_render_at_ms, 0, sizeof(session->local_playback_timing_render_at_ms));
@@ -3707,24 +3730,11 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
 
 static void pace_local_file_playback(ffmpeg_session_t *session, int64_t pts_us) {
     if (session == NULL) return;
-    int64_t nominal_interval_ms = session->local_playback_nominal_interval_ms;
-    if (nominal_interval_ms <= 0) {
-        nominal_interval_ms = current_render_interval_ms(session);
-    }
+    int64_t target_interval_us = R2CLocalPlaybackCadenceNextIntervalUs(
+            &session->local_playback_render_cadence,
+            pts_us);
     if (session->local_playback_last_render_at_ms > 0) {
-        int64_t pts_interval_ms = 0;
-        if (session->local_playback_last_pts_us > 0 &&
-            pts_us > session->local_playback_last_pts_us) {
-            pts_interval_ms = (pts_us - session->local_playback_last_pts_us) / 1000;
-        }
-        int64_t target_interval_ms =
-                anomaly_detector_runtime_budget_local_playback_target_interval_ms(
-                        nominal_interval_ms,
-                        pts_interval_ms,
-                        RENDER_DEFAULT_FPS,
-                        RENDER_MIN_INTERVAL_MS,
-                        RENDER_MAX_INTERVAL_MS,
-                        250);
+        int64_t target_interval_ms = (target_interval_us + 500) / 1000;
         int64_t target_ms = session->local_playback_last_render_at_ms + target_interval_ms;
         while (session_running(session)) {
             int64_t now_ms = monotonic_ms();
@@ -3747,23 +3757,14 @@ static int64_t pace_local_file_decode_admission(ffmpeg_session_t *session,
     if (session == NULL || !is_local_file_source(session)) {
         return decoded_at_ms;
     }
-    int64_t nominal_interval_ms = session->local_playback_nominal_interval_ms;
-    if (nominal_interval_ms <= 0) {
-        nominal_interval_ms = current_render_interval_ms(session);
-    }
+    int64_t target_interval_us = R2CLocalPlaybackCadenceNextIntervalUs(
+            &session->local_playback_admit_cadence,
+            pts_us);
+    int64_t target_interval_ms = (target_interval_us + 500) / 1000;
     while (session_running(session)) {
         int64_t now_ms = monotonic_ms();
-        int64_t delay_ms =
-                anomaly_detector_runtime_budget_local_playback_pace_delay_ms(
-                        nominal_interval_ms,
-                        session->local_playback_last_admit_pts_us,
-                        pts_us,
-                        session->local_playback_last_admit_at_ms,
-                        now_ms,
-                        RENDER_DEFAULT_FPS,
-                        RENDER_MIN_INTERVAL_MS,
-                        RENDER_MAX_INTERVAL_MS,
-                        250);
+        int64_t target_at_ms = session->local_playback_last_admit_at_ms + target_interval_ms;
+        int64_t delay_ms = target_at_ms > now_ms ? target_at_ms - now_ms : 0;
         if (delay_ms <= 0) {
             break;
         }

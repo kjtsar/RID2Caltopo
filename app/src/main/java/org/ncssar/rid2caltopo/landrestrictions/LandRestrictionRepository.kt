@@ -75,7 +75,7 @@ class LandRestrictionRepository(
     private fun fetchPayload(url: HttpUrl): String {
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", "RID2Caltopo/Android (contact: kjtsar@kjt.us)")
+            .header("User-Agent", "RID2Caltopo/Android (contact: kjt@uas4sar.com)")
             .get()
             .build()
         try {

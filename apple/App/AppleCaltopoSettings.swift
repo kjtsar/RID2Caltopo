@@ -11,6 +11,7 @@ struct AppleCaltopoConfiguration: Sendable, Equatable {
     let credentialID: String
     let credentialSecret: String
     let teamID: String
+    let connectKey: String
 
     var liveConfiguration: CaltopoLiveConfiguration? {
         guard enabled,
@@ -23,7 +24,8 @@ struct AppleCaltopoConfiguration: Sendable, Equatable {
             domainAndPort: domainAndPort,
             mapID: mapID,
             credentialID: credentialID,
-            credentialSecretBase64: credentialSecret
+            credentialSecretBase64: credentialSecret,
+            connectKey: connectKey
         )
     }
 }
@@ -37,6 +39,7 @@ final class AppleCaltopoSettings: ObservableObject {
     @Published var credentialID: String
     @Published var credentialSecret: String
     @Published var teamID: String
+    @Published var connectKey: String
     @Published private(set) var status = "Not configured"
     @Published private(set) var teamMaps: [CaltopoTeamMapNode] = []
     @Published private(set) var isLoadingTeamMaps = false
@@ -64,6 +67,7 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialID = defaults.string(forKey: "caltopo.credentialID") ?? ""
         credentialSecret = Self.loadSecret() ?? ""
         teamID = defaults.string(forKey: "caltopo.teamID") ?? ""
+        connectKey = defaults.string(forKey: "caltopo.connectKey") ?? ""
         credentialOrigin = defaults.string(forKey: Self.credentialOriginKey)
             ?? Self.originUnknown
         status = enabled ? "Standalone; select the incident map" : "Publishing disabled"
@@ -78,7 +82,8 @@ final class AppleCaltopoSettings: ObservableObject {
             mapTitle: mapTitle.trimmingCharacters(in: .whitespacesAndNewlines),
             credentialID: credentialID.trimmingCharacters(in: .whitespacesAndNewlines),
             credentialSecret: credentialSecret.trimmingCharacters(in: .whitespacesAndNewlines),
-            teamID: teamID.trimmingCharacters(in: .whitespacesAndNewlines)
+            teamID: teamID.trimmingCharacters(in: .whitespacesAndNewlines),
+            connectKey: connectKey.trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
 
@@ -95,6 +100,7 @@ final class AppleCaltopoSettings: ObservableObject {
         defaults.set(value.mapTitle, forKey: "caltopo.mapTitle")
         defaults.set(value.credentialID, forKey: "caltopo.credentialID")
         defaults.set(value.teamID, forKey: "caltopo.teamID")
+        defaults.set(value.connectKey, forKey: "caltopo.connectKey")
         do {
             try Self.storeSecret(value.credentialSecret)
             status = value.liveConfiguration == nil
@@ -112,6 +118,7 @@ final class AppleCaltopoSettings: ObservableObject {
         if !credentials.credentialID.isEmpty { credentialID = credentials.credentialID }
         if !credentials.credentialSecret.isEmpty { credentialSecret = credentials.credentialSecret }
         teamID = credentials.teamID
+        connectKey = credentials.connectKey
         defaults.set(teamID, forKey: "caltopo.teamID")
         credentialOrigin = Self.originIndependent
         defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
@@ -125,6 +132,7 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialID = object["credential_id"] as? String ?? ""
         credentialSecret = object["credential_secret"] as? String ?? ""
         teamID = object["team_id"] as? String ?? ""
+        connectKey = object["connect_key"] as? String ?? ""
         defaults.set(teamID, forKey: "caltopo.teamID")
         credentialOrigin = Self.originTracker
         defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
@@ -139,6 +147,7 @@ final class AppleCaltopoSettings: ObservableObject {
         if !profile.credentialID.isEmpty { credentialID = profile.credentialID }
         if !profile.credentialSecret.isEmpty { credentialSecret = profile.credentialSecret }
         teamID = profile.teamID
+        connectKey = profile.connectKey
         defaults.set(teamID, forKey: "caltopo.teamID")
         credentialOrigin = Self.originIndependent
         defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
@@ -154,6 +163,7 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialID = profile.credentialID
         credentialSecret = profile.credentialSecret
         teamID = profile.teamID
+        connectKey = profile.connectKey ?? ""
         defaults.set(teamID, forKey: "caltopo.teamID")
         credentialOrigin = Self.originIndependent
         defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
@@ -172,6 +182,7 @@ final class AppleCaltopoSettings: ObservableObject {
             "credential_id": credentialID,
             "credential_secret": credentialSecret,
             "team_id": teamID,
+            "connect_key": connectKey,
         ]
     }
 
@@ -183,6 +194,7 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialID = object["credential_id"] as? String ?? ""
         credentialSecret = object["credential_secret"] as? String ?? ""
         teamID = object["team_id"] as? String ?? ""
+        connectKey = object["connect_key"] as? String ?? ""
         defaults.set(teamID, forKey: "caltopo.teamID")
         credentialOrigin = Self.originIndependent
         defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)
@@ -254,12 +266,14 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialID = ""
         credentialSecret = ""
         teamID = ""
+        connectKey = ""
         teamMaps = []
         credentialOrigin = Self.originUnknown
         status = "Not configured"
         for key in [
             "caltopo.enabled", "caltopo.domainAndPort", "caltopo.mapID",
             "caltopo.mapTitle", "caltopo.credentialID", "caltopo.teamID",
+            "caltopo.connectKey",
             Self.credentialOriginKey,
         ] {
             defaults.removeObject(forKey: key)
@@ -281,6 +295,7 @@ final class AppleCaltopoSettings: ObservableObject {
         credentialID = ""
         credentialSecret = ""
         teamID = ""
+        connectKey = ""
         teamMaps = []
         credentialOrigin = Self.originTracker
         defaults.set(credentialOrigin, forKey: Self.credentialOriginKey)

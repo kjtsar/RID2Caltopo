@@ -86,6 +86,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.compose.foundation.rememberScrollState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
@@ -823,9 +824,10 @@ fun StreamTile(
             IconButton(
                 onClick = { requestClueCapture("camera-button") },
                 modifier = Modifier
+                    .zIndex(2f)
                     .align(Alignment.CenterEnd)
-                    .padding(end = 62.dp)
-                    .size(44.dp)
+                    .offset(x = (-62).dp)
+                    .size(56.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.88f))
             ) {

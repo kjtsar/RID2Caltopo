@@ -180,12 +180,13 @@ object OrgConfigManager {
                 "ct_credentials" -> orgCredentials = credentialValues(
                     item,
                     listOf("type", "file_version", "team_id", "credential_id",
-                        "credential_secret", "domain_and_port", "track_folder")
+                        "credential_secret", "domain_and_port", "connect_key", "track_folder")
                 )
                 TYPE_MUTUAL_AID_CREDENTIALS -> mutualAidCredentials = credentialValues(
                     item,
                     listOf("type", "file_version", "team_id", "credential_id",
-                        "credential_secret", "domain_and_port", "source_label", "target_folder_hint")
+                        "credential_secret", "domain_and_port", "connect_key",
+                        "source_label", "target_folder_hint")
                 )
                 "ct_ridmap" -> drones = item.optJSONArray("map") ?: JSONArray()
             }

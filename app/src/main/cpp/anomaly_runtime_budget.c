@@ -854,21 +854,13 @@ int64_t anomaly_detector_runtime_budget_local_playback_target_interval_ms(
         int64_t max_reasonable_interval_ms) {
     int64_t target_interval_ms = nominal_interval_ms;
     if (pts_interval_ms > 0) {
-        if (nominal_interval_ms > 0) {
-            int64_t min_reasonable_ms = nominal_interval_ms / 2;
-            int64_t max_reasonable_ms = nominal_interval_ms * 2;
-            if (min_reasonable_ms < min_interval_ms) {
-                min_reasonable_ms = min_interval_ms;
-            }
-            if (max_reasonable_interval_ms > 0 &&
-                max_reasonable_ms > max_reasonable_interval_ms) {
-                max_reasonable_ms = max_reasonable_interval_ms;
-            }
-            if (pts_interval_ms >= min_reasonable_ms &&
-                pts_interval_ms <= max_reasonable_ms) {
-                target_interval_ms = pts_interval_ms;
-            }
-        } else {
+        // Local recordings can contain timestamped metadata-only H.264 access
+        // units. Some MP4 demuxers count those toward avg_frame_rate, making a
+        // 30 fps picture stream look like 60 fps. Decoded-frame PTS is the
+        // authoritative playback clock; accept any bounded positive interval
+        // instead of comparing it to that potentially doubled nominal rate.
+        if (max_reasonable_interval_ms <= 0 ||
+            pts_interval_ms <= max_reasonable_interval_ms) {
             target_interval_ms = pts_interval_ms;
         }
     }
@@ -881,7 +873,10 @@ int64_t anomaly_detector_runtime_budget_local_playback_target_interval_ms(
                         min_interval_ms,
                         max_interval_ms);
     }
-    return target_interval_ms;
+    return anomaly_detector_budget_clamp_i64(
+            target_interval_ms,
+            min_interval_ms,
+            max_interval_ms);
 }
 
 int64_t anomaly_detector_runtime_budget_local_playback_pace_delay_ms(

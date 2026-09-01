@@ -56,6 +56,7 @@ build_slice() {
       --enable-network \
       --enable-protocol=file,tcp,udp,rtp \
       --enable-demuxer=mov,rtsp,rtp,sdp,h264 \
+      --enable-muxer=mp4 \
       --enable-parser=h264 \
       --enable-decoder=h264 \
       --enable-hwaccel=h264_videotoolbox \

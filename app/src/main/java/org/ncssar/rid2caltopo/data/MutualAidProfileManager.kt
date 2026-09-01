@@ -139,6 +139,7 @@ object MutualAidProfileManager {
             .put("credential_id", profile.credentials.credentialId ?: "")
             .put("credential_secret", profile.credentials.credentialSecret ?: "")
             .put("domain_and_port", profile.domainAndPort)
+            .put("connect_key", profile.connectKey)
             .put("track_folder", profile.trackFolder)
             .put("incident", profile.incident)
             .put("op_period", profile.opPeriod)
@@ -182,6 +183,7 @@ object MutualAidProfileManager {
                 .put("credential_id", profile.credentials.credentialId ?: "")
                 .put("credential_secret", profile.credentials.credentialSecret ?: "")
                 .put("domain_and_port", profile.domainAndPort)
+                .put("connect_key", profile.connectKey)
                 .put("track_folder", profile.trackFolder)
                 .put("incident", profile.incident)
                 .put("op_period", profile.opPeriod)
@@ -271,7 +273,9 @@ object MutualAidProfileManager {
             json.optString("target_folder_hint"),
             json.optLong("imported_at_epoch_ms", System.currentTimeMillis()),
             json.optString("import_dedupe_key")
-        )
+        ).also {
+            it.connectKey = json.optString("connect_key")
+        }
     }
 
     private fun buildBundle(sourceOrg: String, profile: CaltopoProfileRecord): String {
@@ -287,6 +291,7 @@ object MutualAidProfileManager {
             .put("credential_id", profile.credentials.credentialId ?: "")
             .put("credential_secret", profile.credentials.credentialSecret ?: "")
             .put("domain_and_port", profile.domainAndPort)
+            .put("connect_key", profile.connectKey)
             .put("track_folder", profile.trackFolder)
             .put("incident", profile.incident)
             .put("op_period", profile.opPeriod)
@@ -362,7 +367,7 @@ object MutualAidProfileManager {
             template.targetFolderHint.ifBlank { active?.targetFolderHint ?: "MAI" },
             importedAt,
             dedupeKey
-        )
+        ).also { it.connectKey = template.connectKey.orEmpty() }
     }
 
     private fun sanitizeBundleName(raw: String): String {

@@ -11,6 +11,7 @@ package org.ncssar.rid2caltopo.data;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.ncssar.rid2caltopo.BuildConfig;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecording;
@@ -70,9 +71,16 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     private static final long LIVE_TRACK_SIDE_EFFECT_SLOW_MS = 250L;
     private static final long DEFERRED_VIDEO_LINK_RETRY_MS = 2_000L;
     private static final long DEFERRED_VIDEO_LINK_WINDOW_MS = 30_000L;
+    private static final long SEI_POSITION_PUBLISH_INTERVAL_MS = 1_000L;
     private static final ScheduledExecutorService DeferredVideoLinkExecutor =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "CaltopoDeferredVideoLink");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private static final ScheduledExecutorService SeiPositionExecutor =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "CaltopoSeiPosition");
                 thread.setDaemon(true);
                 return thread;
             });
@@ -118,8 +126,27 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     private long lastInterruptedJournalWriteMs = 0L;
     private long trackObservedStartedAtMs;
     private long trackObservedEndedAtMs;
+    private long lastSeiPositionTimestampMs;
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
     private CaltopoMap.MapStatusListener.mapStatus mapStatus;
+
+    static {
+        SeiPositionExecutor.scheduleAtFixedRate(
+                CaltopoLiveTrack::publishFreshSeiPositions,
+                SEI_POSITION_PUBLISH_INTERVAL_MS,
+                SEI_POSITION_PUBLISH_INTERVAL_MS,
+                TimeUnit.MILLISECONDS);
+    }
+
+    private static void publishFreshSeiPositions() {
+        for (CaltopoLiveTrack track : new LinkedList<>(LiveTrackByRemoteId.values())) {
+            try {
+                track.publishFreshSeiPositionIfAvailable();
+            } catch (Exception error) {
+                CTError(TAG, "Unable to publish fresh video SEI position", error);
+            }
+        }
+    }
 
     private static void logSideEffectIfSlow(@NonNull String step,
                                             @NonNull String remoteId,
@@ -150,9 +177,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         trackObservedStartedAtMs = trackObservedEndedAtMs = System.currentTimeMillis();
 
         StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry(lat, lng, ele);
-        double effectiveLat = lat;
-        double effectiveLng = lng;
-        double effectiveEle = ele;
+        double effectiveLat = preferredLatitude(cameraTelemetry, lat);
+        double effectiveLng = preferredLongitude(cameraTelemetry, lng);
+        double effectiveEle = preferredAltitude(cameraTelemetry, ele);
         linePoints.add(new QueuedPoint(effectiveLat, effectiveLng, effectiveEle, droneTimestampInMsec,
                 droneSpec.getLastPositionTelemetry(), cameraTelemetry));
         notifyLocalTrackPoint(effectiveLat, effectiveLng, effectiveEle, droneTimestampInMsec);
@@ -172,11 +199,12 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         long startedAtMs = System.currentTimeMillis();
 
         trackObservedStartedAtMs = trackObservedEndedAtMs = startedAtMs;
+        lastSeiPositionTimestampMs = 0L;
 
         StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry(lat, lng, ele);
-        double effectiveLat = lat;
-        double effectiveLng = lng;
-        double effectiveEle = ele;
+        double effectiveLat = preferredLatitude(cameraTelemetry, lat);
+        double effectiveLng = preferredLongitude(cameraTelemetry, lng);
+        double effectiveEle = preferredAltitude(cameraTelemetry, ele);
         linePoints.add(new QueuedPoint(effectiveLat, effectiveLng, effectiveEle, droneTimestampInMsec,
                 droneSpec.getLastPositionTelemetry(), cameraTelemetry));
         long notifyStartedAtMs = System.currentTimeMillis();
@@ -389,9 +417,18 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         return null != trackId && trackId.equals(liveTrackId);
     }
 
+    @NonNull
+    private String effectiveFleetDeviceId() {
+        return CaltopoSession.liveTrackDeviceId(myRemoteId, CaltopoClient.GetConnectKey());
+    }
+
     public boolean matchesFeatureDeviceId(@Nullable String deviceId) {
         if (deviceId == null || deviceId.isEmpty()) return false;
-        return deviceId.equalsIgnoreCase("FLEET:DRONE-" + myRemoteId);
+        String configuredDeviceId = CaltopoSession.liveTrackDeviceId(
+                myRemoteId, CaltopoClient.GetConnectKey());
+        String legacyDeviceId = CaltopoSession.liveTrackDeviceId(myRemoteId, "DRONE");
+        return deviceId.equalsIgnoreCase(configuredDeviceId)
+                || deviceId.equalsIgnoreCase(legacyDeviceId);
     }
 
     @Override
@@ -632,6 +669,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         startLiveTrackOp = null;
         active = false;
         lastInterruptedJournalWriteMs = 0L;
+        lastSeiPositionTimestampMs = 0L;
     }
 
     private void clearLiveTrackState() {
@@ -641,6 +679,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         startLiveTrackOp = null;
         active = false;
         lastInterruptedJournalWriteMs = 0L;
+        lastSeiPositionTimestampMs = 0L;
     }
 
     public String getTrackLabel() {
@@ -694,8 +733,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             if (null == folderId) folderId = CaltopoMap.GetFolderId();
             String trackLabel = droneSpec.trackLabel();
             CTDebug(TAG, String.format(Locale.US,
-                    "startNewTrack(DRONE-%s): Starting LiveTrack w/label:%s mappedId='%s' localOwner=%s queuedPoints=%d in folder:%s",
-                    myRemoteId, trackLabel, droneSpec.getMappedId(), localOwner, linePoints.size(), folderId));
+                    "startNewTrack(%s): Starting LiveTrack w/label:%s mappedId='%s' localOwner=%s queuedPoints=%d in folder:%s",
+                    effectiveFleetDeviceId(), trackLabel, droneSpec.getMappedId(), localOwner, linePoints.size(), folderId));
             try {
                 startLiveTrackOp = runtime.getCalTopoSessionGateway()
                         .startLiveTrack(myRemoteId, trackLabel, folderId,
@@ -753,6 +792,21 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
     public boolean isActive() {return active; }
 
+    public static boolean HasActiveLocalTrackForMappedId(@Nullable String mappedId) {
+        String normalized = mappedId == null ? "" : mappedId.trim();
+        if (normalized.isEmpty()) return false;
+        synchronized (LiveTrackByRemoteId) {
+            for (CaltopoLiveTrack liveTrack : LiveTrackByRemoteId.values()) {
+                if (liveTrack.active
+                        && liveTrack.localOwner
+                        && normalized.equalsIgnoreCase(liveTrack.droneSpec.getMappedId().trim())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /** Re-register all active live tracks with R2CMqttManager after a map reconnect. */
     public static void ReevalUnknownAndPendingTracks() {
         for (CaltopoLiveTrack liveTrack : LiveTrackByRemoteId.values()) {
@@ -770,8 +824,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         String trackLabel = droneSpec.trackLabel();
         if (op.fail()) {
             CTError(TAG, String.format(Locale.US,
-                    "Not able to open LiveTrack for:'DRONE-%s' - responseCode:%d, response: %s",
-                    trackLabel, op.responseCode, op.responseString()));
+                    "Not able to open LiveTrack for:'%s' - responseCode:%d, response: %s",
+                    effectiveFleetDeviceId(), op.responseCode, op.responseString()));
             finishTrack("Not able to open/write LiveTrack");
         } else try {
             CTDebug(TAG, "startLiveTrackComplete(): succeeded. ResponseCode: " + op.responseCode + " response: " + op.response);
@@ -825,7 +879,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         queueWaypoint(lat, lng, altitudeMeters, timestampMsec, telemetry, false);
     }
 
-    private void queueWaypoint(
+    private synchronized void queueWaypoint(
             double lat,
             double lng,
             double altitudeMeters,
@@ -834,10 +888,18 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             boolean notifyCoordinator) {
         long startedAtMs = System.currentTimeMillis();
         StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry(lat, lng, altitudeMeters);
-        // RID remains the canonical aircraft track. SEI position is used only for clue geometry.
-        double effectiveLat = lat;
-        double effectiveLng = lng;
-        double effectiveAltitudeMeters = altitudeMeters;
+        double effectiveLat = preferredLatitude(cameraTelemetry, lat);
+        double effectiveLng = preferredLongitude(cameraTelemetry, lng);
+        double effectiveAltitudeMeters = preferredAltitude(cameraTelemetry, altitudeMeters);
+        if (cameraTelemetry != null && cameraTelemetry.getCourseDeg() != null) {
+            CtDroneSpec.PositionTelemetry prior = telemetry != null
+                    ? telemetry
+                    : droneSpec.getLastPositionTelemetry();
+            telemetry = new CtDroneSpec.PositionTelemetry(
+                    prior == null ? null : prior.aircraftAltitudeRateFpm,
+                    prior == null ? null : prior.aircraftGsKnots,
+                    cameraTelemetry.getCourseDeg());
+        }
         QueuedPoint previousPoint = linePoints.peekLast();
         if (isDuplicateOfPreviousPoint(previousPoint, effectiveLat, effectiveLng,
                 effectiveAltitudeMeters, timestampMsec)) {
@@ -939,6 +1001,11 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         if (null != lastOp && lastOp.isDone()) {
             linePointsConfirmedCount++;
             long rtt = lastOp.roundTripTimeInMsec();
+            if (BuildConfig.DEBUG) {
+                CTDebug(TAG, String.format(Locale.US,
+                        "positionReport response: code=%d success=%s rttMs=%d",
+                        lastOp.responseCode, lastOp.success(), rtt));
+            }
             CaltopoRttInMsec.next(rtt);
             runtime.getPeerCoordinator().updateCaltopoRtt(rtt);
             if (lastOp.fail()) {
@@ -957,8 +1024,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             int pointCount = linePoints.size();
             while (linePointsSentCount < pointCount) {
                 QueuedPoint point = linePoints.get(linePointsSentCount++);
-                CTDebug(TAG, String.format(Locale.US, "forwardNextWaypoint(DRONE-%s#%d): adding %.7f,%.7f@%dm to LiveTrack.",
-                        myRemoteId, linePointsSentCount, point.lat, point.lng, (long)point.ele));
+                CTDebug(TAG, String.format(Locale.US, "forwardNextWaypoint(%s#%d): adding %.7f,%.7f@%dm to LiveTrack.",
+                        effectiveFleetDeviceId(), linePointsSentCount, point.lat, point.lng, (long)point.ele));
                 runtime.getCalTopoSessionGateway()
                         .addLiveTrackPoint(myRemoteId, point.lat, point.lng, point.ele, point.telemetry,
                                 activeVideoCameraMetadata(point.cameraTelemetry),
@@ -991,7 +1058,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 : TrackerTabletLink.thumbnailUrl(
                         CaltopoClient.GetTrackerCoordinationUrlPfx(),
                         R2CActivity.MyDeviceName,
-                        publishingVideo.sessionId
+                        publishingVideo.sessionId,
+                        publishingVideo.thumbnailRevision
                 );
         return tabletUrl == null
                 ? null
@@ -1012,7 +1080,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         String mappedId = droneSpec.getMappedId().trim();
         return mappedId.isEmpty()
                 ? null
-                : StreamCameraTelemetryRegistry.INSTANCE.freshAnchored(
+                : StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
                         mappedId,
                         ridLatitude,
                         ridLongitude,
@@ -1020,6 +1088,50 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                         droneSpec.getImpliedTakeoffAltM(),
                         System.currentTimeMillis(),
                         StreamCameraTelemetryRegistry.DEFAULT_MAX_AGE_MS);
+    }
+
+    private synchronized void publishFreshSeiPositionIfAvailable() {
+        if (!active || shuttingDown || !localOwner ||
+                mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
+        StreamCameraTelemetrySample sample = currentCameraTelemetry(
+                droneSpec.lastLat, droneSpec.lastLng, droneSpec.lastAlt);
+        if (sample == null || sample.getLatitudeDeg() == null || sample.getLongitudeDeg() == null ||
+                sample.getReceivedAtMs() <= lastSeiPositionTimestampMs) return;
+        double altitude = preferredAltitude(sample, droneSpec.lastAlt);
+        CtDroneSpec.PositionTelemetry prior = droneSpec.getLastPositionTelemetry();
+        CtDroneSpec.PositionTelemetry telemetry = new CtDroneSpec.PositionTelemetry(
+                prior == null ? null : prior.aircraftAltitudeRateFpm,
+                prior == null ? null : prior.aircraftGsKnots,
+                sample.getCourseDeg() != null
+                        ? sample.getCourseDeg()
+                        : (prior == null ? null : prior.aircraftTrackDeg));
+        queueWaypoint(
+                sample.getLatitudeDeg(),
+                sample.getLongitudeDeg(),
+                altitude,
+                sample.getReceivedAtMs(),
+                telemetry,
+                false);
+        lastSeiPositionTimestampMs = sample.getReceivedAtMs();
+    }
+
+    private double preferredLatitude(@Nullable StreamCameraTelemetrySample sample, double fallback) {
+        return sample != null && sample.getLatitudeDeg() != null
+                ? sample.getLatitudeDeg()
+                : fallback;
+    }
+
+    private double preferredLongitude(@Nullable StreamCameraTelemetrySample sample, double fallback) {
+        return sample != null && sample.getLongitudeDeg() != null
+                ? sample.getLongitudeDeg()
+                : fallback;
+    }
+
+    private double preferredAltitude(@Nullable StreamCameraTelemetrySample sample, double fallback) {
+        if (sample == null) return fallback;
+        Double altitude = PeerTrafficAltitudeNormalizer.reportedAltitudeForRelativeUp(
+                myRemoteId, sample.getRelativeUpMeters());
+        return altitude != null && Double.isFinite(altitude) ? altitude : fallback;
     }
 
     private boolean isDuplicateOfPreviousPoint(

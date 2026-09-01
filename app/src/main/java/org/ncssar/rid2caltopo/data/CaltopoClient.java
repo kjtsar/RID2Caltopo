@@ -35,6 +35,7 @@ import java.text.SimpleDateFormat;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -68,6 +69,7 @@ import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter;
 import org.ncssar.rid2caltopo.ui.ProximityAlertCenter;
 import org.ncssar.rid2caltopo.video.PairedVideoFlightActivity;
 import org.ncssar.rid2caltopo.video.StreamFlightActivityRegistry;
+import org.ncssar.rid2caltopo.video.MapOfflinePrepRuntime;
 import com.google.firebase.analytics.FirebaseAnalytics;
 
 import okhttp3.MediaType;
@@ -95,6 +97,7 @@ class CaltopoProfileRecord {
     public String targetFolderHint;
     public long importedAtEpochMs;
     public String importDedupeKey;
+    public String connectKey;
 
     public CaltopoProfileRecord() {
         this.profileId = "";
@@ -116,6 +119,7 @@ class CaltopoProfileRecord {
         this.targetFolderHint = "";
         this.importedAtEpochMs = 0L;
         this.importDedupeKey = "";
+        this.connectKey = "";
     }
 
     public CaltopoProfileRecord(
@@ -158,6 +162,7 @@ class CaltopoProfileRecord {
         this.targetFolderHint = targetFolderHint;
         this.importedAtEpochMs = importedAtEpochMs;
         this.importDedupeKey = importDedupeKey;
+        this.connectKey = "";
     }
 }
 
@@ -168,6 +173,7 @@ class MutualAidTemplateRecord {
     public String domainAndPort;
     public String sourceLabel;
     public String targetFolderHint;
+    public String connectKey;
 
     public MutualAidTemplateRecord() {
         this.teamId = "";
@@ -176,6 +182,7 @@ class MutualAidTemplateRecord {
         this.domainAndPort = "caltopo.com";
         this.sourceLabel = "";
         this.targetFolderHint = "MAI";
+        this.connectKey = "";
     }
 
     public MutualAidTemplateRecord(
@@ -192,6 +199,7 @@ class MutualAidTemplateRecord {
         this.domainAndPort = domainAndPort;
         this.sourceLabel = sourceLabel;
         this.targetFolderHint = targetFolderHint;
+        this.connectKey = "";
     }
 }
 
@@ -203,6 +211,7 @@ class ClientClassState {
     public String archivePath;
     public String caltopoTrackFolder;
     public String caltopoDomainAndPort;
+    public String caltopoConnectKey;
     public CaltopoCredentials caltopoCredentials;
     public String caltopoCredentialOrigin;
     public long newTrackDelayInSeconds;
@@ -261,6 +270,7 @@ class ClientClassState {
         caltopoCredentials = new CaltopoCredentials();
         caltopoCredentialOrigin = CaltopoClient.CALTOPO_CREDENTIAL_ORIGIN_UNKNOWN;
         caltopoDomainAndPort = "caltopo.com";
+        caltopoConnectKey = "";
         usePeersFlag = true;
         standaloneR2cCoordinationEnabled = false;
         newTrackDelayInSeconds = 30;
@@ -1046,9 +1056,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
             try {
                 if (null != type && null != tag) {
-                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("ddLLLHHmmss.SSS");
+                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern(
+                            "ddLLLHHmmss.SSS z XXX", Locale.US);
                     msg = String.format(Locale.US, "%s %s: %s %s\n  ", type,
-                            LocalDateTime.now().format(formatter), tag, msg);
+                            ZonedDateTime.now().format(formatter), tag, msg);
                 }
                 byte[] bytes = msg.getBytes();
                 BytesWrittenToDebugOutputStream += bytes.length;
@@ -1222,6 +1233,29 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             return profile.trackFolder;
         }
         return ccs.caltopoTrackFolder;
+    }
+
+    @NonNull
+    public static String GetConnectKey() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null && profile.connectKey != null) {
+            return profile.connectKey;
+        }
+        return ccs.caltopoConnectKey != null ? ccs.caltopoConnectKey : "";
+    }
+
+    public static void SetConnectKey(@NonNull String value) {
+        String trimmed = value.trim();
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (trimmed.equals(ccs.caltopoConnectKey)) return;
+        ccs.caltopoConnectKey = trimmed;
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null) profile.connectKey = trimmed;
+        NotifySettingsChanged();
+        ArchiveState("CalTopo Connect Key changed");
     }
 
     /**
@@ -1462,6 +1496,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ccs.caltopoCredentials = profile.credentials;
         ccs.caltopoDomainAndPort = profile.domainAndPort;
         ccs.caltopoTrackFolder = profile.trackFolder;
+        ccs.caltopoConnectKey = profile.connectKey != null ? profile.connectKey : "";
         ccs.incident = profile.incident;
         ccs.opPeriod = profile.opPeriod;
         ccs.trackerApiKey = profile.trackerApiKey;
@@ -1938,6 +1973,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     @NonNull
+    public static String GetMutualAidTemplateConnectKey() {
+        String value = GetMutualAidTemplate().connectKey;
+        return value != null ? value : "";
+    }
+
+    @NonNull
     public static String GetHomeOrgName() {
         ClientClassState ccs = GetState();
         ensureProfileStateFresh(ccs, false);
@@ -2164,14 +2205,31 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             @NonNull String sourceLabel,
             @NonNull String targetFolderHint
     ) {
-        SetMutualAidTemplate(new MutualAidTemplateRecord(
+        SetMutualAidTemplateFields(
+                teamId, credentialId, credentialSecret, domainAndPort,
+                sourceLabel, targetFolderHint, ""
+        );
+    }
+
+    public static void SetMutualAidTemplateFields(
+            @NonNull String teamId,
+            @NonNull String credentialId,
+            @NonNull String credentialSecret,
+            @NonNull String domainAndPort,
+            @NonNull String sourceLabel,
+            @NonNull String targetFolderHint,
+            @NonNull String connectKey
+    ) {
+        MutualAidTemplateRecord template = new MutualAidTemplateRecord(
                 teamId,
                 credentialId,
                 credentialSecret,
                 domainAndPort,
                 sourceLabel,
                 targetFolderHint
-        ));
+        );
+        template.connectKey = connectKey.trim();
+        SetMutualAidTemplate(template);
     }
 
     public static String GetCaltopoDomainAndPort() {
@@ -2254,6 +2312,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String credentialId = json.optString("credential_id");
         String credentialSecret = json.optString("credential_secret");
         String domainAndPort = json.optString("domain_and_port");
+        String connectKey = json.optString("connect_key");
         String trackFolder = json.optString("track_folder");
         String incident = json.optString("incident");
         String opPeriod = json.optString("op_period");
@@ -2284,6 +2343,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!trackerUrlPfx.isEmpty()) SetTrackerUrlPfx(trackerUrlPfx);
         if (!trackerFaaProxyUrl.isEmpty()) SetTrackerFaaProxyUrl(trackerFaaProxyUrl);
         if (!domainAndPort.isEmpty()) SetCaltopoDomainAndPort(domainAndPort);
+        if (!connectKey.isEmpty()) SetConnectKey(connectKey);
         if (hasUsePeers) SetUsePeers(usePeers);
         SetPredictiveHeadEnabled(predictiveHeadEnabled);
         SetProximityAlertSpacingFeet(proximityAlertSpacingFeet);
@@ -2317,6 +2377,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String domainAndPort = json.optString("domain_and_port", GetCaltopoDomainAndPort());
         String sourceLabel = json.optString("source_label", json.optString("org_name"));
         String targetFolderHint = json.optString("target_folder_hint", "MAI");
+        String connectKey = json.optString("connect_key");
         MutualAidTemplateRecord template = new MutualAidTemplateRecord(
                 teamId,
                 credentialId,
@@ -2325,6 +2386,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 sourceLabel,
                 targetFolderHint
         );
+        template.connectKey = connectKey;
         if (!CaltopoCredentials.sniffTest(
                 new CaltopoCredentials(template.teamId, template.credentialId, template.credentialSecret)
         )) {
@@ -2534,6 +2596,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
             if (ccs.caltopoDomainAndPort != null && !ccs.caltopoDomainAndPort.isEmpty())
                 credentials.put("domain_and_port", ccs.caltopoDomainAndPort);
+            if (ccs.caltopoConnectKey != null && !ccs.caltopoConnectKey.isEmpty())
+                credentials.put("connect_key", ccs.caltopoConnectKey);
             if (ccs.caltopoTrackFolder != null && !ccs.caltopoTrackFolder.isEmpty())
                 credentials.put("track_folder", ccs.caltopoTrackFolder);
             if (ccs.incident != null && !ccs.incident.isEmpty())
@@ -2562,6 +2626,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     ((template.teamId != null && !template.teamId.isEmpty()) ||
                      (template.credentialId != null && !template.credentialId.isEmpty()) ||
                      (template.credentialSecret != null && !template.credentialSecret.isEmpty()) ||
+                     (template.connectKey != null && !template.connectKey.isEmpty()) ||
                      (template.sourceLabel != null && !template.sourceLabel.isEmpty()) ||
                      (template.targetFolderHint != null && !template.targetFolderHint.isEmpty()))) {
                 JSONObject mutualAidCredentials = new JSONObject();
@@ -2575,6 +2640,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     mutualAidCredentials.put("credential_secret", template.credentialSecret);
                 if (template.domainAndPort != null && !template.domainAndPort.isEmpty())
                     mutualAidCredentials.put("domain_and_port", template.domainAndPort);
+                if (template.connectKey != null && !template.connectKey.isEmpty())
+                    mutualAidCredentials.put("connect_key", template.connectKey);
                 if (template.sourceLabel != null && !template.sourceLabel.isEmpty())
                     mutualAidCredentials.put("source_label", template.sourceLabel);
                 if (template.targetFolderHint != null && !template.targetFolderHint.isEmpty())
@@ -3789,7 +3856,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     static String BuildDebugLogFilename(long startTimeInMsec) {
-        return "Log_" + TimeDatestampString(startTimeInMsec) + ".txt";
+        return OperatorArchiveFilename.log(startTimeInMsec);
     }
 
     public static void SetArchiveUri(@NonNull Uri pathUri) {
@@ -3921,6 +3988,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             AppExitRequested = true;
         }
         Context context = R2CApplication.getAppCtxt();
+
+        // Stop process-owned offline preparation before the activity becomes cached.
+        MapOfflinePrepRuntime.cancelActive();
 
         // 1. Stop the Scanning Service
         ScanningService.requestStop(context);

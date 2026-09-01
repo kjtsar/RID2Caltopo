@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import android.location.Location
+import org.ncssar.rid2caltopo.video.MapOfflinePrepRuntime
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.Calendar
@@ -118,6 +119,7 @@ class CaltopoMapTest {
         standaloneStartedField.setBoolean(null, false)
         standaloneEnabledForActiveFlightsField.set(null, null)
         appExitRequestedField.setBoolean(null, false)
+        MapOfflinePrepRuntime.resetForTesting()
         CaltopoMap.resetAutoQuitRelocationForTesting()
     }
 
@@ -140,6 +142,7 @@ class CaltopoMapTest {
         CaltopoClient.SetTrackerUrlPfx(originalTrackerUrlPfx)
         lastWaypointTimestampField.setLong(null, originalLastWaypointTimestamp)
         appExitRequestedField.setBoolean(null, originalAppExitRequested)
+        MapOfflinePrepRuntime.resetForTesting()
         CaltopoMap.resetAutoQuitRelocationForTesting()
         clientStateField.set(null, originalClientState)
         R2cRuntimeRegistry.resetDefaultRuntimeForTesting()
@@ -386,6 +389,33 @@ class CaltopoMapTest {
     }
 
     @Test
+    fun screenOffFlightProtection_preservesAnchorUntilTwoHourFallback() {
+        var nowMs = 1_000_000_000L
+        var disconnectCount = 0
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        CaltopoMap.setQuitHandlerForTesting { disconnectCount++ }
+        setLastWaypointTimestamp(nowMs - 1L)
+        CaltopoMap.MyLocation = Location("screen-off").apply {
+            latitude = 39.153000
+            longitude = -121.132000
+            accuracy = 5.0f
+        }
+
+        CaltopoMap.BeginIncidentDisplayInactive()
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153000, -121.132000, 5.0f)
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
+
+        assertEquals(0, disconnectCount)
+        assertTrue(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+
+        nowMs += 120L * 60L * 1000L + 1L
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
+
+        assertEquals(1, disconnectCount)
+        assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
     fun updateMyLocation_doesNotQuitWhenDroneIsActive() {
         val nowMs = 1_000_000_000L
         var quitCount = 0
@@ -399,6 +429,62 @@ class CaltopoMapTest {
 
         assertEquals(0, quitCount)
         assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
+    fun updateMyLocation_doesNotQuitWhileOfflineMapDownloadIsActive() {
+        val nowMs = 1_000_000_000L
+        var quitCount = 0
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        CaltopoMap.setQuitHandlerForTesting { quitCount++ }
+        setLastWaypointTimestamp(nowMs - FIVE_MINUTES_MS - 1L)
+        MapOfflinePrepRuntime.begin { _ -> }
+
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153000, -121.132000, 5.0f)
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
+
+        assertEquals(0, quitCount)
+        assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
+    fun updateMyLocation_doesNotDisconnectWhileCoordinationHasOperationalWork() {
+        val nowMs = 1_000_000_000L
+        var disconnectCount = 0
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        CaltopoMap.setQuitHandlerForTesting { disconnectCount++ }
+        setLastWaypointTimestamp(nowMs - FIVE_MINUTES_MS - 1L)
+        (fixture.peerCoordinator as FakePeerCoordinator)
+            .setOperationalActivityPreventingMapDisconnect(true)
+
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153000, -121.132000, 5.0f)
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
+
+        assertEquals(0, disconnectCount)
+        assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
+    fun inactiveIncidentMapDisconnect_entersStandaloneCoordination() {
+        val nowMs = 1_000_000_000L
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        setLastWaypointTimestamp(0L)
+        CaltopoClient.SetTrackerApiKey("tracker-key")
+        CaltopoClient.SetTrackerUrlPfx("https://tracker.example/org")
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(true)
+        CaltopoMap.MyLocation = Location("cached").apply {
+            latitude = 39.153062
+            longitude = -121.132960
+            accuracy = 5.0f
+        }
+
+        assertTrue(CaltopoMap.DisconnectIncidentMapIfInactive("display inactive"))
+
+        assertEquals(CaltopoMap.MapStatusListener.mapStatus.down, CaltopoMap.GetMapStatus())
+        assertEquals(null, CaltopoMap.GetMapNode())
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertTrue(peerCoordinator.isStarted())
+        assertEquals(CaltopoClient.GetTrackerCoordinationScopeId(), peerCoordinator.startedMapId)
     }
 
     @Test

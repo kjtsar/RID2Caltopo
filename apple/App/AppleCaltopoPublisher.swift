@@ -18,6 +18,7 @@ struct AppleArchivedCaltopoTrack: Sendable {
 }
 
 actor AppleCaltopoPublisher {
+    private static let staleDeviceMarkerAge: TimeInterval = 180
     nonisolated let events: AsyncStream<AppleCaltopoPublisherEvent>
     private nonisolated let continuation: AsyncStream<AppleCaltopoPublisherEvent>.Continuation
     private var client: CaltopoLiveClient?
@@ -131,6 +132,7 @@ actor AppleCaltopoPublisher {
             pendingInterruptedRecoveries = await interruptedJournal.entries(mapID: configuration.mapID)
             do {
                 try await ensureFolders(client: configuredClient)
+                await removeStaleR2CDeviceMarkers(client: configuredClient)
                 await recoverInterruptedPublications(client: configuredClient)
             } catch {
                 AppleLog.warning(
@@ -261,6 +263,32 @@ actor AppleCaltopoPublisher {
             "CalTopo",
             "Local device marker id=\(normalizedID) remained after \(maximumAttempts) delete attempts"
         )
+    }
+
+    private func removeStaleR2CDeviceMarkers(client: CaltopoLiveClient, now: Date = Date()) async {
+        do {
+            let snapshot = try await client.fetchMapArtifacts(now: now)
+            let staleIDs = snapshot.staleR2CDeviceMarkerIDs(
+                now: now,
+                staleAfter: Self.staleDeviceMarkerAge
+            )
+            for markerID in staleIDs {
+                do {
+                    try await client.deleteMarker(markerID: markerID, now: now)
+                    AppleLog.info("CalTopo", "Removed stale R2C device marker id=\(markerID)")
+                } catch {
+                    AppleLog.warning(
+                        "CalTopo",
+                        "Could not remove stale R2C device marker id=\(markerID): \(error.localizedDescription)"
+                    )
+                }
+            }
+        } catch {
+            AppleLog.warning(
+                "CalTopo",
+                "Could not inspect map for stale R2C device markers: \(error.localizedDescription)"
+            )
+        }
     }
 
     func publish(track: RidAircraftTrack) async {

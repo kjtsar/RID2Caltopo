@@ -13860,11 +13860,11 @@ static void test_detector_facade_runtime_budget_local_playback_target_interval_m
                    40, 45, 30, 5, 1000, 250) == 45,
            "runtime budget local playback target: reasonable pts interval overrides nominal");
     EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
-                   40, 10, 30, 5, 1000, 250) == 40,
-           "runtime budget local playback target: too-fast pts interval keeps nominal");
+                   40, 10, 30, 5, 1000, 250) == 10,
+           "runtime budget local playback target: bounded fast pts interval preserves source cadence");
     EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
-                   40, 90, 30, 5, 1000, 250) == 40,
-           "runtime budget local playback target: too-slow pts interval keeps nominal");
+                   40, 90, 30, 5, 1000, 250) == 90,
+           "runtime budget local playback target: bounded slow pts interval preserves source cadence");
     EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
                    0, 45, 30, 5, 1000, 250) == 45,
            "runtime budget local playback target: missing nominal uses positive pts interval");

@@ -102,7 +102,7 @@ website if your team is using that tool to keep track of flights:
     "credential_secret" : "this is where you enter your credential secret",
     "map_id" : "AH2JKLM",
     "use_direct_flag" : true,
-    "group_id" : "mySAR",
+    "connect_key" : "CalTopo-generated Connect Key",
     "track_folder" : "DroneTracks",
     "tracker_url_prefix" : "https://tracker.kjt.us",
     "tracker_api_key" : "SecretTokenToAuthenticateSubmission"
@@ -116,6 +116,8 @@ legacy `tracker_url_pfx` key is still accepted for backward compatibility.
 
 The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the
 CalTopo Teams API credential. Map selection remains in each app.
+The optional _connect_key_ selects the CalTopo Shared Locations namespace used
+for position reports.
 
 Managed organizations distribute an `R2C2` configuration containing team
 settings, RID mappings, and a signed r2c-tracker enrollment locator. Android or
@@ -140,6 +142,7 @@ tuple for that account.  Enter those values as follows into your ma_config.json 
   "team_id": "ma team id",
   "credential_id": "ma credential id",
   "credential_secret": "ma credential secret",
+  "connect_key": "CalTopo-generated Connect Key",
   "domain_and_port": "caltopo.com",
   "source_label": "NASAR Mutual Aid",
   "target_folder_hint": "DroneMA"

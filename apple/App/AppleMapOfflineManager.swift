@@ -85,6 +85,8 @@ struct AppleCachedMapTileSelection: Identifiable {
 
 @MainActor
 final class AppleMapOfflineManager: ObservableObject {
+    static let shared = AppleMapOfflineManager()
+
     private struct DEMDownload: Hashable {
         let url: URL
         let fileName: String
@@ -131,12 +133,24 @@ final class AppleMapOfflineManager: ObservableObject {
     @Published private(set) var cacheStats = CacheStats()
     @Published private(set) var status = "Ready"
     @Published private(set) var isRunning = false
+    @Published private(set) var activeSelectionDescription = ""
     @Published var maximumCacheGB: Double
     @Published var maximumTileAgeDays: Int
     @Published var autoRemoveBadTiles: Bool
 
     private let defaults: UserDefaults
     private var downloadTask: Task<Void, Never>?
+
+    var downloadMenuStatus: String? {
+        Self.downloadMenuStatus(isRunning: isRunning, progress: progress)
+    }
+
+    nonisolated static func downloadMenuStatus(isRunning: Bool, progress: ProgressState) -> String? {
+        guard isRunning else { return nil }
+        guard progress.total > 0 else { return progress.phase }
+        let percent = Int((progress.fraction * 100).rounded(.down))
+        return "\(percent)%"
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -178,7 +192,8 @@ final class AppleMapOfflineManager: ObservableObject {
         baseLayer: OperationalMapBaseLayer,
         includeContours: Bool,
         includeDEM: Bool,
-        demResolution: OperationalDEMResolution = .standard30m
+        demResolution: OperationalDEMResolution = .standard30m,
+        selectionDescription: String = "Selected map area"
     ) {
         guard !isRunning else { return }
         guard let tiles = OperationalOfflineMapPlanner.tiles(
@@ -193,6 +208,7 @@ final class AppleMapOfflineManager: ObservableObject {
             ? OperationalOfflineMapPlanner.estimatedDEMTileCount(bounds: bounds, resolution: demResolution)
             : 0
         isRunning = true
+        activeSelectionDescription = selectionDescription
         let tileOperationCount = tiles.count * (includeContours ? 2 : 1)
         let operationCount = tileOperationCount + estimatedDEMCount
         progress = ProgressState(
@@ -412,7 +428,7 @@ final class AppleMapOfflineManager: ObservableObject {
         do {
             var request = URLRequest(url: url)
             request.timeoutInterval = 20
-            request.setValue("RID2Caltopo/Apple (contact: kjtsar@kjt.us)", forHTTPHeaderField: "User-Agent")
+            request.setValue("RID2Caltopo/Apple (contact: kjt@uas4sar.com)", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200, Self.dataIsUsableTile(data) else {
                 recordBadTile(data)
@@ -677,6 +693,27 @@ struct AppleOfflineMapPreparationView: View {
         )
     }
 
+    private var selectionDescription: String {
+        let area = boundaries.first(where: { $0.id == selectedBoundaryID })?.title ?? "Current visible map"
+        let contents = [
+            includeContours ? "contours" : nil,
+            includeDEM ? "DEM \(demResolution.label)" : nil,
+        ].compactMap { $0 }.joined(separator: ", ")
+        return "\(area) · \(preset.label)" + (contents.isEmpty ? "" : " · \(contents)")
+    }
+
+    private var tileProgressText: String {
+        let progress = manager.progress
+        return "Tiles: \(progress.tileCompleted)/\(progress.tileTotal) "
+            + "(hit=\(progress.tileCacheHits) fetched=\(progress.tileDownloaded) failed=\(progress.tileFailed))"
+    }
+
+    private var demProgressText: String {
+        let progress = manager.progress
+        return "DEM: \(progress.demCompleted)/\(progress.demTotal) "
+            + "(hit=\(progress.demCacheHits) fetched=\(progress.demDownloaded) failed=\(progress.demFailed))"
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -689,6 +726,7 @@ struct AppleOfflineMapPreparationView: View {
                         ForEach(OperationalOfflinePreset.all) { Text($0.label).tag($0) }
                     }
                 }
+                .disabled(manager.isRunning)
                 Section("Contents") {
                     Toggle("Include contour tiles", isOn: $includeContours)
                     Toggle("Include DEM tiles", isOn: $includeDEM)
@@ -709,8 +747,14 @@ struct AppleOfflineMapPreparationView: View {
                     Text("The estimate is conservative. One-metre availability is resolved from the USGS catalog when preparation starts.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+                .disabled(manager.isRunning)
                 if manager.isRunning || manager.progress.phase != "Idle" {
                     Section("Progress") {
+                        if !manager.activeSelectionDescription.isEmpty {
+                            Text(manager.activeSelectionDescription)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                         let percent = manager.progress.fraction * 100
                         Text("\(percent, specifier: "%.0f")% complete")
                             .font(.title3)
@@ -725,20 +769,10 @@ struct AppleOfflineMapPreparationView: View {
                             AppleMapOfflineManager.formatDuration(manager.progress.etaSeconds)
                         ))
                         .font(.caption.monospaced())
-                        Text(
-                            "Tiles: \(manager.progress.tileCompleted)/\(manager.progress.tileTotal) "
-                                + "(hit=\(manager.progress.tileCacheHits) "
-                                + "fetched=\(manager.progress.tileDownloaded) "
-                                + "failed=\(manager.progress.tileFailed))"
-                        )
+                        Text(tileProgressText)
                         .font(.caption.monospaced())
                         if manager.progress.demTotal > 0 {
-                            Text(
-                                "DEM: \(manager.progress.demCompleted)/\(manager.progress.demTotal) "
-                                    + "(hit=\(manager.progress.demCacheHits) "
-                                    + "fetched=\(manager.progress.demDownloaded) "
-                                    + "failed=\(manager.progress.demFailed))"
-                            )
+                            Text(demProgressText)
                             .font(.caption.monospaced())
                         }
                         if manager.progress.failed > 0 {
@@ -753,23 +787,28 @@ struct AppleOfflineMapPreparationView: View {
             .navigationTitle("Download Map")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { if manager.isRunning { manager.cancel() } else { dismiss() } }
+                    Button("Close") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Start") {
-                        manager.start(
-                            bounds: bounds,
-                            preset: preset,
-                            baseLayer: baseLayer,
-                            includeContours: includeContours,
-                            includeDEM: includeDEM,
-                            demResolution: demResolution
-                        )
+                    if manager.isRunning {
+                        Button("Cancel", role: .destructive) {
+                            manager.cancel()
+                        }
+                    } else {
+                        Button("Start") {
+                            manager.start(
+                                bounds: bounds,
+                                preset: preset,
+                                baseLayer: baseLayer,
+                                includeContours: includeContours,
+                                includeDEM: includeDEM,
+                                demResolution: demResolution,
+                                selectionDescription: selectionDescription
+                            )
+                        }
+                        .disabled(estimate.tiles > 250_000
+                            || estimate.bytes > Int64(manager.maximumCacheGB * 1_000_000_000))
                     }
-                    .disabled(
-                        manager.isRunning || estimate.tiles > 250_000
-                            || estimate.bytes > Int64(manager.maximumCacheGB * 1_000_000_000)
-                    )
                 }
             }
         }

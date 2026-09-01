@@ -189,6 +189,11 @@ struct ContentView: View {
     @State private var trackerReauthenticationBrowserOpen = false
     @State private var trackerReauthenticationURL: URL?
     @State private var showTrackerReauthenticationPrompt = false
+    @State private var incidentMapConnectedAt = Date()
+    @State private var incidentMapBackgroundedAt: Date?
+    @State private var incidentMapBackgroundFlightProtectedUntil: Date?
+    @State private var incidentMapBackgroundDisconnectTask: Task<Void, Never>?
+    @State private var incidentMapRelocationGuard = IncidentMapRelocationGuard()
     @AppStorage("video.captureStreams") private var captureStreams = false
 
     private var startupRoot: some View {
@@ -608,9 +613,15 @@ struct ContentView: View {
                     try? await bluetoothScanner.start()
                 }
                 ridTracks.configurePublicationSuppression(droneConfirmations.isIgnored)
-                ridTracks.configurePairedVideoActivity {
-                    streamRegistry.flightActivityByAircraftID()
-                }
+                ridTracks.configurePairedVideoActivity(
+                    { streamRegistry.flightActivityByAircraftID() },
+                    validatedSEIPositionProvider: { tracks, date in
+                        streamRegistry.freshValidatedDJIPositionByAircraftID(
+                            tracks: tracks,
+                            at: date
+                        )
+                    }
+                )
                 ridTracks.bind(to: bluetoothScanner.observations, sourceID: "bluetooth")
                 ridTracks.bindAircraftMessages(
                     to: bluetoothScanner.aircraftMessages,
@@ -953,6 +964,7 @@ struct ContentView: View {
             .onChange(of: locationProvider.lastLocation?.timestamp) { _, _ in
                 peerCoordinator.updatePosition(locationProvider.lastLocation)
                 publishLocalDeviceMarker()
+                evaluateIncidentMapRelocation()
             }
             .onChange(of: networkDiagnostics.currentSnapshotID) { _, _ in
                 refreshControllerRTMPURL()
@@ -962,6 +974,7 @@ struct ContentView: View {
                 updateIdleTimerPolicy(for: phase)
                 switch phase {
                 case .active:
+                    handleIncidentMapBecameActive()
                     if trackerReauthenticationBrowserOpen,
                        trackerReauthenticationURL != nil {
                         showTrackerReauthenticationPrompt = true
@@ -974,6 +987,7 @@ struct ContentView: View {
                     }
                 case .background:
                     removeLocalDeviceMarkerInBackground()
+                    scheduleIncidentMapBackgroundDisconnect()
                 case .inactive:
                     break
                 @unknown default:
@@ -986,6 +1000,19 @@ struct ContentView: View {
                 if showing {
                     mediaMTX.ensureHealthy(captureStreams: captureStreams)
                 }
+            }
+            .onChange(of: caltopoSettings.mapID, initial: true) { oldMapID, newMapID in
+                if oldMapID != newMapID || !newMapID.isEmpty {
+                    incidentMapConnectedAt = Date()
+                    incidentMapRelocationGuard.reset()
+                }
+                if newMapID.isEmpty {
+                    incidentMapBackgroundDisconnectTask?.cancel()
+                    incidentMapBackgroundDisconnectTask = nil
+                    incidentMapBackgroundedAt = nil
+                    incidentMapBackgroundFlightProtectedUntil = nil
+                }
+                locationProvider.setIncidentMapBackgroundMonitoringEnabled(!newMapID.isEmpty)
             }
     }
 
@@ -1933,6 +1960,108 @@ struct ContentView: View {
         clueStore.configure(configuration, trackFolderName: orgConfigSettings.trackFolder)
         configurePeerCoordinator()
         configureTrackArchive()
+    }
+
+    private func incidentMapOperationalState() -> IncidentMapOperationalState {
+        IncidentMapOperationalState(
+            connectedToIncidentMap: !caltopoSettings.mapID
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            activeFlightCount: ridTracks.tracks.count,
+            lastRIDMessageAt: ridTracks.lastRIDMessageAt,
+            mapConnectedAt: incidentMapConnectedAt,
+            hasManagedVideoOrTransfer:
+                peerCoordinator.hasOperationalActivityPreventingIncidentDisconnect
+                || !streamRegistry.activePublisherStreamIDs.isEmpty,
+            offlineMapPreparationActive: AppleMapOfflineManager.shared.isRunning,
+            backgroundFlightProtectedUntil: incidentMapBackgroundFlightProtectedUntil
+        )
+    }
+
+    private func evaluateIncidentMapRelocation(now: Date = Date()) {
+        guard let location = locationProvider.lastLocation else {
+            incidentMapRelocationGuard.reset()
+            return
+        }
+        let shouldDisconnect = incidentMapRelocationGuard.evaluate(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            horizontalAccuracyMeters: location.horizontalAccuracy,
+            operationalState: incidentMapOperationalState(),
+            now: now
+        )
+        guard shouldDisconnect else { return }
+        disconnectInactiveIncidentMap(reason: "relocation", now: now)
+    }
+
+    private func scheduleIncidentMapBackgroundDisconnect(now: Date = Date()) {
+        incidentMapBackgroundedAt = now
+        if let location = locationProvider.lastLocation {
+            incidentMapRelocationGuard.arm(
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude,
+                horizontalAccuracyMeters: location.horizontalAccuracy
+            )
+        }
+        let lastRIDIsRecent = ridTracks.lastRIDMessageAt.map {
+            now.timeIntervalSince($0) < IncidentMapAutoDisconnectPolicy.quietInterval
+        } ?? false
+        if !ridTracks.tracks.isEmpty || lastRIDIsRecent {
+            incidentMapBackgroundFlightProtectedUntil = now.addingTimeInterval(
+                IncidentMapAutoDisconnectPolicy.backgroundFlightProtectionInterval
+            )
+            AppleLog.info(
+                "Lifecycle",
+                "Display inactive during active/recent flight; incident map protected for up to 120 minutes"
+            )
+        } else {
+            incidentMapBackgroundFlightProtectedUntil = nil
+        }
+        incidentMapBackgroundDisconnectTask?.cancel()
+        incidentMapBackgroundDisconnectTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(
+                IncidentMapAutoDisconnectPolicy.backgroundGraceInterval
+            ))
+            while !Task.isCancelled, !caltopoSettings.mapID.isEmpty {
+                if disconnectInactiveIncidentMap(reason: "display inactive") { break }
+                try? await Task.sleep(for: .seconds(60))
+            }
+            incidentMapBackgroundDisconnectTask = nil
+        }
+    }
+
+    private func handleIncidentMapBecameActive(now: Date = Date()) {
+        let backgroundedAt = incidentMapBackgroundedAt
+        incidentMapBackgroundDisconnectTask?.cancel()
+        incidentMapBackgroundDisconnectTask = nil
+        incidentMapBackgroundedAt = nil
+        incidentMapBackgroundFlightProtectedUntil = nil
+        if let backgroundedAt,
+           now.timeIntervalSince(backgroundedAt)
+            >= IncidentMapAutoDisconnectPolicy.backgroundGraceInterval {
+            disconnectInactiveIncidentMap(reason: "display inactive", now: now)
+        }
+    }
+
+    @discardableResult
+    private func disconnectInactiveIncidentMap(reason: String, now: Date = Date()) -> Bool {
+        guard IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
+            incidentMapOperationalState(),
+            now: now
+        ) else {
+            AppleLog.info(
+                "Lifecycle",
+                "Incident map retained for \(reason); active or recent operational work is present"
+            )
+            return false
+        }
+        let mapID = caltopoSettings.mapID
+        AppleLog.warning(
+            "Lifecycle",
+            "Leaving incident map id=\(mapID) reason=\(reason); standalone tracker standby will follow"
+        )
+        incidentMapRelocationGuard.reset()
+        applyCaltopoConfiguration(caltopoSettings.disconnectMap())
+        return true
     }
 
     private var closestPair: RidPairSeparation? {

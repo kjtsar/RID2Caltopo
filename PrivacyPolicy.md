@@ -87,4 +87,4 @@ of data deliberately sent to those services.
 ## Contact
 
 Questions about this policy or deletion of a diagnostic bundle can be sent to
-[kjtsar@kjt.us](mailto:kjtsar@kjt.us).
+[kjt@uas4sar.com](mailto:kjt@uas4sar.com).

@@ -75,6 +75,7 @@ import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.data.OrgConfigToken
 import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
 import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
@@ -785,7 +786,7 @@ class R2CActivity :
 
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/zip"
-            putExtra(Intent.EXTRA_EMAIL, arrayOf("kjtsar@kjt.us"))
+            putExtra(Intent.EXTRA_EMAIL, arrayOf("kjt@uas4sar.com"))
             putExtra(
                 Intent.EXTRA_SUBJECT,
                 "RID2Caltopo Diagnostics $dateTag (${selectedDirCount} day${if (selectedDirCount == 1) "" else "s"}, ${logFileCount} log${if (logFileCount == 1) "" else "s"}, ${trackFileCount} track${if (trackFileCount == 1) "" else "s"})"
@@ -901,6 +902,7 @@ class R2CActivity :
 
     override fun onResume() {
         super.onResume()
+        ScanningService.setDisplayActive(applicationContext, true, externalDisplayConnected)
         val retryTrackerReauthentication = shouldRetryTrackerReauthenticationAfterBrowserReturn(
             browserWasOpen = trackerReauthenticationBrowserOpen,
             pendingUrl = pendingTrackerReauthenticationUrl,
@@ -918,6 +920,11 @@ class R2CActivity :
         }
         reloadExternalDisplayConfig()
         refreshBluetoothDisabledState("resume")
+    }
+
+    override fun onStop() {
+        ScanningService.setDisplayActive(applicationContext, false, externalDisplayConnected)
+        super.onStop()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1061,7 +1068,18 @@ class R2CActivity :
                         } else {
                             emptySet()
                         }
-                        streamsViewModel.setManagedVideoPreviewSources(previewDesignators)
+                        val caltopoDesignators = streams.values
+                            .asSequence()
+                            .filter {
+                                it.state == org.ncssar.rid2caltopo.video.StreamState.LIVE &&
+                                    !it.isLocalPlayback &&
+                                    CaltopoLiveTrack.HasActiveLocalTrackForMappedId(it.designator)
+                            }
+                            .map { it.designator }
+                            .toSet()
+                        val thumbnailRefreshDesignators =
+                            (previewDesignators + caltopoDesignators).take(4).toSet()
+                        streamsViewModel.setManagedVideoPreviewSources(thumbnailRefreshDesignators)
                         val recordings = ManagedVideoSessionRecordingCatalog.snapshot(
                             applicationContext
                         )
@@ -1072,19 +1090,17 @@ class R2CActivity :
                             recordings,
                             ManagedVideoThumbnailStore::get,
                         )
-                        if (activeRemoteVideoRequest == null) {
-                            refreshManagedVideoThumbnails(
-                                advertisements,
-                                force = forcePreviewRefresh,
-                            )
-                            advertisements = ManagedVideoStreamPresence.snapshot(
-                                streams,
-                                streamsViewModel::managedVideoSourceInfo,
-                                streamsViewModel::hasRecentManagedVideoFrame,
-                                recordings,
-                                ManagedVideoThumbnailStore::get,
-                            )
-                        }
+                        refreshManagedVideoThumbnails(
+                            advertisements,
+                            forceDesignators = thumbnailRefreshDesignators,
+                        )
+                        advertisements = ManagedVideoStreamPresence.snapshot(
+                            streams,
+                            streamsViewModel::managedVideoSourceInfo,
+                            streamsViewModel::hasRecentManagedVideoFrame,
+                            recordings,
+                            ManagedVideoThumbnailStore::get,
+                        )
                         peerCoordinator.updateManagedVideoStreams(
                             CaltopoClient.GetIncident(),
                             advertisements,
@@ -2279,12 +2295,16 @@ class R2CActivity :
 
     private suspend fun refreshManagedVideoThumbnails(
         advertisements: List<ManagedVideoStreamAdvertisement>,
-        force: Boolean = false,
+        forceDesignators: Set<String> = emptySet(),
     ) {
         for (advertisement in advertisements.take(8)) {
+            val force = advertisement.mediaKind == "live" &&
+                forceDesignators.any {
+                    it.equals(advertisement.droneDesignator, ignoreCase = true)
+                }
             if (
                 ManagedVideoThumbnailStore.get(advertisement.sessionId) != null &&
-                (!force || advertisement.mediaKind != "live")
+                !force
             ) continue
             val recording = if (advertisement.mediaKind == "recording") {
                 ManagedVideoSessionRecordingCatalog.find(

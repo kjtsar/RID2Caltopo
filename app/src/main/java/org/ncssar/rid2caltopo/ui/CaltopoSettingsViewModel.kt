@@ -105,6 +105,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     val caltopoCredentialId = _caltopoCredentialId.asStateFlow()
     private val _caltopoCredentialSecret = MutableStateFlow(initialCaltopoCredentials.credentialSecret ?: "")
     val caltopoCredentialSecret = _caltopoCredentialSecret.asStateFlow()
+    private val _caltopoConnectKey = MutableStateFlow(CaltopoClient.GetConnectKey())
+    val caltopoConnectKey = _caltopoConnectKey.asStateFlow()
     private val _caltopoCredentialError = MutableStateFlow<String?>(null)
     val caltopoCredentialError = _caltopoCredentialError.asStateFlow()
 
@@ -126,6 +128,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     val mutualAidSourceLabel = _mutualAidSourceLabel.asStateFlow()
     private val _mutualAidTargetFolder = MutableStateFlow(CaltopoClient.GetMutualAidTemplateTargetFolderHint())
     val mutualAidTargetFolder = _mutualAidTargetFolder.asStateFlow()
+    private val _mutualAidConnectKey = MutableStateFlow(CaltopoClient.GetMutualAidTemplateConnectKey())
+    val mutualAidConnectKey = _mutualAidConnectKey.asStateFlow()
 
     private val _notamEnabled = MutableStateFlow(CaltopoClient.GetNotamEnabled())
     val notamEnabled = _notamEnabled.asStateFlow()
@@ -197,6 +201,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
             _caltopoCredentialId.value = it.credentialId ?: ""
             _caltopoCredentialSecret.value = it.credentialSecret ?: ""
         }
+        _caltopoConnectKey.value = CaltopoClient.GetConnectKey()
         _trackerUrl.value = CaltopoClient.GetHomeTrackerUrlPfx()
         _trackerApiKey.value = CaltopoClient.GetHomeTrackerApiKey()
         _mutualAidTeamId.value = CaltopoClient.GetMutualAidTemplateTeamId()
@@ -205,6 +210,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _mutualAidDomain.value = CaltopoClient.GetMutualAidTemplateDomainAndPort()
         _mutualAidSourceLabel.value = CaltopoClient.GetMutualAidTemplateSourceLabel()
         _mutualAidTargetFolder.value = CaltopoClient.GetMutualAidTemplateTargetFolderHint()
+        _mutualAidConnectKey.value = CaltopoClient.GetMutualAidTemplateConnectKey()
         _notamEnabled.value = CaltopoClient.GetNotamEnabled()
         _notamRadiusNm.value = CaltopoClient.GetNotamRadiusNm().toString()
         _notamRefreshIntervalSeconds.value = CaltopoClient.GetNotamRefreshIntervalSeconds().toString()
@@ -246,6 +252,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _caltopoCredentialSecret.value = value
         _caltopoCredentialError.value = null
     }
+    fun onCaltopoConnectKeyChanged(value: String) { _caltopoConnectKey.value = value }
     fun onTrackerUrlChanged(value: String) {
         _trackerUrl.value = value
         trackerManuallyEdited = true
@@ -260,6 +267,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onMutualAidDomainChanged(value: String) { _mutualAidDomain.value = value }
     fun onMutualAidSourceLabelChanged(value: String) { _mutualAidSourceLabel.value = value }
     fun onMutualAidTargetFolderChanged(value: String) { _mutualAidTargetFolder.value = value }
+    fun onMutualAidConnectKeyChanged(value: String) { _mutualAidConnectKey.value = value }
 
     fun onNewTrackDelayChanged(newDelay: String) {
         _newTrackDelay.value = newDelay
@@ -382,6 +390,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         try {
         val restartMediaMtx = CaltopoClient.GetCaptureVideoStreamsFlag() != _captureIncomingVideo.value
         CaltopoClient.SetHomeOrgName(_organizationName.value.trim())
+        CaltopoClient.SetConnectKey(_caltopoConnectKey.value.trim())
         CaltopoClient.SetTrackFolderName(_trackFolder.value.trim())
         CaltopoClient.SetIncident(_incident.value.trim())
         CaltopoClient.SetOpPeriod(_opPeriod.value.trim())
@@ -408,7 +417,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
             _mutualAidCredentialSecret.value.trim(),
             _mutualAidDomain.value.trim().ifBlank { "caltopo.com" },
             _mutualAidSourceLabel.value.trim(),
-            _mutualAidTargetFolder.value.trim().ifBlank { "MAI" }
+            _mutualAidTargetFolder.value.trim().ifBlank { "MAI" },
+            _mutualAidConnectKey.value.trim()
         )
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
         _newTrackDelay.value.toLongOrNull()?.let { CaltopoClient.SetNewTrackDelayInSeconds(it) }

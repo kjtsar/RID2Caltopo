@@ -131,12 +131,16 @@ public final class TrackerTabletLink {
     public static String thumbnailUrl(
             @Nullable String trackerUrlPrefix,
             @Nullable String tabletName,
-            @Nullable String streamSessionId
+            @Nullable String streamSessionId,
+            @Nullable String thumbnailRevision
     ) {
         String organization = organizationDesignator(trackerUrlPrefix);
         String tablet = normalize(tabletName);
         String sessionId = streamSessionId == null ? "" : streamSessionId.trim();
-        if (organization == null || tablet.isEmpty() || sessionId.isEmpty()) return null;
+        String revision = thumbnailRevision == null ? "" : thumbnailRevision.trim();
+        if (organization == null || tablet.isEmpty() || sessionId.isEmpty() || revision.isEmpty()) {
+            return null;
+        }
         try {
             URI tracker = URI.create(trackerUrlPrefix.trim());
             if (tracker.getScheme() == null || tracker.getRawAuthority() == null) return null;
@@ -144,7 +148,7 @@ public final class TrackerTabletLink {
                     tracker.getScheme(),
                     tracker.getRawAuthority(),
                     "/r2c-thumbnail/" + code(organization, tablet) + "/" + sessionId + ".jpg",
-                    null,
+                    "timestamp=" + revision,
                     null
             ).toASCIIString();
         } catch (Exception ignored) {

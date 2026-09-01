@@ -863,6 +863,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         return false;
     }
 
+    @Override
+    public boolean hasOperationalActivityPreventingMapDisconnect() {
+        return !pendingDrones.isEmpty() ||
+                !ownerByRemoteId.isEmpty() ||
+                !pendingConfirmationsByRemoteId.isEmpty() ||
+                hasLiveManagedVideoStream();
+    }
+
     private boolean shouldSkipIntervalHeartbeat() {
         if (!hasLocalOwnerLease()) return false;
         long lastOwnerActivity = lastOwnerActivityAtMs;

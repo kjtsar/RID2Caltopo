@@ -86,6 +86,7 @@ final class AppleConfigurationTransferManager: ObservableObject {
                 "credential_id": template.credentialID,
                 "credential_secret": template.credentialSecret,
                 "domain_and_port": template.domainAndPort,
+                "connect_key": template.connectKey,
                 "track_folder": organization.trackFolder,
                 "incident": organization.incident,
                 "op_period": organization.operationalPeriod,

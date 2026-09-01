@@ -39,6 +39,7 @@ fun CaltopoSettingsScreen(
     val caltopoTeamId by settingsViewModel.caltopoTeamId.collectAsState()
     val caltopoCredentialId by settingsViewModel.caltopoCredentialId.collectAsState()
     val caltopoCredentialSecret by settingsViewModel.caltopoCredentialSecret.collectAsState()
+    val caltopoConnectKey by settingsViewModel.caltopoConnectKey.collectAsState()
     val caltopoCredentialError by settingsViewModel.caltopoCredentialError.collectAsState()
     val trackerUrl by settingsViewModel.trackerUrl.collectAsState()
     val trackerApiKey by settingsViewModel.trackerApiKey.collectAsState()
@@ -48,6 +49,7 @@ fun CaltopoSettingsScreen(
     val mutualAidDomain by settingsViewModel.mutualAidDomain.collectAsState()
     val mutualAidSourceLabel by settingsViewModel.mutualAidSourceLabel.collectAsState()
     val mutualAidTargetFolder by settingsViewModel.mutualAidTargetFolder.collectAsState()
+    val mutualAidConnectKey by settingsViewModel.mutualAidConnectKey.collectAsState()
     val usePeers by settingsViewModel.usePeers.collectAsState()
     val minDistance by settingsViewModel.minDistance.collectAsState()
     val newTrackDelay by settingsViewModel.newTrackDelay.collectAsState()
@@ -179,6 +181,13 @@ fun CaltopoSettingsScreen(
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth()
                 )
+                OutlinedTextField(
+                    value = caltopoConnectKey,
+                    onValueChange = settingsViewModel::onCaltopoConnectKeyChanged,
+                    label = { Text("Connect Key") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 caltopoCredentialError?.let { error ->
                     Text(
                         text = error,
@@ -268,6 +277,13 @@ fun CaltopoSettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
+                    value = mutualAidConnectKey,
+                    onValueChange = settingsViewModel::onMutualAidConnectKeyChanged,
+                    label = { Text("Connect Key") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
                     value = mutualAidSourceLabel,
                     onValueChange = settingsViewModel::onMutualAidSourceLabelChanged,
                     label = { Text("Source organization label") },
@@ -282,7 +298,7 @@ fun CaltopoSettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    "These are the same six values accepted by ct_mutual_aid_credentials JSON.",
+                    "These values are accepted by ct_mutual_aid_credentials JSON. The Mutual Aid account may use the same Connect Key when both CalTopo teams share that key.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.fillMaxWidth()

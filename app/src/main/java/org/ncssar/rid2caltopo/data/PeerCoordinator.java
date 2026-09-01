@@ -99,6 +99,13 @@ public interface PeerCoordinator {
     default boolean shouldRefreshManagedVideoThumbnails() {
         return false;
     }
+    /**
+     * True while coordination owns work that must keep the incident-map session alive.
+     * Lifecycle auto-disconnect uses this in addition to the local active-flight check.
+     */
+    default boolean hasOperationalActivityPreventingMapDisconnect() {
+        return false;
+    }
     default void respondToVideoStreamRequest(
             @NonNull String requestId,
             boolean approved,

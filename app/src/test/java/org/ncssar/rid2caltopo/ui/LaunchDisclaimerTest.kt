@@ -18,9 +18,9 @@ class LaunchDisclaimerTest {
             hash = (hash xor byte.toUByte().toULong()) * 1099511628211uL
         }
 
-        assertEquals(0xf4ee5506e5afb21auL, hash)
+        assertEquals(0xa459680b79193637uL, hash)
         assertTrue(LAUNCH_DISCLAIMER_TEXT.contains("accept full responsibility"))
-        assertTrue(LAUNCH_DISCLAIMER_TEXT.contains("hold harmless Ken Taylor"))
+        assertTrue(LAUNCH_DISCLAIMER_TEXT.contains("hold harmless UAS4SAR LLC"))
         assertTrue(LAUNCH_DISCLAIMER_TEXT.contains("California Civil Code section 1542"))
         assertTrue(LAUNCH_DISCLAIMER_TEXT.contains("expressly waive all rights and benefits"))
         assertTrue(LAUNCH_DISCLAIMER_TEXT.contains("unknown or unsuspected"))

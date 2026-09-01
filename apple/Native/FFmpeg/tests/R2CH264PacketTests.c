@@ -1,4 +1,5 @@
 #include "../R2CH264Packet.h"
+#include "../../../../native/R2CLocalPlaybackCadence.h"
 
 #include <assert.h>
 
@@ -26,5 +27,14 @@ int main(void) {
     const uint8_t malformed[] = {0, 0, 0, 12, 0x06};
     contents = R2CH264InspectPacket(malformed, sizeof(malformed), 4);
     assert(!contents.recognized && !R2CH264PacketIsSeiOnly(contents));
+
+    R2CLocalPlaybackCadence cadence;
+    R2CLocalPlaybackCadenceInit(&cadence);
+    assert(R2CLocalPlaybackCadenceNextIntervalUs(&cadence, 1000000) == 0);
+    assert(R2CLocalPlaybackCadenceNextIntervalUs(&cadence, 1033000) == 33333);
+    assert(R2CLocalPlaybackCadenceNextIntervalUs(&cadence, 1067000) == 33333);
+    assert(R2CLocalPlaybackCadenceNextIntervalUs(&cadence, 1087000) == 29000);
+    assert(R2CLocalPlaybackCadenceNextIntervalUs(&cadence, 1137000) == 34250);
+    assert(R2CLocalPlaybackCadenceNextIntervalUs(&cadence, 1437000) == 300000);
     return 0;
 }

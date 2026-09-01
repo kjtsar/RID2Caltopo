@@ -176,7 +176,9 @@ Live CalTopo publishing is disabled by default. The in-app CalTopo screen stores
 the credential secret in the Apple Keychain and non-secret map settings in
 `UserDefaults`. When explicitly enabled, accepted track points create the same
 signed `LiveTrack` object and use the same `position/report/DRONE` endpoint as
-Android. When a local aircraft track ages out, the app saves its GeoJSON and
+Android. A configured CalTopo Connect Key replaces `DRONE` in that endpoint;
+an empty key preserves the legacy endpoint. When a local aircraft track ages
+out, the app saves its GeoJSON and
 issues the same signed `LiveTrack/{id}` DELETE used by Android, treating 400/404
 as an already-completed stop. Real-server qualification still requires an
 operator-supplied test map and credential.

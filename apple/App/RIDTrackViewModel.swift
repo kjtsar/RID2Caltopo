@@ -6,6 +6,8 @@ import R2CCore
 final class RIDTrackViewModel: ObservableObject {
     private static let deferredVideoLinkRetryNanoseconds: UInt64 = 2_000_000_000
     private static let deferredVideoLinkRetryCount = 15
+    private static let caltopoFinishRetryNanoseconds: UInt64 = 5_000_000_000
+    private static let caltopoFinishRetryCount = 3
     @Published private(set) var tracks: [RidAircraftTrack] = []
     @Published private(set) var acceptedObservationCount = 0
     @Published private(set) var filteredObservationCount = 0
@@ -51,6 +53,10 @@ final class RIDTrackViewModel: ObservableObject {
     private var peerConfirmationClearer: ((String) -> Void)?
     private var peerTrafficLatestSampleAtByAircraftID: [String: Date] = [:]
     private var pairedVideoActivityProvider: (() -> [String: Date])?
+    private var validatedSEIPositionProvider:
+        (([RidAircraftTrack], Date) -> [String: AppleDJICameraTelemetry])?
+    private var lastSEIPublicationAtByAircraftID: [String: Date] = [:]
+    private var activeCaltopoRemoteIDs: Set<String> = []
     private var pendingPublication: [String: [RidAircraftTrack]] = [:]
     private var publicationChains: [String: Task<Void, Never>] = [:]
     private var ownershipActivationTasks: [String: Task<Void, Never>] = [:]
@@ -79,6 +85,9 @@ final class RIDTrackViewModel: ObservableObject {
                     await self.archive(track)
                     self.peerCoordinator?.droneLost(remoteID: track.aircraftID)
                     self.pendingPublication.removeValue(forKey: track.aircraftID)
+                    self.lastSEIPublicationAtByAircraftID.removeValue(
+                        forKey: track.aircraftID
+                    )
                     await self.finishPublication(track: track)
                     self.terrainTasks.removeValue(forKey: track.aircraftID)?.cancel()
                     self.terrainRequestKeyByAircraftID.removeValue(forKey: track.aircraftID)
@@ -88,6 +97,7 @@ final class RIDTrackViewModel: ObservableObject {
                     self.altitudeDisplayByAircraftID.removeValue(forKey: track.aircraftID)
                 }
                 let snapshot = await self.store.snapshot()
+                self.publishFreshSEIPositions(from: snapshot)
                 if snapshot != self.tracks {
                     self.tracks = snapshot
                 }
@@ -108,16 +118,27 @@ final class RIDTrackViewModel: ObservableObject {
                 guard !Task.isCancelled, let self else { return }
                 switch event {
                 case .disabled:
+                    self.activeCaltopoRemoteIDs.removeAll()
+                    self.updateCaltopoThumbnailRefreshTargets()
                     self.caltopoStatus = "Publishing disabled"
                     self.caltopoRTTMilliseconds = nil
                 case .ready:
+                    self.activeCaltopoRemoteIDs.removeAll()
+                    self.updateCaltopoThumbnailRefreshTargets()
                     self.caltopoStatus = "Ready"
                     self.caltopoRTTMilliseconds = nil
-                case let .trackStarted(id): self.caltopoStatus = "Started \(id)"
+                case let .trackStarted(id):
+                    self.activeCaltopoRemoteIDs.insert(id)
+                    self.updateCaltopoThumbnailRefreshTargets()
+                    self.caltopoStatus = "Started \(id)"
                 case let .pointPublished(id, rttMilliseconds):
                     self.caltopoStatus = "Published \(id)"
                     self.caltopoRTTMilliseconds = rttMilliseconds
-                case let .trackStopped(id): self.caltopoStatus = "Stopped \(id)"
+                case let .trackStopped(id):
+                    self.activeCaltopoRemoteIDs.remove(id)
+                    self.lastSEIPublicationAtByAircraftID.removeValue(forKey: id)
+                    self.updateCaltopoThumbnailRefreshTargets()
+                    self.caltopoStatus = "Stopped \(id)"
                 case let .failed(message):
                     self.caltopoStatus = "Error: \(message)"
                     self.caltopoRTTMilliseconds = nil
@@ -239,8 +260,13 @@ final class RIDTrackViewModel: ObservableObject {
         }
     }
 
-    func configurePairedVideoActivity(_ provider: @escaping () -> [String: Date]) {
+    func configurePairedVideoActivity(
+        _ provider: @escaping () -> [String: Date],
+        validatedSEIPositionProvider: @escaping
+            ([RidAircraftTrack], Date) -> [String: AppleDJICameraTelemetry]
+    ) {
         pairedVideoActivityProvider = provider
+        self.validatedSEIPositionProvider = validatedSEIPositionProvider
     }
 
     private func noteRIDMessage(receivedAt: Date) {
@@ -542,6 +568,7 @@ final class RIDTrackViewModel: ObservableObject {
         peerConfirmationClearer: @escaping (String) -> Void
     ) {
         peerCoordinator = coordinator
+        updateCaltopoThumbnailRefreshTargets()
         self.identityProvider = identityProvider
         self.peerConfirmationConsumer = peerConfirmationConsumer
         self.peerConfirmationClearer = peerConfirmationClearer
@@ -785,11 +812,94 @@ final class RIDTrackViewModel: ObservableObject {
 
     private func publish(_ track: RidAircraftTrack) {
         let label = identityProvider?(track.aircraftID)?.mappedID ?? track.aircraftID
+        if let telemetry = validatedSEIPositionProvider?([track], Date())[track.aircraftID] {
+            _ = enqueueSEIPublication(track: track, label: label, telemetry: telemetry)
+            return
+        }
         enqueuePublication(
             remoteID: track.aircraftID,
             label: label,
             observation: track.lastObservation
         )
+    }
+
+    private func publishFreshSEIPositions(
+        from tracks: [RidAircraftTrack],
+        now: Date = Date()
+    ) {
+        guard let validatedSEIPositionProvider else { return }
+        let telemetryByAircraftID = validatedSEIPositionProvider(tracks, now)
+        for track in tracks {
+            guard publicationSuppressionProvider?(track.aircraftID) != true,
+                  peerCoordinator?.publicationAllowed(remoteID: track.aircraftID) != false,
+                  let telemetry = telemetryByAircraftID[track.aircraftID]
+            else { continue }
+            let label = identityProvider?(track.aircraftID)?.mappedID ?? track.aircraftID
+            _ = enqueueSEIPublication(track: track, label: label, telemetry: telemetry)
+        }
+    }
+
+    @discardableResult
+    private func enqueueSEIPublication(
+        track: RidAircraftTrack,
+        label: String,
+        telemetry: AppleDJICameraTelemetry
+    ) -> Bool {
+        guard let latitude = telemetry.latitudeDegrees,
+              let longitude = telemetry.longitudeDegrees,
+              latitude.isFinite, longitude.isFinite,
+              (-90 ... 90).contains(latitude), (-180 ... 180).contains(longitude),
+              !(latitude == 0 && longitude == 0)
+        else { return false }
+        if let lastPublished = lastSEIPublicationAtByAircraftID[track.aircraftID],
+           telemetry.receivedAt <= lastPublished {
+            return false
+        }
+        lastSEIPublicationAtByAircraftID[track.aircraftID] = telemetry.receivedAt
+        let rid = track.lastObservation
+        let takeoffAltitude = track.points.first?.altitudeMeters
+        let altitude = if let takeoffAltitude,
+                          let relativeUp = telemetry.relativeUpMeters,
+                          takeoffAltitude.isFinite,
+                          relativeUp.isFinite {
+            takeoffAltitude + relativeUp
+        } else {
+            rid.altitudeMeters
+        }
+        enqueuePublication(
+            remoteID: track.aircraftID,
+            label: label,
+            observation: RidObservation(
+                source: rid.source,
+                aircraftId: track.aircraftID,
+                receivedAt: telemetry.receivedAt,
+                latitude: latitude,
+                longitude: longitude,
+                altitudeMeters: altitude,
+                heightMeters: telemetry.relativeUpMeters ?? rid.heightMeters,
+                heightReference: rid.heightReference,
+                horizontalAccuracyCode: rid.horizontalAccuracyCode,
+                headingDegrees: telemetry.courseDegrees ?? rid.headingDegrees,
+                speedMetersPerSecond: nil,
+                operatorLatitude: rid.operatorLatitude,
+                operatorLongitude: rid.operatorLongitude,
+                signalStrengthDbm: nil,
+                droneScoutRelay: nil
+            )
+        )
+        return true
+    }
+
+    private func updateCaltopoThumbnailRefreshTargets() {
+        var designators = activeCaltopoRemoteIDs
+        for remoteID in activeCaltopoRemoteIDs {
+            if let mappedID = identityProvider?(remoteID)?.mappedID
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !mappedID.isEmpty {
+                designators.insert(mappedID)
+            }
+        }
+        peerCoordinator?.setCaltopoLiveTrackDesignators(designators)
     }
 
     private func enqueuePublication(remoteID: String, label: String, observation: RidObservation) {
@@ -798,7 +908,7 @@ final class RIDTrackViewModel: ObservableObject {
             source: observation.source,
             aircraftId: observation.aircraftId,
             receivedAt: observation.receivedAt,
-            // RID remains the canonical aircraft track. SEI position is used only for clue geometry.
+            // The selected sample is either fresh validated SEI or the RID fallback.
             latitude: observation.latitude,
             longitude: observation.longitude,
             altitudeMeters: observation.altitudeMeters,
@@ -896,10 +1006,20 @@ final class RIDTrackViewModel: ObservableObject {
             remoteID,
         ], trackStartedAt: trackStartedAt, trackEndedAt: trackEndedAt)
         let description = CaltopoArchiveDescription.build(capturedVideoURL: videoURL)
-        let archivedTrack = await caltopoPublisher.finish(
-            remoteID: remoteID,
-            description: description
-        )
+        var archivedTrack: AppleArchivedCaltopoTrack?
+        for attempt in 0..<Self.caltopoFinishRetryCount {
+            archivedTrack = await caltopoPublisher.finish(
+                remoteID: remoteID,
+                description: description
+            )
+            if archivedTrack != nil { break }
+            guard attempt + 1 < Self.caltopoFinishRetryCount else { break }
+            AppleLog.warning(
+                "CalTopo",
+                "Retrying LiveTrack archive remoteId=\(remoteID) attempt=\(attempt + 2)"
+            )
+            try? await Task.sleep(nanoseconds: Self.caltopoFinishRetryNanoseconds)
+        }
         guard description.isEmpty, let archivedTrack else { return }
         Task { [weak self] in
             await self?.attachDeferredVideoLink(

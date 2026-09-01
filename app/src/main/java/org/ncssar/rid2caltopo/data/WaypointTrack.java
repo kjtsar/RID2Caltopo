@@ -325,8 +325,9 @@ public class WaypointTrack {
 		DocumentFile todaysArchiveDir = GetTodaysTrackDir();
 		if (null == ctxt || null == todaysArchiveDir) return false;
 		try {
-			fileName = trackLabel + ".json";
-			dataFilepath = todaysArchiveDir.createFile(GEOJSON_MIME_TYPE, fileName);
+			fileName = OperatorArchiveFilename.track(archiveAircraftID(), archiveTimestampMsec());
+			dataFilepath = DocumentFileCompat.createFileWithExactName(
+                    todaysArchiveDir, GEOJSON_MIME_TYPE, fileName);
 			if (dataFilepath == null) {
                 CTError(TAG, "prepareArchiveFile(): not able to create " + fileName);
                 return false;
@@ -1030,10 +1031,11 @@ public class WaypointTrack {
             CTError(TAG, "archiveKmz(): missing context or archive dir.");
             return;
         }
-        String kmzFileName = trackLabel + ".kmz";
+        String kmzFileName = OperatorArchiveFilename.clueReport(
+                archiveAircraftID(), archiveTimestampMsec());
         try {
-            DocumentFile kmzFile = todaysArchiveDir.createFile(
-                    "application/vnd.google-earth.kmz", kmzFileName);
+            DocumentFile kmzFile = DocumentFileCompat.createFileWithExactName(
+                    todaysArchiveDir, "application/vnd.google-earth.kmz", kmzFileName);
             if (null == kmzFile) {
                 CTError(TAG, "archiveKmz(): could not create KMZ file.");
                 return;
@@ -1128,6 +1130,19 @@ public class WaypointTrack {
         } catch (Exception e) {
             CTError(TAG, "archiveKmz(): raised.", e);
         }
+    }
+
+    @NonNull
+    private String archiveAircraftID() {
+        String remoteID = archivePrepared ? archivedRemoteId : droneSpec.getRemoteId();
+        return remoteID == null || remoteID.isEmpty() ? trackLabel : remoteID;
+    }
+
+    private long archiveTimestampMsec() {
+        JSONArray first = coordinates.optJSONArray(0);
+        long timestamp = first == null ? 0 : first.optLong(3, 0);
+        if (timestamp <= 0) timestamp = droneSpec.getStartMsecTimestamp();
+        return timestamp > 0 ? timestamp : System.currentTimeMillis();
     }
 
     /** Escapes special XML characters in a string value. */

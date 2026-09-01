@@ -93,9 +93,26 @@ public enum RidTrackGeoJSON {
         )
     }
 
-    public static func suggestedFilename(for track: RidAircraftTrack) -> String {
+    public static func suggestedFilename(
+        for track: RidAircraftTrack,
+        timeZone: TimeZone = .current
+    ) -> String {
         let startDate = track.points.first?.receivedAt ?? track.lastObservation.receivedAt
-        return "\(track.aircraftID)-\(formattedStartTime(startDate)).json"
+        let timestamp = OperationalDiagnosticLogFormat.filenameTimestamp(
+            startDate,
+            timeZone: timeZone
+        )
+        return "\(track.aircraftID)-\(timestamp).json"
+    }
+
+    public static func suggestedClueReportFilename(
+        for track: RidAircraftTrack,
+        timeZone: TimeZone = .current
+    ) -> String {
+        URL(fileURLWithPath: suggestedFilename(for: track, timeZone: timeZone))
+            .deletingPathExtension()
+            .appendingPathExtension("kmz")
+            .lastPathComponent
     }
 
     private static func formattedStartTime(_ date: Date) -> String {

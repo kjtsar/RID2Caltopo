@@ -95,7 +95,7 @@ final class AppleLandRestrictionCenter: ObservableObject {
                     ) else { throw URLError(.badURL) }
                     var request = URLRequest(url: url)
                     request.timeoutInterval = 40
-                    request.setValue("RID2Caltopo/Apple (contact: kjtsar@kjt.us)", forHTTPHeaderField: "User-Agent")
+                    request.setValue("RID2Caltopo/Apple (contact: kjt@uas4sar.com)", forHTTPHeaderField: "User-Agent")
                     let (data, response) = try await URLSession.shared.data(for: request)
                     guard let http = response as? HTTPURLResponse, (200 ..< 300).contains(http.statusCode) else {
                         throw AppleLandRestrictionError.service("HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")

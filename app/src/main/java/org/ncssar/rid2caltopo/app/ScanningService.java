@@ -21,8 +21,11 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.content.pm.PackageManager;
 import android.os.IBinder;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Process;
 
 import androidx.annotation.NonNull;
@@ -30,8 +33,16 @@ import androidx.core.app.NotificationCompat;
 import androidx.core.app.ServiceCompat;
 import androidx.core.content.ContextCompat;
 
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
+
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.data.CaltopoClient;
+import org.ncssar.rid2caltopo.data.CaltopoMap;
 import org.ncssar.rid2caltopo.data.SimpleTimer;
 import org.ncssar.rid2caltopo.data.WifiRidScanPrefs;
 import org.opendroneid.android.bluetooth.BluetoothScanner;
@@ -51,6 +62,11 @@ public class ScanningService extends Service {
     private static final String ACTION_STOP_SERVICE = "STOP_SERVICE";
     private static final String ACTION_REFRESH_WIFI_RID_SCANNING = "REFRESH_WIFI_RID_SCANNING";
     private static final String ACTION_REFRESH_BLUETOOTH_RID_TEST = "REFRESH_BLUETOOTH_RID_TEST";
+    private static final String ACTION_DISPLAY_STATE = "DISPLAY_STATE";
+    private static final String EXTRA_DISPLAY_ACTIVE = "display_active";
+    private static final String EXTRA_EXTERNAL_DISPLAY_CONNECTED = "external_display_connected";
+    private static final long INCIDENT_MAP_BACKGROUND_DISCONNECT_DELAY_MS = 5L * 60L * 1000L;
+    private static final long INCIDENT_MAP_BACKGROUND_RECHECK_MS = 60L * 1000L;
     private static final String CHANNEL_ID = "OpenDroneIdScanner";
     private static final String CHANNEL_NAME = "OpenDroneId Scanner Service";
     private static final int NOTIFICATION_ID = 1;
@@ -60,6 +76,22 @@ public class ScanningService extends Service {
     private boolean scanning = false;
     private boolean foregroundStarted = false;
     private boolean foregroundStartBlocked = false;
+    private final Handler lifecycleHandler = new Handler(Looper.getMainLooper());
+    private FusedLocationProviderClient fusedLocationClient;
+    private LocationCallback backgroundLocationCallback;
+    private boolean externalDisplayConnected = false;
+    private final Runnable incidentMapBackgroundDisconnect = new Runnable() {
+        @Override public void run() {
+            if (externalDisplayConnected) return;
+            boolean disconnected = CaltopoMap.DisconnectIncidentMapIfInactive("display inactive");
+            CTDebug(TAG, disconnected
+                    ? "Display remained inactive; incident map disconnected"
+                    : "Display remained inactive; incident map retained because operational work is active");
+            if (!disconnected && CaltopoMap.GetMapNode() != null) {
+                lifecycleHandler.postDelayed(this, INCIDENT_MAP_BACKGROUND_RECHECK_MS);
+            }
+        }
+    };
     private static volatile boolean serviceRunning = false;
     private static Context AppContext = R2CApplication.getAppCtxt();
     private static OpenDroneIdDataManager DataManager = new OpenDroneIdDataManager(null);
@@ -170,6 +202,8 @@ public class ScanningService extends Service {
         CTDebug(TAG, String.format(Locale.US,
                 "onDestroy(): ScanningService 0x%x", this.hashCode()));
         stopForegroundSafely();
+        lifecycleHandler.removeCallbacks(incidentMapBackgroundDisconnect);
+        stopBackgroundLocationUpdates();
         if (scanning) {
             stopScanning();
         }
@@ -211,6 +245,26 @@ public class ScanningService extends Service {
 
         if (intent != null && ACTION_REFRESH_BLUETOOTH_RID_TEST.equals(intent.getAction())) {
             if (scanning) applyBluetoothRidTestPreference();
+            return START_STICKY;
+        }
+
+        if (intent != null && ACTION_DISPLAY_STATE.equals(intent.getAction())) {
+            boolean displayActive = intent.getBooleanExtra(EXTRA_DISPLAY_ACTIVE, true);
+            externalDisplayConnected = intent.getBooleanExtra(
+                    EXTRA_EXTERNAL_DISPLAY_CONNECTED, false);
+            lifecycleHandler.removeCallbacks(incidentMapBackgroundDisconnect);
+            if (displayActive) {
+                CaltopoMap.EndIncidentDisplayInactive();
+                stopBackgroundLocationUpdates();
+            } else {
+                CaltopoMap.BeginIncidentDisplayInactive();
+                startBackgroundLocationUpdates();
+                if (!externalDisplayConnected) {
+                    lifecycleHandler.postDelayed(
+                            incidentMapBackgroundDisconnect,
+                            INCIDENT_MAP_BACKGROUND_DISCONNECT_DELAY_MS);
+                }
+            }
             return START_STICKY;
         }
 
@@ -256,6 +310,19 @@ public class ScanningService extends Service {
         }
         Intent stopIntent = new Intent(context, ScanningService.class);
         context.getApplicationContext().stopService(stopIntent);
+    }
+
+    public static void setDisplayActive(
+            @NonNull Context context,
+            boolean active,
+            boolean externalDisplayConnected
+    ) {
+        if (!IsRunning()) return;
+        Intent intent = new Intent(context.getApplicationContext(), ScanningService.class);
+        intent.setAction(ACTION_DISPLAY_STATE);
+        intent.putExtra(EXTRA_DISPLAY_ACTIVE, active);
+        intent.putExtra(EXTRA_EXTERNAL_DISPLAY_CONNECTED, externalDisplayConnected);
+        context.getApplicationContext().startService(intent);
     }
 
     public static void requestWifiRidScanningRefresh(@NonNull Context context) {
@@ -307,8 +374,13 @@ public class ScanningService extends Service {
 
     private boolean startForegroundSafely(Notification notification) {
         try {
+            int serviceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
+                    == PackageManager.PERMISSION_GRANTED) {
+                serviceTypes |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+            }
             ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+                    serviceTypes);
             foregroundStarted = true;
             return true;
         } catch (ForegroundServiceStartNotAllowedException e) {
@@ -320,6 +392,41 @@ public class ScanningService extends Service {
         }
         foregroundStarted = false;
         return false;
+    }
+
+    private void startBackgroundLocationUpdates() {
+        if (backgroundLocationCallback != null) return;
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            CTError(TAG, "Background movement monitoring unavailable: precise location not granted.");
+            return;
+        }
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        backgroundLocationCallback = new LocationCallback() {
+            @Override public void onLocationResult(@NonNull LocationResult result) {
+                for (android.location.Location location : result.getLocations()) {
+                    CaltopoMap.UpdateMyLocation(location);
+                }
+            }
+        };
+        LocationRequest request = new LocationRequest.Builder(10_000L)
+                .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+                .setMinUpdateIntervalMillis(5_000L)
+                .setMinUpdateDistanceMeters(5.0f)
+                .build();
+        fusedLocationClient.requestLocationUpdates(
+                request, backgroundLocationCallback, Looper.getMainLooper())
+                .addOnFailureListener(error -> CTError(
+                        TAG, "Background movement location request failed", error));
+        CTDebug(TAG, "Background movement location monitoring started.");
+    }
+
+    private void stopBackgroundLocationUpdates() {
+        if (fusedLocationClient != null && backgroundLocationCallback != null) {
+            fusedLocationClient.removeLocationUpdates(backgroundLocationCallback);
+        }
+        backgroundLocationCallback = null;
+        fusedLocationClient = null;
     }
 
     private void stopForegroundSafely() {

@@ -28,13 +28,16 @@ import android.provider.ContactsContract;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.ncssar.rid2caltopo.BuildConfig;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.opendroneid.android.data.Util;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.URI;
 import java.net.UnknownHostException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -87,7 +90,7 @@ import java.util.UUID;
  *     www.github.com/ncssar/caltopo_java
  *
  *
- *  Contact the author at kjtsar@kjt.us
+ *  Contact the author at kjt@uas4sar.com
  *   Attribution, feedback, bug reports and feature requests are appreciated
  *
  *
@@ -152,6 +155,8 @@ import java.util.UUID;
 
 
 public class CaltopoSession {
+	private static final double FEET_PER_METER = 3.280839895013123;
+	private static final double INVALID_RID_ALTITUDE_METERS = -1000.0;
 	public enum CtsMethod_t {
 		GET,
 		POST,
@@ -778,7 +783,7 @@ public class CaltopoSession {
 			if (folderId != null && !folderId.isEmpty()) {
 				prop.put("folderId", folderId);
 			}
-			prop.put("deviceId", String.format(Locale.US, "FLEET:DRONE-%s",  deviceId));
+			prop.put("deviceId", liveTrackDeviceId(deviceId, CaltopoClient.GetConnectKey()));
 
 			top.put("type", "Feature");
 			top.put("properties", prop);
@@ -828,13 +833,18 @@ public class CaltopoSession {
 		String latStr = String.format(Locale.US, "%.7f", lat);
 		String lngStr = String.format(Locale.US, "%.7f", lng);
 		Long ele = (long)eleMeters;
-        StringBuilder urlBuilder = new StringBuilder("https://" + DomainAndPort + "/api/v1/position/report/DRONE?" +
+		String connectKey = CaltopoClient.GetConnectKey().trim();
+		StringBuilder urlBuilder = new StringBuilder("https://" + DomainAndPort +
+				positionReportPath(connectKey) + "?" +
 				EncodeParm("id", deviceId) + "&" +
 				EncodeParm("lat", latStr) + "&" +
 				EncodeParm("lng", lngStr) + "&" +
 				EncodeParm("elevation", ele.toString()));
-        JSONObject queryParameters = buildPositionQueryParameters(telemetry, cameraMetadata);
+        JSONObject queryParameters = buildPositionQueryParameters(eleMeters, telemetry, cameraMetadata);
         appendPositionQueryParameters(urlBuilder, queryParameters);
+        if (BuildConfig.DEBUG) {
+            CTDebug(TAG, positionReportDiagnosticSummary(queryParameters));
+        }
         String url = urlBuilder.toString();
 
 		CaltopoOp op = new CaltopoOp(onComplete);
@@ -843,16 +853,46 @@ public class CaltopoSession {
 	}
 
     @NonNull
+    static String positionReportPath(@Nullable String configuredConnectKey) {
+        String connectKey = effectiveConnectKey(configuredConnectKey);
+        try {
+            String encoded = URLEncoder.encode(connectKey, StandardCharsets.UTF_8.name())
+                    .replace("+", "%20");
+            return "/api/v1/position/report/" + encoded;
+        } catch (Exception error) {
+            throw new IllegalArgumentException("Unable to encode CalTopo Connect Key", error);
+        }
+    }
+
+    @NonNull
+    static String effectiveConnectKey(@Nullable String configuredConnectKey) {
+        String connectKey = configuredConnectKey == null ? "" : configuredConnectKey.trim();
+        return connectKey.isEmpty() ? "DRONE" : connectKey;
+    }
+
+    @NonNull
+    static String liveTrackDeviceId(@NonNull String deviceId,
+                                    @Nullable String configuredConnectKey) {
+        return String.format(Locale.US, "FLEET:%s-%s",
+                effectiveConnectKey(configuredConnectKey), deviceId);
+    }
+
+    @NonNull
     static CtsMethod_t positionReportMethod() {
 		return CtsMethod_t.GET;
     }
 
     @NonNull
     static JSONObject buildPositionQueryParameters(
+            double aircraftAltitudeMeters,
             @Nullable CtDroneSpec.PositionTelemetry telemetry,
             @Nullable CaltopoCameraMetadata cameraMetadata) {
         JSONObject parameters = new JSONObject();
         try {
+            if (Double.isFinite(aircraftAltitudeMeters)
+                    && Double.compare(aircraftAltitudeMeters, INVALID_RID_ALTITUDE_METERS) != 0) {
+                parameters.put("aircraft:altitude", Math.round(aircraftAltitudeMeters * FEET_PER_METER));
+            }
             if (telemetry != null) {
                 putFinite(parameters, "aircraft:altitude_rate", telemetry.aircraftAltitudeRateFpm);
                 putFinite(parameters, "aircraft:gs", telemetry.aircraftGsKnots);
@@ -871,6 +911,57 @@ public class CaltopoSession {
             return parameters;
         }
         return parameters;
+    }
+
+    @NonNull
+    static String positionReportDiagnosticSummary(@NonNull JSONObject parameters) {
+        String[] numericNames = {
+                "aircraft:altitude",
+                "aircraft:altitude_rate",
+                "aircraft:gs",
+                "aircraft:track",
+                "camera:azimuth",
+                "camera:tilt",
+                "camera:fov_width",
+                "camera:fov_height"
+        };
+        StringBuilder summary = new StringBuilder("positionReport(GET) fields:");
+        for (String name : numericNames) {
+            summary.append(' ').append(name).append('=');
+            summary.append(parameters.has(name) ? parameters.opt(name) : "absent");
+        }
+        appendRedactedUrlSummary(summary, parameters, "camera:external_url");
+        appendRedactedUrlSummary(summary, parameters, "camera:thumbnail_url");
+        return summary.toString();
+    }
+
+    private static void appendRedactedUrlSummary(@NonNull StringBuilder summary,
+                                                 @NonNull JSONObject parameters,
+                                                 @NonNull String name) {
+        String rawUrl = parameters.optString(name, "");
+        summary.append(' ').append(name).append('=');
+        if (rawUrl.isEmpty()) {
+            summary.append("absent");
+            return;
+        }
+        try {
+            URI parsed = URI.create(rawUrl);
+            summary.append("present(scheme=")
+                    .append(parsed.getScheme() == null ? "missing" : parsed.getScheme())
+                    .append(",host=")
+                    .append(parsed.getHost() == null ? "missing" : parsed.getHost());
+            if ("camera:thumbnail_url".equals(name)) {
+                String rawQuery = parsed.getRawQuery();
+                if (rawQuery != null && rawQuery.startsWith("timestamp=")) {
+                    summary.append(",cacheBust=").append(rawQuery);
+                } else {
+                    summary.append(",cacheBust=missing");
+                }
+            }
+            summary.append(')');
+        } catch (IllegalArgumentException error) {
+            summary.append("present(invalid-url)");
+        }
     }
 
     private static void appendPositionQueryParameters(@NonNull StringBuilder urlBuilder,

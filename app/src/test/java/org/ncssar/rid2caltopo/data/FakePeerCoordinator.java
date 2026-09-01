@@ -41,6 +41,7 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     @Nullable private volatile String startedName;
     @Nullable private volatile String startedBrokerUri;
     private volatile boolean started;
+    private volatile boolean operationalActivityPreventingMapDisconnect;
 
     public FakePeerCoordinator(@NonNull String runtimeLabel) {
         this.runtimeLabel = runtimeLabel;
@@ -147,6 +148,15 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     @Override
     public List<ManagedVideoStreamAdvertisement> getManagedVideoStreams() {
         return managedVideoStreams;
+    }
+
+    @Override
+    public boolean hasOperationalActivityPreventingMapDisconnect() {
+        return operationalActivityPreventingMapDisconnect;
+    }
+
+    public void setOperationalActivityPreventingMapDisconnect(boolean active) {
+        operationalActivityPreventingMapDisconnect = active;
     }
 
     @NonNull

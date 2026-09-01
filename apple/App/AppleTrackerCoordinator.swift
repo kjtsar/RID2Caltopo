@@ -208,6 +208,7 @@ enum AppleManagedOrganizationConfig {
             "credential_id": caltopo.credentialID,
             "credential_secret": caltopo.credentialSecret,
             "domain_and_port": caltopo.domainAndPort,
+            "connect_key": caltopo.connectKey,
             "track_folder": organization.trackFolder,
         ])
         let mutualAidEncoded: String
@@ -219,6 +220,7 @@ enum AppleManagedOrganizationConfig {
                 "domain_and_port": template.domainAndPort,
                 "source_label": template.sourceLabel,
                 "target_folder_hint": template.targetFolderHint,
+                "connect_key": template.connectKey,
             ])
             mutualAidEncoded = OrgConfigTokenCodec.encryptPayload(mutualAid)
         } else {
@@ -260,7 +262,8 @@ enum AppleManagedOrganizationConfig {
                 credentialSecret: value["credential_secret"] as? String ?? "",
                 domainAndPort: value["domain_and_port"] as? String ?? "caltopo.com",
                 sourceLabel: value["source_label"] as? String ?? "",
-                targetFolderHint: value["target_folder_hint"] as? String ?? "MAI")
+                targetFolderHint: value["target_folder_hint"] as? String ?? "MAI",
+                connectKey: value["connect_key"] as? String ?? "")
         } else { mutualAid = nil }
         try caltopo.applyManagedCredentials(credentials)
         try organization.applyManagedOrganization(
@@ -421,6 +424,9 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var managedVideoThumbnailTasks: [String: Task<Void, Never>] = [:]
     private var managedVideoThumbnailPreviewUntil = Date.distantPast
     private var managedVideoThumbnailPreviewTask: Task<Void, Never>?
+    private var caltopoThumbnailRefreshTask: Task<Void, Never>?
+    private var caltopoLiveTrackDesignators: Set<String> = []
+    private var caltopoThumbnailRefreshGeneration = 0
     private var managedVideoRecordingSourceRequestIDs: Set<String> = []
     private var managedSessionIDBySourcePath: [String: String] = [:]
     private var lastVideoPreflightOfferByRequestID: [String: String] = [:]
@@ -476,6 +482,16 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     var localZoneID: String { zoneID }
+
+    var hasOperationalActivityPreventingIncidentDisconnect: Bool {
+        pendingVideoStreamRequest != nil ||
+            pendingRecordingDownloadRequest != nil ||
+            !approvedRecordingUploadsByRequestID.isEmpty ||
+            hasLiveManagedVideoStream ||
+            !mediaPeersByRequestID.isEmpty ||
+            !pendingConfirmations.isEmpty ||
+            !observedSightings.isEmpty
+    }
 
     func requireReauthentication(at url: URL) {
         reauthenticationURL = url
@@ -1510,10 +1526,11 @@ final class AppleTrackerCoordinator: ObservableObject {
         refreshManagedVideoThumbnails()
     }
 
-    private func refreshManagedVideoThumbnails(force: Bool = false) {
+    private func refreshManagedVideoThumbnails(forceSessionIDs: Set<String> = []) {
         for advertisement in managedVideoStreams.prefix(8)
         where (advertisement.thumbnailRevision.isEmpty ||
-               (force && advertisement.mediaKind == "live")) &&
+               (advertisement.mediaKind == "live" &&
+                forceSessionIDs.contains(advertisement.sessionId))) &&
               managedVideoThumbnailTasks[advertisement.sessionId] == nil {
             let sessionID = advertisement.sessionId
             managedVideoThumbnailTasks[sessionID] = Task { @MainActor [weak self] in
@@ -1542,10 +1559,9 @@ final class AppleTrackerCoordinator: ObservableObject {
                           $0.sessionId == sessionID
                       })
                 else { return }
-                let revision = SHA256.hash(data: jpeg)
-                    .prefix(12)
-                    .map { String(format: "%02x", $0) }
-                    .joined()
+                // A capture timestamp guarantees a new CalTopo URL even when
+                // a stationary frame compresses to identical JPEG bytes.
+                let revision = String(Int64(Date().timeIntervalSince1970 * 1_000))
                 self.managedVideoStreams[index] = self.managedVideoStreams[index]
                     .withThumbnail(
                         revision: revision,
@@ -1563,11 +1579,49 @@ final class AppleTrackerCoordinator: ObservableObject {
                   !Task.isCancelled,
                   Date() < self.managedVideoThumbnailPreviewUntil {
                 if self.mediaPeersByRequestID.isEmpty {
-                    self.refreshManagedVideoThumbnails(force: true)
+                    let liveSessionIDs = Set(self.managedVideoStreams.compactMap {
+                        $0.mediaKind == "live" ? $0.sessionId : nil
+                    })
+                    self.refreshManagedVideoThumbnails(forceSessionIDs: liveSessionIDs)
                 }
                 try? await Task.sleep(for: .seconds(5))
             }
             self?.managedVideoThumbnailPreviewTask = nil
+        }
+    }
+
+    func setCaltopoLiveTrackDesignators(_ designators: Set<String>) {
+        let normalized = Set(designators.compactMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed.lowercased()
+        })
+        guard normalized != caltopoLiveTrackDesignators else { return }
+        caltopoLiveTrackDesignators = normalized
+        caltopoThumbnailRefreshGeneration += 1
+        let generation = caltopoThumbnailRefreshGeneration
+        caltopoThumbnailRefreshTask?.cancel()
+        caltopoThumbnailRefreshTask = nil
+        guard !normalized.isEmpty else { return }
+        caltopoThumbnailRefreshTask = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled,
+                  self.caltopoThumbnailRefreshGeneration == generation,
+                  !self.caltopoLiveTrackDesignators.isEmpty {
+                let sessionIDs = Set(self.managedVideoStreams.compactMap { stream -> String? in
+                    guard stream.mediaKind == "live",
+                          self.caltopoLiveTrackDesignators.contains(
+                            stream.droneDesignator.trimmingCharacters(
+                                in: .whitespacesAndNewlines
+                            ).lowercased()
+                          )
+                    else { return nil }
+                    return stream.sessionId
+                })
+                self.refreshManagedVideoThumbnails(forceSessionIDs: sessionIDs)
+                try? await Task.sleep(for: .seconds(5))
+            }
+            if self?.caltopoThumbnailRefreshGeneration == generation {
+                self?.caltopoThumbnailRefreshTask = nil
+            }
         }
     }
 
@@ -1969,6 +2023,10 @@ final class AppleTrackerCoordinator: ObservableObject {
         managedVideoThumbnailPreviewTask?.cancel()
         managedVideoThumbnailPreviewTask = nil
         managedVideoThumbnailPreviewUntil = .distantPast
+        caltopoThumbnailRefreshTask?.cancel()
+        caltopoThumbnailRefreshTask = nil
+        caltopoThumbnailRefreshGeneration += 1
+        caltopoLiveTrackDesignators.removeAll()
         for task in sourceEndGraceTasks.values { task.cancel() }
         sourceEndGraceTasks.removeAll()
         for task in managedVideoThumbnailTasks.values { task.cancel() }
@@ -2526,8 +2584,17 @@ final class AppleTrackerCoordinator: ObservableObject {
             TrackerTabletLink.thumbnailURL(
                 trackerURLPrefix: trackerURLPrefix,
                 tabletName: AppleDeviceIdentity.displayName,
-                streamSessionID: stream.sessionId
+                streamSessionID: stream.sessionId,
+                thumbnailRevision: stream.thumbnailRevision
             )
+        if let thumbnailURL,
+           let timestamp = URLComponents(url: thumbnailURL, resolvingAgainstBaseURL: false)?
+               .queryItems?.first(where: { $0.name == "timestamp" })?.value {
+            AppleLog.debug(
+                "CalTopo",
+                "positionReport(GET) camera:thumbnail_url=present(scheme=https,host=tracker,cacheBust=timestamp:\(timestamp))"
+            )
+        }
         let cameraTelemetry = managedVideoSourcesBySessionID[stream.sessionId]?
             .freshDJICameraTelemetry()
         return CaltopoCameraMetadata(

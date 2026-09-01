@@ -60,7 +60,7 @@ struct AboutPrivacyView: View {
 
             Section("Contact") {
                 Link("RID2Caltopo website", destination: URL(string: "https://rid2caltopo.com/")!)
-                Link("kjtsar@kjt.us", destination: URL(string: "mailto:kjtsar@kjt.us")!)
+                Link("kjt@uas4sar.com", destination: URL(string: "mailto:kjt@uas4sar.com")!)
             }
         }
         .navigationTitle("About & Privacy")

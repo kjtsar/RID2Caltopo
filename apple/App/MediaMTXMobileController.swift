@@ -126,8 +126,10 @@ final class MediaMTXViewModel: ObservableObject {
             eventTask = Task { [controller] in
                 for await event in controller.events {
                     guard !Task.isCancelled else { return }
-                    eventHandler?(event)
-                    switch event {
+                    let localizedEvent = Self.localizeCompletedRecordingIfNeeded(event)
+                    let deliveredEvent = await Self.normalizeCompletedRecordingIfNeeded(localizedEvent)
+                    eventHandler?(deliveredEvent)
+                    switch deliveredEvent {
                     case let .serverStarted(version):
                         status = "Running \(version)"
                     case let .streamStarted(path, _):
@@ -174,6 +176,104 @@ final class MediaMTXViewModel: ObservableObject {
                 status = "Start failed: \(error)"
             }
         }
+    }
+
+    private static func localizeCompletedRecordingIfNeeded(
+        _ event: MediaServerEvent
+    ) -> MediaServerEvent {
+        guard case let .recordFileCompleted(path, filePath, durationMs) = event else {
+            return event
+        }
+        let sourceURL = URL(fileURLWithPath: filePath)
+        guard let localizedURL = ManagedVideoRecordingIdentity.localizedMediaMTXRecordingURL(
+            for: sourceURL
+        ), localizedURL != sourceURL else {
+            return event
+        }
+
+        do {
+            let availableURL = ManagedVideoRecordingIdentity.availableRecordingURL(
+                preferred: localizedURL,
+                fileExists: FileManager.default.fileExists(atPath:)
+            )
+            try FileManager.default.moveItem(at: sourceURL, to: availableURL)
+            AppleLog.info(
+                "MediaMTX",
+                "Localized recording filename from=\(sourceURL.lastPathComponent) to=\(availableURL.lastPathComponent)"
+            )
+            return .recordFileCompleted(
+                path: path,
+                filePath: availableURL.path,
+                durationMilliseconds: durationMs
+            )
+        } catch {
+            AppleLog.error(
+                "MediaMTX",
+                "Unable to localize recording filename path=\(filePath): \(error)"
+            )
+            return event
+        }
+    }
+
+    private static func normalizeCompletedRecordingIfNeeded(
+        _ event: MediaServerEvent
+    ) async -> MediaServerEvent {
+        guard case let .recordFileCompleted(path, filePath, durationMs) = event else {
+            return event
+        }
+        let result = await Task.detached(priority: .utility) { () -> (Bool, String) in
+            let sourceURL = URL(fileURLWithPath: filePath)
+            let temporaryURL = sourceURL.deletingLastPathComponent().appendingPathComponent(
+                ".\(sourceURL.deletingPathExtension().lastPathComponent)-ios-compatible-\(UUID().uuidString).mp4"
+            )
+            var detail = [CChar](repeating: 0, count: 256)
+            let status = sourceURL.path.withCString { sourcePath in
+                temporaryURL.path.withCString { destinationPath in
+                    R2CFFmpegNormalizeRecording(
+                        sourcePath,
+                        destinationPath,
+                        &detail,
+                        Int32(detail.count)
+                    )
+                }
+            }
+            let message = String(
+                decoding: detail.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)),
+                as: UTF8.self
+            )
+            guard status == 0 else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                return (false, message.isEmpty ? "error=\(status)" : message)
+            }
+            do {
+                _ = try FileManager.default.replaceItemAt(
+                    sourceURL,
+                    withItemAt: temporaryURL,
+                    backupItemName: nil,
+                    options: []
+                )
+                return (true, message)
+            } catch {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                return (false, "replace failed: \(error.localizedDescription)")
+            }
+        }.value
+        if result.0 {
+            AppleLog.info(
+                "MediaMTX",
+                "Normalized recording for iOS playback file=\(URL(fileURLWithPath: filePath).lastPathComponent) \(result.1)"
+            )
+        } else {
+            AppleLog.error(
+                "MediaMTX",
+                "Recording normalization failed file=\(URL(fileURLWithPath: filePath).lastPathComponent) detail=\(result.1)"
+            )
+        }
+        return .recordFileCompleted(
+            path: path,
+            filePath: filePath,
+            durationMilliseconds: durationMs
+        )
     }
 
     func stop() {

@@ -23,7 +23,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 17
+    const val SCHEMA_VERSION = 18
 
     internal data class LandRestrictionDefaults(
         val enabled: Boolean,
@@ -266,6 +266,7 @@ object AppConfigStore {
         if (config.proximityAlertSpacingFeet != 0L) return true
         if (config.caltopoTrackFolder.isNotBlank()) return true
         if (config.caltopoDomainAndPort.isNotBlank()) return true
+        if (config.caltopoConnectKey.isNotBlank()) return true
         if (config.caltopoCredentials.teamId.isNotBlank()) return true
         if (config.caltopoCredentials.credentialId.isNotBlank()) return true
         if (config.caltopoCredentials.credentialSecret.isNotBlank()) return true
@@ -300,6 +301,7 @@ object AppConfigStore {
         if (config.mutualAidTemplate.domainAndPort.isNotBlank()) return true
         if (config.mutualAidTemplate.sourceLabel.isNotBlank()) return true
         if (config.mutualAidTemplate.targetFolderHint.isNotBlank()) return true
+        if (config.mutualAidTemplate.connectKey.isNotBlank()) return true
         if (config.caltopoProfilesCount > 0) return true
         if (config.activeCaltopoProfileId.isNotBlank()) return true
         return false
@@ -315,6 +317,7 @@ object AppConfigStore {
             ?: config.caltopoTrackFolder.ifBlank { "Drone Tracks" }
         state.caltopoDomainAndPort = activeProfile?.domainAndPort?.ifBlank { "caltopo.com" }
             ?: config.caltopoDomainAndPort.ifBlank { "caltopo.com" }
+        state.caltopoConnectKey = activeProfile?.connectKey ?: config.caltopoConnectKey
         state.caltopoCredentials = activeProfile?.credentials ?: CaltopoCredentials(
             config.caltopoCredentials.teamId,
             config.caltopoCredentials.credentialId,
@@ -465,6 +468,7 @@ object AppConfigStore {
             .setProximityAlertSpacingConfigured(true)
             .setCaltopoTrackFolder(activeProfile.trackFolder)
             .setCaltopoDomainAndPort(activeProfile.domainAndPort)
+            .setCaltopoConnectKey(activeProfile.connectKey ?: "")
             .setIncident(activeProfile.incident)
             .setOpPeriod(activeProfile.opPeriod)
             .setTrackerApiKey(activeProfile.trackerApiKey)
@@ -632,7 +636,7 @@ object AppConfigStore {
             "",
             0L,
             ""
-        )
+        ).also { it.connectKey = config.caltopoConnectKey }
     }
 
     private fun buildDefaultHomeProfile(state: ClientClassState): CaltopoProfileRecord =
@@ -656,7 +660,7 @@ object AppConfigStore {
             "",
             0L,
             ""
-        )
+        ).also { it.connectKey = state.caltopoConnectKey ?: "" }
 
     private fun syncActiveProfileFromState(
         state: ClientClassState,
@@ -684,7 +688,7 @@ object AppConfigStore {
             base.targetFolderHint,
             base.importedAtEpochMs,
             base.importDedupeKey
-        )
+        ).also { it.connectKey = state.caltopoConnectKey ?: base.connectKey ?: "" }
         val idx = profiles.indexOfFirst { it.profileId == synced.profileId }
         if (idx >= 0) {
             profiles[idx] = synced
@@ -724,7 +728,7 @@ object AppConfigStore {
             profile.targetFolderHint,
             profile.importedAtEpochMs,
             profile.importDedupeKey
-        )
+        ).also { it.connectKey = profile.connectKey }
 
     private fun mergeLoadedConfigFiles(
         current: List<AppConfig.LoadedConfigFileRecord>,
@@ -792,6 +796,7 @@ object AppConfigStore {
             .setTargetFolderHint(targetFolderHint)
             .setImportedAtEpochMs(importedAtEpochMs)
             .setImportDedupeKey(importDedupeKey)
+            .setConnectKey(connectKey ?: "")
             .build()
 
     private fun fromProtoTemplate(template: AppConfig.MutualAidTemplate): MutualAidTemplateRecord =
@@ -802,7 +807,7 @@ object AppConfigStore {
             template.domainAndPort.ifBlank { "caltopo.com" },
             template.sourceLabel,
             template.targetFolderHint
-        )
+        ).also { it.connectKey = template.connectKey }
 
     private fun MutualAidTemplateRecord.toProto(): AppConfig.MutualAidTemplate =
         AppConfig.MutualAidTemplate.newBuilder()
@@ -812,6 +817,7 @@ object AppConfigStore {
             .setDomainAndPort(domainAndPort ?: "")
             .setSourceLabel(sourceLabel ?: "")
             .setTargetFolderHint(targetFolderHint ?: "")
+            .setConnectKey(connectKey ?: "")
             .build()
 
     private fun hasPersistedReadPermission(resolver: ContentResolver, uri: Uri): Boolean {

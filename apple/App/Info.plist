@@ -76,7 +76,7 @@
     <key>NSLocalNetworkUsageDescription</key>
     <string>RID2Caltopo receives drone telemetry and video streams over the local network.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>RID2Caltopo uses location to map Remote ID aircraft observations.</string>
+	<string>RID2Caltopo uses location while an incident map is connected so it can map Remote ID observations and safely disconnect a relocated tablet after the display turns off.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>RID2Caltopo uses the microphone only when the operator enables VoIP for an authorized remote viewer.</string>
     <key>UILaunchScreen</key>
@@ -87,6 +87,7 @@
     <array>
         <string>audio</string>
         <string>bluetooth-central</string>
+        <string>location</string>
     </array>
     <key>UIApplicationSceneManifest</key>
     <dict>

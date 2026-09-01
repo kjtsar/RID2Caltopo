@@ -33,6 +33,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.ncssar.rid2caltopo.app.R2CApplication;
+import org.ncssar.rid2caltopo.video.MapOfflinePrepRuntime;
 
 
 import java.nio.charset.StandardCharsets;
@@ -65,8 +66,8 @@ public class CaltopoMap {
         long now();
     }
 
-    interface QuitHandler {
-        void quit();
+    interface InactivityDisconnectHandler {
+        void disconnect();
     }
 
     private static final class RelocationAnchor {
@@ -131,8 +132,10 @@ public class CaltopoMap {
     private static final double AUTO_QUIT_RELOCATION_DISTANCE_METERS = 50.0 * 0.3048;
     private static final float AUTO_QUIT_REQUIRED_ACCURACY_METERS = (float) (25.0 * 0.3048);
     private static final long AUTO_QUIT_FLIGHT_QUIET_MS = 5L * 60L * 1000L;
+    private static final long AUTO_QUIT_BACKGROUND_FLIGHT_PROTECTION_MS = 120L * 60L * 1000L;
     @NonNull private static volatile TimeSource timeSource = System::currentTimeMillis;
-    @NonNull private static volatile QuitHandler quitHandler = CaltopoClient::QuitApplication;
+    @NonNull private static volatile InactivityDisconnectHandler inactivityDisconnectHandler =
+            () -> DisconnectIncidentMapIfInactive("relocation");
 
     // my peers by GUID (MQTT-based):
     private static final Hashtable<String, R2CMqttManager.PeerState> PeerIdMap = new Hashtable<>(16);
@@ -190,20 +193,24 @@ public class CaltopoMap {
     private static volatile long InitialMarkerWaitStartedMs = 0L;
     @NonNull private static R2cRuntime CurrentRuntime = R2cRuntimeRegistry.getDefaultRuntime();
     @Nullable private static RelocationAnchor AutoQuitRelocationAnchor;
+    private static volatile boolean IncidentDisplayInactive = false;
+    private static volatile long IncidentBackgroundFlightProtectedUntilMs = 0L;
     public static List<CaltopoNode>GetSessionNodeMap() { return SessionNodeMap;}
 
     static void setTimeSourceForTesting(@NonNull TimeSource testTimeSource) {
         timeSource = testTimeSource;
     }
 
-    static void setQuitHandlerForTesting(@NonNull QuitHandler testQuitHandler) {
-        quitHandler = testQuitHandler;
+    static void setQuitHandlerForTesting(@NonNull InactivityDisconnectHandler testDisconnectHandler) {
+        inactivityDisconnectHandler = testDisconnectHandler;
     }
 
     static void resetAutoQuitRelocationForTesting() {
         AutoQuitRelocationAnchor = null;
         timeSource = System::currentTimeMillis;
-        quitHandler = CaltopoClient::QuitApplication;
+        inactivityDisconnectHandler = () -> DisconnectIncidentMapIfInactive("relocation");
+        IncidentDisplayInactive = false;
+        IncidentBackgroundFlightProtectedUntilMs = 0L;
     }
 
     static boolean hasAutoQuitRelocationAnchorForTesting() {
@@ -1287,8 +1294,16 @@ public class CaltopoMap {
             boolean hasAccuracy
     ) {
         long nowMs = timeSource.now();
+        // A foreground service may receive the first trustworthy fix only after
+        // the Activity has stopped. Capture that fix even while an active/recent
+        // flight is temporarily protecting the map from disconnection.
+        if (IncidentDisplayInactive && AutoQuitRelocationAnchor == null &&
+                hasAccuracy && accuracyMeters > 0.0f &&
+                accuracyMeters < AUTO_QUIT_REQUIRED_ACCURACY_METERS) {
+            AutoQuitRelocationAnchor = new RelocationAnchor(latitude, longitude, accuracyMeters);
+        }
         if (!isAutoQuitAfterRelocationEligible(hasAccuracy, accuracyMeters, nowMs)) {
-            AutoQuitRelocationAnchor = null;
+            if (!IncidentDisplayInactive) AutoQuitRelocationAnchor = null;
             return;
         }
 
@@ -1307,10 +1322,9 @@ public class CaltopoMap {
 
         AutoQuitRelocationAnchor = null;
         CTWarn(TAG, String.format(Locale.US,
-                "evaluateAutoQuitAfterRelocation(): tablet moved %.2fm after %s without active drone flights; quitting app.",
+                "evaluateAutoQuitAfterRelocation(): tablet moved %.2fm after %s without active drone flights; disconnecting incident map.",
                 distanceMeters, DurationAsString(nowMs - CtDroneSpec.LastWaypointUpdateTimestampMsec())));
-        CaltopoClient.CTEvent(TAG, "RelocationAutoQuit", null);
-        quitHandler.quit();
+        inactivityDisconnectHandler.disconnect();
     }
 
     private static boolean isAutoQuitAfterRelocationEligible(
@@ -1319,12 +1333,96 @@ public class CaltopoMap {
             long nowMs
     ) {
         if (CaltopoClient.IsExitRequested()) return false;
+        if (MapOfflinePrepRuntime.isActive()) return false;
         if (MapStatus != MapStatusListener.mapStatus.up || MapNode == null) return false;
         if (!hasAccuracy || accuracyMeters >= AUTO_QUIT_REQUIRED_ACCURACY_METERS) return false;
         if (CaltopoClient.GetActiveFlightCount() > 0) return false;
+        if (isIncidentBackgroundFlightProtected(nowMs)) return false;
+        if (getCurrentRuntime().getPeerCoordinator()
+                .hasOperationalActivityPreventingMapDisconnect()) return false;
         long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
         return lastWaypointTimestampMs > 0L &&
                 nowMs - lastWaypointTimestampMs >= AUTO_QUIT_FLIGHT_QUIET_MS;
+    }
+
+    /**
+     * Leaves only the incident map while keeping the application available for standalone
+     * coordination. The tracker coordinator will enter its normal 30-second standby after the
+     * map disconnect. Returns false when active operational work makes disconnect unsafe.
+     */
+    public static boolean DisconnectIncidentMapIfInactive(@NonNull String reason) {
+        if (ShutdownInProgress || MapStatus != MapStatusListener.mapStatus.up || MapNode == null) {
+            return false;
+        }
+        if (MapOfflinePrepRuntime.isActive() || CaltopoClient.GetActiveFlightCount() > 0) {
+            return false;
+        }
+        long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
+        long nowMs = timeSource.now();
+        if (isIncidentBackgroundFlightProtected(nowMs)) return false;
+        if (lastWaypointTimestampMs > 0L &&
+                nowMs - lastWaypointTimestampMs < AUTO_QUIT_FLIGHT_QUIET_MS) {
+            return false;
+        }
+        if (getCurrentRuntime().getPeerCoordinator()
+                .hasOperationalActivityPreventingMapDisconnect()) {
+            return false;
+        }
+
+        String normalizedReason = reason.trim().isEmpty() ? "inactive" : reason.trim();
+        String mapId = GetMapId();
+        Bundle parameters = new Bundle();
+        parameters.putString("r2c_mapId", mapId);
+        parameters.putString("r2c_reason", normalizedReason);
+        CaltopoClient.CTEvent(TAG, "IncidentMapAutoDisconnect", parameters);
+        CTWarn(TAG, String.format(Locale.US,
+                "DisconnectIncidentMapIfInactive(): leaving map=%s reason=%s",
+                mapId, normalizedReason));
+        OpenMap(null);
+        IncidentDisplayInactive = false;
+        IncidentBackgroundFlightProtectedUntilMs = 0L;
+        DisconnectInProgress = false;
+        EnsureStandaloneTrackerCoordinationStarted();
+        return true;
+    }
+
+    /** Captures a relocation anchor while the UI is still alive and protects a
+     * flight that was active/recent when the display became inactive. */
+    public static void BeginIncidentDisplayInactive() {
+        IncidentDisplayInactive = true;
+        long nowMs = timeSource.now();
+        long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
+        boolean recentRid = lastWaypointTimestampMs > 0L &&
+                nowMs - lastWaypointTimestampMs < AUTO_QUIT_FLIGHT_QUIET_MS;
+        if (CaltopoClient.GetActiveFlightCount() > 0 || recentRid) {
+            IncidentBackgroundFlightProtectedUntilMs =
+                    nowMs + AUTO_QUIT_BACKGROUND_FLIGHT_PROTECTION_MS;
+            CTInfo(TAG, "BeginIncidentDisplayInactive(): active/recent flight protected for up to 120 minutes.");
+        } else {
+            IncidentBackgroundFlightProtectedUntilMs = 0L;
+        }
+        Location location = MyLocation;
+        if (location != null && location.getAccuracy() > 0.0f &&
+                location.getAccuracy() < AUTO_QUIT_REQUIRED_ACCURACY_METERS) {
+            AutoQuitRelocationAnchor = new RelocationAnchor(
+                    location.getLatitude(), location.getLongitude(), location.getAccuracy());
+        }
+    }
+
+    public static void EndIncidentDisplayInactive() {
+        IncidentDisplayInactive = false;
+        IncidentBackgroundFlightProtectedUntilMs = 0L;
+    }
+
+    private static boolean isIncidentBackgroundFlightProtected(long nowMs) {
+        if (!IncidentDisplayInactive) return false;
+        long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
+        if (lastWaypointTimestampMs > 0L) {
+            IncidentBackgroundFlightProtectedUntilMs = Math.max(
+                    IncidentBackgroundFlightProtectedUntilMs,
+                    lastWaypointTimestampMs + AUTO_QUIT_BACKGROUND_FLIGHT_PROTECTION_MS);
+        }
+        return nowMs < IncidentBackgroundFlightProtectedUntilMs;
     }
 
     private static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {

@@ -50,6 +50,7 @@ public struct OrgConfigCredentials: Sendable, Equatable {
     public let usePeers: Bool?
     public let predictiveHeadEnabled: Bool
     public let proximityAlertSpacingFeet: Int
+    public let connectKey: String
 }
 
 public struct OrgConfigBundle: Sendable, Equatable {
@@ -109,14 +110,16 @@ public struct MutualAidTemplateCredentials: Sendable, Equatable {
     public let domainAndPort: String
     public let sourceLabel: String
     public let targetFolderHint: String
+    public let connectKey: String
 
-    public init(teamID: String, credentialID: String, credentialSecret: String, domainAndPort: String, sourceLabel: String, targetFolderHint: String) {
+    public init(teamID: String, credentialID: String, credentialSecret: String, domainAndPort: String, sourceLabel: String, targetFolderHint: String, connectKey: String = "") {
         self.teamID = teamID
         self.credentialID = credentialID
         self.credentialSecret = credentialSecret
         self.domainAndPort = domainAndPort
         self.sourceLabel = sourceLabel
         self.targetFolderHint = targetFolderHint
+        self.connectKey = connectKey
     }
 }
 
@@ -139,6 +142,7 @@ public struct MutualAidSharedProfile: Sendable, Equatable {
     public let targetMapID: String
     public let targetMapTitle: String
     public let targetFolderHint: String
+    public let connectKey: String
 }
 
 public enum AndroidConfigTokenCodec {
@@ -236,7 +240,8 @@ public enum AndroidConfigTokenCodec {
             sourceLabel: string(object["source_label"]),
             targetMapID: string(object["target_map_id"]),
             targetMapTitle: string(object["target_map_title"]),
-            targetFolderHint: string(object["target_folder_hint"])
+            targetFolderHint: string(object["target_folder_hint"]),
+            connectKey: string(object["connect_key"])
         )
     }
 
@@ -270,7 +275,8 @@ public enum AndroidConfigTokenCodec {
             sourceLabel: string(object["source_label"]),
             targetMapID: string(object["target_map_id"]),
             targetMapTitle: string(object["target_map_title"]),
-            targetFolderHint: string(object["target_folder_hint"])
+            targetFolderHint: string(object["target_folder_hint"]),
+            connectKey: string(object["connect_key"])
         )
     }
 
@@ -447,7 +453,8 @@ public enum OrgConfigTokenCodec {
                     trackerFAAProxyURL: string(config["tracker_faa_proxy_url"]),
                     usePeers: number(config["use_peers"]).map { $0.boolValue },
                     predictiveHeadEnabled: number(config["predictive_head_enabled"])?.boolValue ?? true,
-                    proximityAlertSpacingFeet: number(config["proximity_alert_spacing_feet"])?.intValue ?? 40
+                    proximityAlertSpacingFeet: number(config["proximity_alert_spacing_feet"])?.intValue ?? 40,
+                    connectKey: string(config["connect_key"])
                 )
             case let value where value.hasPrefix("ct_faa_"):
                 throw OrgConfigInteropError.invalidBundle
@@ -462,7 +469,8 @@ public enum OrgConfigTokenCodec {
                         : string(config["source_label"]),
                     targetFolderHint: string(config["target_folder_hint"]).isEmpty
                         ? "MAI"
-                        : string(config["target_folder_hint"])
+                        : string(config["target_folder_hint"]),
+                    connectKey: string(config["connect_key"])
                 )
             default:
                 if !type.isEmpty { ignored.append(type) }

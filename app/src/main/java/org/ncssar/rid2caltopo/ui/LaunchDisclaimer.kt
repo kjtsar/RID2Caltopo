@@ -44,7 +44,7 @@ internal const val LAUNCH_DISCLAIMER_TEXT =
         "or incident-command decisions. The organization remains responsible for independently " +
         "verifying safety-critical information.\n\n" +
         "To the fullest extent permitted by law, the organization and I release, waive, discharge, " +
-        "indemnify, defend, and hold harmless Ken Taylor, as the developer and maintainer of the " +
+        "indemnify, defend, and hold harmless UAS4SAR LLC, as the publisher and operator of the " +
         "RID2Caltopo app and r2c-tracker website, and the project's contributors, from and against " +
         "any and all claims, demands, actions, liabilities, losses, damages, judgments, costs, and " +
         "expenses, including reasonable attorneys' fees, arising out of or relating to access to, " +

@@ -225,6 +225,24 @@ public struct CaltopoArtifactItem: Identifiable, Codable, Sendable, Equatable {
     public let title: String
     public let folderID: String
     public let className: String
+    public let r2cGUID: String?
+    public let r2cLastSeenEpochMilliseconds: Int64?
+
+    public init(
+        id: String,
+        title: String,
+        folderID: String,
+        className: String,
+        r2cGUID: String? = nil,
+        r2cLastSeenEpochMilliseconds: Int64? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.folderID = folderID
+        self.className = className
+        self.r2cGUID = r2cGUID
+        self.r2cLastSeenEpochMilliseconds = r2cLastSeenEpochMilliseconds
+    }
 }
 
 public struct CaltopoPointArtifact: Identifiable, Codable, Sendable, Equatable {
@@ -356,6 +374,26 @@ public struct CaltopoArtifactSnapshot: Codable, Sendable, Equatable {
         return items.filter { $0.id.lowercased() == normalizedID }.count
     }
 
+    /// Only markers carrying the explicit R2C ownership and heartbeat properties are eligible.
+    /// This deliberately excludes manually named `R2C:` markers and older title-only markers.
+    public func staleR2CDeviceMarkerIDs(
+        now: Date,
+        staleAfter: TimeInterval
+    ) -> [String] {
+        let cutoffMilliseconds = Int64((now.timeIntervalSince1970 - max(0, staleAfter)) * 1_000)
+        return items.compactMap { item in
+            guard item.className == "Marker",
+                  item.title.hasPrefix("R2C: "),
+                  !(item.r2cGUID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
+                  let lastSeen = item.r2cLastSeenEpochMilliseconds,
+                  lastSeen > 0,
+                  lastSeen < cutoffMilliseconds
+            else { return nil }
+            let normalizedID = item.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return normalizedID.isEmpty ? nil : normalizedID
+        }
+    }
+
     public func hiding(folderIDs: Set<String>, itemIDs: Set<String> = []) -> CaltopoArtifactSnapshot {
         var hiddenFolders = folderIDs
         var changed = true
@@ -410,14 +448,17 @@ public struct CaltopoArtifactSnapshot: Codable, Sendable, Equatable {
     }
 
     /// Keeps an item available in Map Folders while suppressing its point from
-    /// the rendered overlay. The local R2C device marker is rendered natively,
-    /// so its CalTopo copy must not be drawn a second time at the same location.
+    /// the rendered overlay. Native device and Clue markers must win over their
+    /// CalTopo copies; attached media points are matched through parentItemID.
     public func excludingRenderedPointIDs(_ pointIDs: Set<String>) -> CaltopoArtifactSnapshot {
         let normalized = Set(pointIDs.map { $0.lowercased() })
         guard !normalized.isEmpty else { return self }
         return CaltopoArtifactSnapshot(
             folders: folders,
-            points: points.filter { !normalized.contains($0.id.lowercased()) },
+            points: points.filter { point in
+                !normalized.contains(point.id.lowercased())
+                    && point.parentItemID.map { normalized.contains($0.lowercased()) } != true
+            },
             lines: lines,
             polygons: polygons,
             items: items,
@@ -533,7 +574,9 @@ public enum CaltopoArtifactDecoder {
                 id: id,
                 title: string(properties["title"], fallback: className.isEmpty ? "Map item" : className),
                 folderID: folderID,
-                className: className
+                className: className,
+                r2cGUID: string(properties["r2c-guid"]).nilIfEmpty,
+                r2cLastSeenEpochMilliseconds: int64(properties["r2c-last-seen-epoch-ms"])
             ))
         }
 
@@ -734,6 +777,11 @@ public enum CaltopoArtifactDecoder {
 
     private static func string(_ value: Any?, fallback: String = "") -> String {
         (value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+    }
+    private static func int64(_ value: Any?) -> Int64? {
+        if let number = value as? NSNumber { return number.int64Value }
+        if let string = value as? String { return Int64(string) }
+        return nil
     }
     private static func bool(_ value: Any?, fallback: Bool) -> Bool { (value as? Bool) ?? fallback }
     private static func number(_ value: Any?, fallback: Double) -> Double { (value as? NSNumber)?.doubleValue ?? fallback }

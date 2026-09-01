@@ -35,6 +35,7 @@ internal fun BoxScope.MapPaneSettingsMenus(
     predictiveHeadEnabled: Boolean,
     followFocusedDroneEnabled: Boolean,
     mapReloadInFlight: Boolean,
+    downloadMapStatus: String?,
     mapName: String?,
     autoRemoveBadTiles: Boolean,
     contourOverlayEnabled: Boolean,
@@ -91,7 +92,9 @@ internal fun BoxScope.MapPaneSettingsMenus(
                 onClick = onTogglePredictiveHead
             )
             DropdownMenuItem(
-                text = { Text("Download Map...") },
+                text = {
+                    Text(downloadMapStatus?.let { "Download Map: $it" } ?: "Download Map...")
+                },
                 onClick = onDownloadMap
             )
             DropdownMenuItem(

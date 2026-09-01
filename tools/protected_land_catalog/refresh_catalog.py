@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 
 DEFAULT_MAX_AGE_DAYS = 7
-USER_AGENT = "RID2Caltopo release catalog verifier (contact: kjtsar@kjt.us)"
+USER_AGENT = "RID2Caltopo release catalog verifier (contact: kjt@uas4sar.com)"
 
 
 def utc_now() -> datetime:

@@ -4,6 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.time.ZoneId
 import org.ncssar.rid2caltopo.video.ManagedVideoSessionRecordingCatalog
 
 class MediaMTXConfigTest {
@@ -36,16 +37,40 @@ class MediaMTXConfigTest {
     }
 
     @Test
-    fun archiveTimestampIncludesDayAndTimeForOldAndNewFragments() {
+    fun archiveTimestampLocalizesMediaMtxUtcAndPreservesExistingLocalNames() {
         assertTrue(
             MediaMTXRecordingSync.archiveTimestampFromFragmentName(
-                "2026-08-12_09-20-51-000001.mp4"
-            ) == "12Aug2026_092051"
+                "2026-08-27_04-41-11-000001.mp4",
+                ZoneId.of("America/Los_Angeles"),
+            ) == "26Aug2026_214111_PDT"
         )
         assertTrue(
             MediaMTXRecordingSync.archiveTimestampFromFragmentName(
-                "1sar7mn4pr_12Aug2026_092051-000001.mp4"
-            ) == "12Aug2026_092051"
+                "2026-01-12_09-20-51-000001.mp4",
+                ZoneId.of("America/Los_Angeles"),
+            ) == "12Jan2026_012051_PST"
+        )
+        assertTrue(
+            MediaMTXRecordingSync.archiveTimestampFromFragmentName(
+                "1sar7mn4pr_12Aug2026_092051-000001.mp4",
+                ZoneId.of("America/Los_Angeles"),
+            ) == "12Aug2026_092051_PDT"
+        )
+        assertTrue(
+            MediaMTXRecordingSync.archiveTimestampFromFragmentName(
+                "1sar7mn4pr_12Aug2026_092051_PDT-0700-000001.mp4",
+                ZoneId.of("America/New_York"),
+            ) == "12Aug2026_092051_PDT-0700"
+        )
+    }
+
+    @Test
+    fun archiveTimestampRejectsInvalidMediaMtxDate() {
+        assertTrue(
+            MediaMTXRecordingSync.archiveTimestampFromFragmentName(
+                "2026-02-30_09-20-51-000001.mp4",
+                ZoneId.of("America/Los_Angeles"),
+            ) == null
         )
     }
 

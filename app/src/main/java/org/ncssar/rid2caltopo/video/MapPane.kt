@@ -366,6 +366,7 @@ private class LocalMarkerInfoWindow(
     override fun onOpen(item: Any?) {
         val content = content ?: return
         mView.findViewById<TextView>(R.id.local_marker_title)?.text = content.titleText
+        mView.findViewById<View>(R.id.local_marker_close)?.setOnClickListener { close() }
         mView.findViewById<TextView>(R.id.local_marker_description)?.apply {
             text = content.descriptionText
             visibility = if (content.descriptionText.isBlank()) View.GONE else View.VISIBLE
@@ -410,6 +411,7 @@ private class LocalMarkerInfoWindow(
     }
 
     override fun onClose() {
+        mView.findViewById<View>(R.id.local_marker_close)?.setOnClickListener(null)
         mView.findViewById<TextView>(R.id.local_marker_description)?.apply {
             parent?.requestDisallowInterceptTouchEvent(false)
             setOnTouchListener(null)
@@ -628,27 +630,28 @@ internal fun SplitMapPane(
     val hiddenFolderIds = viewModel.hiddenFolderIds
     val hiddenItemIds = viewModel.hiddenItemIds
     var showBadTilesHowToDialog by remember { mutableStateOf(false) }
-    var showOfflinePrepDialog by remember { mutableStateOf(false) }
+    val offlinePrepCoordinator = AndroidMapOfflinePrepCoordinator
+    var showOfflinePrepDialog by offlinePrepCoordinator.showDialog
     var showMutualAidPackageDialog by remember { mutableStateOf(false) }
-    var offlinePrepInFlight by remember { mutableStateOf(false) }
-    var offlinePrepPreset by remember { mutableStateOf(OFFLINE_PREP_PRESETS[1]) }
-    var offlinePrepIncludeDem by remember { mutableStateOf(true) }
-    var offlinePrepDemResolution by remember { mutableStateOf(DemResolutionOption.STANDARD_30M) }
-    var offlinePrepIncludeContours by remember { mutableStateOf(false) }
-    var offlinePrepMaxThroughput by remember { mutableStateOf(false) }
-    var offlinePrepAreaMode by remember { mutableStateOf(OfflinePrepAreaMode.Viewport) }
-    var offlinePrepBoundaryId by remember { mutableStateOf<String?>(null) }
-    var offlinePrepProgress by remember { mutableStateOf(OfflinePrepProgress()) }
-    var offlinePrepCancelRequested by remember { mutableStateOf(false) }
+    var offlinePrepInFlight by offlinePrepCoordinator.inFlight
+    var offlinePrepPreset by offlinePrepCoordinator.preset
+    var offlinePrepIncludeDem by offlinePrepCoordinator.includeDem
+    var offlinePrepDemResolution by offlinePrepCoordinator.demResolution
+    var offlinePrepIncludeContours by offlinePrepCoordinator.includeContours
+    var offlinePrepMaxThroughput by offlinePrepCoordinator.maximizeThroughput
+    var offlinePrepAreaMode by offlinePrepCoordinator.areaMode
+    var offlinePrepBoundaryId by offlinePrepCoordinator.boundaryId
+    var offlinePrepProgress by offlinePrepCoordinator.progress
+    var offlinePrepCancelRequested by offlinePrepCoordinator.cancelRequested
     var offlinePrepEstimate by remember { mutableStateOf(OfflinePrepEstimate()) }
     var offlinePrepEstimateRunning by remember { mutableStateOf(false) }
     var offlinePrepCacheStatus by remember { mutableStateOf(OfflinePrepCacheStatus()) }
-    var offlinePrepCompletedSelectionKey by remember { mutableStateOf<String?>(null) }
+    var offlinePrepCompletedSelectionKey by offlinePrepCoordinator.completedSelectionKey
     var offlinePrepAvailableBytes by remember { mutableStateOf<Long?>(null) }
     var offlinePrepTileCacheCapBytes by remember { mutableStateOf(MapCachePolicy.tileCacheMaxBytes(context)) }
-    var offlinePrepJob by remember { mutableStateOf<Job?>(null) }
-    var offlinePrepAutoCloseJob by remember { mutableStateOf<Job?>(null) }
-    val offlinePrepActiveCalls = remember { ConcurrentHashMap.newKeySet<Call>() }
+    var offlinePrepJob by offlinePrepCoordinator.job
+    var offlinePrepAutoCloseJob by offlinePrepCoordinator.autoCloseJob
+    val offlinePrepActiveCalls = offlinePrepCoordinator.activeCalls
     var mapBounds by remember { mutableStateOf<BoundingBox?>(null) }
     val packageZoneId = remember { ZoneId.systemDefault() }
     val packageDateFormatter = remember { DateTimeFormatter.ofPattern("yyyy-MM-dd") }
@@ -1426,6 +1429,7 @@ internal fun SplitMapPane(
         offlinePrepCancelRequested = false
         offlinePrepInFlight = true
         offlinePrepProgress = OfflinePrepProgress(phase = "Preparing", total = 0, completed = 0)
+        offlinePrepCoordinator.begin()
         val preset = offlinePrepPreset
         val includeDem = offlinePrepIncludeDem
         val demResolution = offlinePrepDemResolution
@@ -1443,11 +1447,12 @@ internal fun SplitMapPane(
         val dronePathPoints = dronePoints.mapNotNull { point ->
             if (point.lat.isFinite() && point.lng.isFinite()) GeoPoint(point.lat, point.lng) else null
         }
-        offlinePrepJob = uiScope.launch(Dispatchers.IO) {
+        offlinePrepJob = offlinePrepCoordinator.scope.launch(Dispatchers.IO) {
             if (tileSources.isEmpty()) {
                 withContext(Dispatchers.Main.immediate) {
                     offlinePrepInFlight = false
                     offlinePrepJob = null
+                    offlinePrepCoordinator.finish()
                     CaltopoClient.ShowToast("Selected base layer does not support map download.")
                 }
                 return@launch
@@ -1459,6 +1464,7 @@ internal fun SplitMapPane(
                     withContext(Dispatchers.Main.immediate) {
                         offlinePrepInFlight = false
                         offlinePrepJob = null
+                        offlinePrepCoordinator.finish()
                         offlinePrepProgress = offlinePrepProgress.copy(phase = "Failed")
                         CaltopoClient.ShowToast("DEM planning failed: ${e.message ?: e.javaClass.simpleName}")
                     }
@@ -1893,6 +1899,7 @@ internal fun SplitMapPane(
                     offlinePrepCompletedSelectionKey = selectionKey
                     offlinePrepActiveCalls.clear()
                     offlinePrepCancelRequested = false
+                    offlinePrepCoordinator.finish()
                     val doneMsg =
                         if (failTotal > 0) {
                             "Download map finished with failures: hit=$hit fetched=$fetch tileFail=$tileFail demFail=$demFail totalFail=$failTotal in ${elapsedMs}ms"
@@ -1903,7 +1910,7 @@ internal fun SplitMapPane(
                     MapCacheDebug.log(doneMsg)
                     offlinePrepAutoCloseJob?.cancel()
                     if (failTotal == 0) {
-                        offlinePrepAutoCloseJob = uiScope.launch {
+                        offlinePrepAutoCloseJob = offlinePrepCoordinator.scope.launch {
                             delay(1500L)
                             if (!offlinePrepInFlight && offlinePrepProgress.phase == "Complete") {
                                 showOfflinePrepDialog = false
@@ -1920,6 +1927,7 @@ internal fun SplitMapPane(
                     offlinePrepJob = null
                     offlinePrepActiveCalls.clear()
                     offlinePrepCancelRequested = false
+                    offlinePrepCoordinator.finish()
                     offlinePrepAutoCloseJob?.cancel()
                     offlinePrepAutoCloseJob = null
                     offlinePrepProgress = offlinePrepProgress.copy(phase = "Cancelled")
@@ -1933,6 +1941,7 @@ internal fun SplitMapPane(
                     offlinePrepJob = null
                     offlinePrepActiveCalls.clear()
                     offlinePrepCancelRequested = false
+                    offlinePrepCoordinator.finish()
                     offlinePrepAutoCloseJob?.cancel()
                     offlinePrepAutoCloseJob = null
                     offlinePrepProgress = offlinePrepProgress.copy(phase = "Failed")
@@ -4041,6 +4050,7 @@ internal fun SplitMapPane(
                 predictiveHeadEnabled = predictiveHeadEnabled,
                 followFocusedDroneEnabled = followFocusedDroneEnabled,
                 mapReloadInFlight = mapReloadInFlight,
+                downloadMapStatus = offlinePrepMenuStatus(offlinePrepInFlight, offlinePrepProgress),
                 mapName = mapName,
                 autoRemoveBadTiles = autoRemoveBadTiles,
                 contourOverlayEnabled = contourOverlayEnabled,
@@ -4192,7 +4202,7 @@ internal fun SplitMapPane(
             onShareDone = { MutualAidPackageTransferManager.stopShareSession() }
         )
 
-        if (showOfflinePrepDialog) {
+        if (showOfflinePrepDialog && !isInsetMode) {
             val selectedBoundary =
                 if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
                     offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
@@ -4631,10 +4641,7 @@ internal fun SplitMapPane(
                         onClick = {
                             if (offlinePrepInFlight) {
                                 if (offlinePrepCancelRequested) return@TextButton
-                                offlinePrepCancelRequested = true
-                                offlinePrepProgress = offlinePrepProgress.copy(phase = "Cancelling")
-                                offlinePrepActiveCalls.forEach { it.cancel() }
-                                offlinePrepJob?.cancel()
+                                offlinePrepCoordinator.requestCancel()
                             } else {
                                 offlinePrepAutoCloseJob?.cancel()
                                 offlinePrepCancelRequested = false

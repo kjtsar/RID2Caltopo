@@ -28,6 +28,17 @@ R2CFFmpegSession *R2CFFmpegSessionCreate(const char *url);
 // submit standalone SEI samples to VideoToolbox.
 R2CFFmpegSession *R2CFFmpegSessionCreatePlayback(const char *url);
 
+// Rewrites a MediaMTX H.264 recording into an iOS-friendly MP4 without
+// re-encoding. Standalone SEI samples are merged into the following picture
+// sample and picture timestamps are normalized to a constant 30 fps timeline.
+// Returns 0 on success and writes a human-readable result to detail.
+int R2CFFmpegNormalizeRecording(
+    const char *sourcePath,
+    const char *destinationPath,
+    char *detail,
+    int detailCapacity
+);
+
 // Interrupts network I/O, joins the worker, and releases all retained frames.
 void R2CFFmpegSessionDestroy(R2CFFmpegSession *session);
 

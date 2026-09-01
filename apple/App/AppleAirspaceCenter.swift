@@ -64,7 +64,7 @@ final class AppleAirspaceCenter: ObservableObject {
                 ) else { throw URLError(.badURL) }
                 var request = URLRequest(url: url)
                 request.timeoutInterval = 30
-                request.setValue("RID2Caltopo/Apple (contact: kjtsar@kjt.us)", forHTTPHeaderField: "User-Agent")
+                request.setValue("RID2Caltopo/Apple (contact: kjt@uas4sar.com)", forHTTPHeaderField: "User-Agent")
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let http = response as? HTTPURLResponse, (200 ..< 300).contains(http.statusCode) else {
                     throw AppleAirspaceError.service("Controlled-airspace lookup failed.")

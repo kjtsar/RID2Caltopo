@@ -9,7 +9,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge
 import java.io.ByteArrayOutputStream
-import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 object ManagedVideoThumbnailStore {
@@ -38,10 +37,9 @@ object ManagedVideoThumbnailStore {
                 val jpeg = withTimeoutOrNull(2_500L) { frame.await() }
                     ?.takeIf { it.isNotEmpty() }
                     ?: return@withContext null
-                val revision = MessageDigest.getInstance("SHA-256")
-                    .digest(jpeg)
-                    .take(12)
-                    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                // CalTopo and intervening caches need a different URL for every
+                // capture, even when a stationary frame compresses identically.
+                val revision = System.currentTimeMillis().toString()
                 ManagedVideoThumbnail(revision, jpeg).also {
                     thumbnails[sessionId] = it
                 }

@@ -26,6 +26,7 @@ struct AppleStoredOperationalProfile: Codable {
     let autoConnect: Bool
     let expiresAtEpochMilliseconds: Int64
     let quietRemoveOnExpiry: Bool
+    let connectKey: String?
 }
 
 struct AppleOperationalProfileOption: Identifiable, Equatable {
@@ -90,7 +91,8 @@ final class AppleCaltopoProfileLifecycle: ObservableObject {
             credentialSecret: configuration.credentialSecret,
             autoConnect: false,
             expiresAtEpochMilliseconds: 0,
-            quietRemoveOnExpiry: false
+            quietRemoveOnExpiry: false,
+            connectKey: configuration.connectKey
         )
         try Self.store(profile, account: Self.homeAccount)
         setActive("home")
@@ -124,7 +126,8 @@ final class AppleCaltopoProfileLifecycle: ObservableObject {
             credentialSecret: profile.credentialSecret,
             autoConnect: profile.autoConnect,
             expiresAtEpochMilliseconds: profile.expiresAtEpochMilliseconds,
-            quietRemoveOnExpiry: profile.quietRemoveOnExpiry
+            quietRemoveOnExpiry: profile.quietRemoveOnExpiry,
+            connectKey: profile.connectKey
         )
         try Self.store(stored, account: Self.mutualAidAccount)
         mutualAidDisplayName = stored.displayName
@@ -415,6 +418,7 @@ final class AppleOrgConfigSettings: ObservableObject {
             for key in [
                 "mutualAid.template.teamID", "mutualAid.template.domainAndPort",
                 "mutualAid.template.sourceLabel", "mutualAid.template.targetFolderHint",
+                "mutualAid.template.connectKey",
             ] {
                 defaults.removeObject(forKey: key)
             }
@@ -495,7 +499,8 @@ final class AppleOrgConfigSettings: ObservableObject {
             credentialSecret: credentialSecret,
             domainAndPort: defaults.string(forKey: "mutualAid.template.domainAndPort") ?? "caltopo.com",
             sourceLabel: defaults.string(forKey: "mutualAid.template.sourceLabel") ?? organizationName,
-            targetFolderHint: defaults.string(forKey: "mutualAid.template.targetFolderHint") ?? "MAI"
+            targetFolderHint: defaults.string(forKey: "mutualAid.template.targetFolderHint") ?? "MAI",
+            connectKey: defaults.string(forKey: "mutualAid.template.connectKey") ?? ""
         )
     }
 
@@ -739,6 +744,7 @@ final class AppleOrgConfigSettings: ObservableObject {
                 "domain_and_port": mutualAidTemplate.domainAndPort,
                 "source_label": mutualAidTemplate.sourceLabel,
                 "target_folder_hint": mutualAidTemplate.targetFolderHint,
+                "connect_key": mutualAidTemplate.connectKey,
             ]
         }
         return value
@@ -794,7 +800,8 @@ final class AppleOrgConfigSettings: ObservableObject {
                 credentialSecret: template["credential_secret"] as? String ?? "",
                 domainAndPort: template["domain_and_port"] as? String ?? "caltopo.com",
                 sourceLabel: template["source_label"] as? String ?? "",
-                targetFolderHint: template["target_folder_hint"] as? String ?? "MAI"
+                targetFolderHint: template["target_folder_hint"] as? String ?? "MAI",
+                connectKey: template["connect_key"] as? String ?? ""
             ))
         }
     }
@@ -812,6 +819,7 @@ final class AppleOrgConfigSettings: ObservableObject {
         defaults.set(template.domainAndPort, forKey: "mutualAid.template.domainAndPort")
         defaults.set(template.sourceLabel, forKey: "mutualAid.template.sourceLabel")
         defaults.set(template.targetFolderHint, forKey: "mutualAid.template.targetFolderHint")
+        defaults.set(template.connectKey, forKey: "mutualAid.template.connectKey")
         try Self.storeSecret(template.credentialID, account: Self.mutualAidCredentialIDAccount)
         try Self.storeSecret(template.credentialSecret, account: Self.mutualAidCredentialSecretAccount)
     }

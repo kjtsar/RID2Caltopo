@@ -71,7 +71,7 @@ internal object UsgsContoursTileSource : OnlineTileSourceBase(
 }
 
 internal fun osmUserAgent(): String =
-    "RID2Caltopo v${BuildConfig.VERSION_NAME} (contact: kjtsar@kjt.us)"
+    "RID2Caltopo v${BuildConfig.VERSION_NAME} (contact: kjt@uas4sar.com)"
 
 internal fun buildOfflineTileRequest(
     tileSource: OnlineTileSourceBase,

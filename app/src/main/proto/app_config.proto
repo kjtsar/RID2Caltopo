@@ -46,6 +46,7 @@ message AppConfig {
 
     int64 imported_at_epoch_ms = 20;
     string import_dedupe_key = 21;
+    string connect_key = 22;
   }
 
   message MutualAidTemplate {
@@ -55,6 +56,7 @@ message AppConfig {
     string domain_and_port = 4;
     string source_label = 5;
     string target_folder_hint = 6;
+    string connect_key = 7;
   }
 
   message RidMapping {
@@ -134,6 +136,7 @@ message AppConfig {
   string caltopo_track_folder = 40;
   string caltopo_domain_and_port = 41;
   CaltopoCredentialsConfig caltopo_credentials = 42;
+  string caltopo_connect_key = 43;
 
   string incident = 50;
   string op_period = 51;

@@ -12,8 +12,33 @@ class CaltopoPositionReportQueryTest {
     }
 
     @Test
+    fun positionReportsUseConfiguredConnectKeyWithLegacyFallback() {
+        assertEquals(
+            "/api/v1/position/report/NCSSAR-UAS",
+            CaltopoSession.positionReportPath(" NCSSAR-UAS "),
+        )
+        assertEquals(
+            "/api/v1/position/report/DRONE",
+            CaltopoSession.positionReportPath(""),
+        )
+        assertEquals(
+            "/api/v1/position/report/TEAM%2FDRONE",
+            CaltopoSession.positionReportPath("TEAM/DRONE"),
+        )
+        assertEquals(
+            "FLEET:NCSSAR-UAS-RID01",
+            CaltopoSession.liveTrackDeviceId("RID01", " NCSSAR-UAS "),
+        )
+        assertEquals(
+            "FLEET:DRONE-RID01",
+            CaltopoSession.liveTrackDeviceId("RID01", ""),
+        )
+    }
+
+    @Test
     fun positionQueryContainsColonQualifiedAircraftAndCameraParameters() {
         val parameters = CaltopoSession.buildPositionQueryParameters(
+            1600.8,
             CtDroneSpec.PositionTelemetry(140.0, 19.4384449, 92.0),
             CaltopoCameraMetadata(
                 "https://r2c-tracker.com/t/Bz2DZg",
@@ -25,6 +50,7 @@ class CaltopoPositionReportQueryTest {
             ),
         )
 
+        assertEquals(5252L, parameters.getLong("aircraft:altitude"))
         assertEquals(140.0, parameters.getDouble("aircraft:altitude_rate"), 0.0)
         assertEquals(19.4384449, parameters.getDouble("aircraft:gs"), 0.0)
         assertEquals(92.0, parameters.getDouble("aircraft:track"), 0.0)
@@ -44,14 +70,42 @@ class CaltopoPositionReportQueryTest {
     @Test
     fun positionQueryOmitsEmptyAndNonFiniteValues() {
         val parameters = CaltopoSession.buildPositionQueryParameters(
+            -1000.0,
             CtDroneSpec.PositionTelemetry(Double.NaN, null, Double.POSITIVE_INFINITY),
             CaltopoCameraMetadata("", null),
         )
 
+        assertFalse(parameters.has("aircraft:altitude"))
         assertFalse(parameters.has("aircraft:altitude_rate"))
         assertFalse(parameters.has("aircraft:gs"))
         assertFalse(parameters.has("aircraft:track"))
         assertFalse(parameters.has("camera:external_url"))
         assertFalse(parameters.has("camera:thumbnail_url"))
+    }
+
+    @Test
+    fun debugSummaryShowsWireFieldsWithoutTrackerPaths() {
+        val parameters = CaltopoSession.buildPositionQueryParameters(
+            1600.8,
+            CtDroneSpec.PositionTelemetry(140.0, 19.4384449, 92.0),
+            CaltopoCameraMetadata(
+                "https://r2c-tracker.com/t/private-tablet-code",
+                "https://r2c-tracker.com/org/api/v1/video/thumbnail/private-session",
+                111.46,
+                -37.0,
+                37.703125,
+                21.207031,
+            ),
+        )
+
+        val summary = CaltopoSession.positionReportDiagnosticSummary(parameters)
+
+        assertTrue(summary.contains("aircraft:altitude=5252"))
+        assertTrue(summary.contains("camera:external_url=present(scheme=https,host=r2c-tracker.com)"))
+        assertTrue(summary.contains(
+            "camera:thumbnail_url=present(scheme=https,host=r2c-tracker.com,cacheBust=missing)",
+        ))
+        assertFalse(summary.contains("private-tablet-code"))
+        assertFalse(summary.contains("private-session"))
     }
 }

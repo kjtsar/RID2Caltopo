@@ -1,6 +1,34 @@
 import Foundation
 import Testing
 
+@Test func organizationAccessRequiresAuthenticationForOrganizationOrCaltopoTeamsAccount() {
+    #expect(!OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(organizationName: ""))
+    #expect(!OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(organizationName: "  \n"))
+    #expect(OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(organizationName: "NCSSAR"))
+    #expect(OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
+        organizationName: "",
+        trackerURLPrefix: "https://r2c-tracker.com/ncssar",
+        trackerAPIKey: "token"
+    ))
+    #expect(!OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
+        organizationName: "",
+        trackerURLPrefix: "https://r2c-tracker.com/ncssar",
+        trackerAPIKey: ""
+    ))
+    #expect(OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
+        organizationName: "",
+        caltopoTeamID: "team",
+        caltopoCredentialID: "credential",
+        caltopoCredentialSecret: "secret"
+    ))
+    #expect(!OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
+        organizationName: "",
+        caltopoTeamID: "team",
+        caltopoCredentialID: "credential",
+        caltopoCredentialSecret: ""
+    ))
+}
+
 @Test func operationalMapTrackFreshnessPrefersOnlyStrictlyNewerPeerSamples() {
     let local = Date(timeIntervalSince1970: 1_000)
 
@@ -50,6 +78,9 @@ import Testing
 
     #expect(contentView.contains("AppleTrackerEnrollmentClient.normalizedEnrollmentURL"))
     #expect(contentView.contains("trackerReauthenticationBrowserOpen"))
+    #expect(contentView.contains(
+        "if organizationAuthenticationRequired, !organizationAccessGranted"
+    ))
     #expect(contentView.contains("Tracker sign-in required"))
     #expect(contentView.contains("Button(\"Sign in\")"))
     #expect(contentView.contains("Button(\"Continue offline\", role: .cancel)"))
@@ -996,29 +1027,6 @@ func incidentMapRelocationRequiresAccurateFiftyFootMovementAfterQuietPeriod() {
     )
     #expect(!firstEvaluation)
     #expect(secondEvaluation)
-}
-
-@Test
-func incidentMapBackgroundFlightProtectionSurvivesScreenOffBluetoothThrottling() {
-    let connectedAt = Date(timeIntervalSince1970: 1_700_000_000)
-    let protectedUntil = connectedAt.addingTimeInterval(120 * 60)
-    let protected = IncidentMapOperationalState(
-        connectedToIncidentMap: true,
-        activeFlightCount: 0,
-        lastRIDMessageAt: connectedAt,
-        mapConnectedAt: connectedAt.addingTimeInterval(-600),
-        hasManagedVideoOrTransfer: false,
-        offlineMapPreparationActive: false,
-        backgroundFlightProtectedUntil: protectedUntil
-    )
-    #expect(!IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
-        protected,
-        now: protectedUntil.addingTimeInterval(-1)
-    ))
-    #expect(IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
-        protected,
-        now: protectedUntil
-    ))
 }
 
 @Test

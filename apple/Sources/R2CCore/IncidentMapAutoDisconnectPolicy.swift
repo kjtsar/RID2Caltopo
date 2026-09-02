@@ -7,7 +7,6 @@ public struct IncidentMapOperationalState: Sendable, Equatable {
     public let mapConnectedAt: Date
     public let hasManagedVideoOrTransfer: Bool
     public let offlineMapPreparationActive: Bool
-    public let backgroundFlightProtectedUntil: Date?
 
     public init(
         connectedToIncidentMap: Bool,
@@ -15,8 +14,7 @@ public struct IncidentMapOperationalState: Sendable, Equatable {
         lastRIDMessageAt: Date?,
         mapConnectedAt: Date,
         hasManagedVideoOrTransfer: Bool,
-        offlineMapPreparationActive: Bool,
-        backgroundFlightProtectedUntil: Date? = nil
+        offlineMapPreparationActive: Bool
     ) {
         self.connectedToIncidentMap = connectedToIncidentMap
         self.activeFlightCount = activeFlightCount
@@ -24,14 +22,12 @@ public struct IncidentMapOperationalState: Sendable, Equatable {
         self.mapConnectedAt = mapConnectedAt
         self.hasManagedVideoOrTransfer = hasManagedVideoOrTransfer
         self.offlineMapPreparationActive = offlineMapPreparationActive
-        self.backgroundFlightProtectedUntil = backgroundFlightProtectedUntil
     }
 }
 
 public enum IncidentMapAutoDisconnectPolicy {
     public static let quietInterval: TimeInterval = 5 * 60
     public static let backgroundGraceInterval: TimeInterval = 5 * 60
-    public static let backgroundFlightProtectionInterval: TimeInterval = 120 * 60
     public static let relocationDistanceMeters = 50 * 0.3048
     public static let requiredHorizontalAccuracyMeters = 25 * 0.3048
 
@@ -42,8 +38,7 @@ public enum IncidentMapAutoDisconnectPolicy {
         guard state.connectedToIncidentMap,
               state.activeFlightCount == 0,
               !state.hasManagedVideoOrTransfer,
-              !state.offlineMapPreparationActive,
-              state.backgroundFlightProtectedUntil.map({ now >= $0 }) ?? true
+              !state.offlineMapPreparationActive
         else { return false }
         let baseline = max(state.mapConnectedAt, state.lastRIDMessageAt ?? state.mapConnectedAt)
         return now.timeIntervalSince(baseline) >= quietInterval
@@ -87,9 +82,8 @@ public struct IncidentMapRelocationGuard: Sendable, Equatable {
             reset()
             return false
         }
-        // A screen-off anchor must survive a currently active flight. The
-        // operational gate still prevents disconnect until the flight is
-        // genuinely idle or its explicit protection window expires.
+        // A screen-off anchor survives an active flight. The operational gate
+        // allows disconnect only after the flight is gone and RID is quiet.
         guard IncidentMapAutoDisconnectPolicy.isOperationallyIdle(
             operationalState,
             now: now

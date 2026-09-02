@@ -17,12 +17,15 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
+import android.hardware.biometrics.BiometricPrompt
+import android.app.KeyguardManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.os.CancellationSignal
 import android.provider.Settings
 import android.view.Display
 import android.view.View
@@ -174,6 +177,84 @@ internal fun shouldShowBluetoothDisabledPanel(
 internal fun shouldClearTemporaryLocationOverrideOnCreate(
     hasSavedInstanceState: Boolean,
 ): Boolean = !hasSavedInstanceState
+
+internal fun organizationAccessAuthenticationRequired(
+    organizationName: String?,
+    trackerOrganizationConfigured: Boolean,
+    caltopoTeamsAccountConfigured: Boolean,
+): Boolean = !organizationName.isNullOrBlank() ||
+    trackerOrganizationConfigured ||
+    caltopoTeamsAccountConfigured
+
+private fun configuredAccessAuthenticationRequired(): Boolean =
+    CaltopoClient.GetCaltopoCredentials().let { credentials ->
+        organizationAccessAuthenticationRequired(
+            CaltopoClient.GetHomeOrgName(),
+            CaltopoClient.GetHomeTrackerApiKey().isNotBlank() &&
+                CaltopoClient.GetHomeTrackerUrlPfx().isNotBlank(),
+            !credentials.teamId.isNullOrBlank() &&
+                !credentials.credentialId.isNullOrBlank() &&
+                !credentials.credentialSecret.isNullOrBlank(),
+        )
+    }
+
+private enum class OrganizationAccessState {
+    LOCKED,
+    AUTHENTICATING,
+    UNLOCKED,
+    DEVICE_SECURITY_REQUIRED,
+}
+
+@Composable
+private fun OrganizationAccessGate(
+    protectedAccountName: String,
+    state: OrganizationAccessState,
+    errorMessage: String?,
+    onUnlock: () -> Unit,
+    onOpenSecuritySettings: () -> Unit,
+    onQuit: () -> Unit,
+) {
+    val deviceSecurityRequired = state == OrganizationAccessState.DEVICE_SECURITY_REQUIRED
+    AlertDialog(
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+        title = { Text("Protected access locked") },
+        text = {
+            Column {
+                Text(
+                    if (deviceSecurityRequired) {
+                        "Set up a device PIN, pattern, password, or biometrics in system " +
+                            "Settings before using the $protectedAccountName configuration."
+                    } else {
+                        "Authenticate with this device's biometric, PIN, pattern, or password " +
+                            "to access $protectedAccountName maps and settings."
+                    }
+                )
+                errorMessage?.takeIf { it.isNotBlank() }?.let { Text(it) }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = state != OrganizationAccessState.AUTHENTICATING,
+                onClick = if (deviceSecurityRequired) onOpenSecuritySettings else onUnlock,
+            ) {
+                Text(
+                    when {
+                        deviceSecurityRequired -> "Open security settings"
+                        state == OrganizationAccessState.AUTHENTICATING -> "Authenticating…"
+                        else -> "Unlock"
+                    }
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onQuit) { Text("Close app") }
+        },
+    )
+}
 
 internal fun shouldShutdownOnActivityDestroy(
     isPrimaryActivity: Boolean,
@@ -538,6 +619,10 @@ class R2CActivity :
     private var displayManager: DisplayManager? = null
     private var bluetoothDisabled by mutableStateOf(false)
     private var launchDisclaimerAccepted by mutableStateOf(false)
+    private var organizationAccessState by mutableStateOf(OrganizationAccessState.LOCKED)
+    private var organizationAccessError by mutableStateOf<String?>(null)
+    private var organizationAuthenticationCancellation: CancellationSignal? = null
+    private var pendingOrganizationAccessIntent: Intent? = null
     private var trackerReauthenticationBrowserOpen = false
     private var pendingTrackerReauthenticationUrl by mutableStateOf<String?>(null)
     private var pendingVideoStreamRequest by mutableStateOf<VideoStreamViewRequest?>(null)
@@ -831,6 +916,7 @@ class R2CActivity :
                     }
                 }.onSuccess { result ->
                     showToast("Organization '${result.organization}' imported; tracker enrollment installed.")
+                    lockOrganizationAccessAndAuthenticate()
                     NotamCenter.requestImmediateRefresh()
                     AirspaceCenter.requestImmediateRefresh()
                     CaltopoClient.CheckUnreportedFiles()
@@ -853,6 +939,7 @@ class R2CActivity :
                 OrgConfigManager.joinFromToken(this, token) { success, message ->
                     Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
                     if (success) {
+                        lockOrganizationAccessAndAuthenticate()
                         NotamCenter.requestImmediateRefresh()
                         AirspaceCenter.requestImmediateRefresh()
                     }
@@ -895,6 +982,13 @@ class R2CActivity :
         super.onNewIntent(intent)
         setIntent(intent)
         if (launchDisclaimerAccepted) {
+            if (configuredAccessAuthenticationRequired() &&
+                organizationAccessState != OrganizationAccessState.UNLOCKED
+            ) {
+                pendingOrganizationAccessIntent = Intent(intent)
+                requestOrganizationAccessAuthentication()
+                return
+            }
             handleR2cIntent(intent)
             handleStreamsQualificationIntent(intent)
         }
@@ -902,6 +996,9 @@ class R2CActivity :
 
     override fun onResume() {
         super.onResume()
+        if (launchDisclaimerAccepted) {
+            requestOrganizationAccessAuthentication()
+        }
         ScanningService.setDisplayActive(applicationContext, true, externalDisplayConnected)
         val retryTrackerReauthentication = shouldRetryTrackerReauthenticationAfterBrowserReturn(
             browserWasOpen = trackerReauthenticationBrowserOpen,
@@ -924,6 +1021,12 @@ class R2CActivity :
 
     override fun onStop() {
         ScanningService.setDisplayActive(applicationContext, false, externalDisplayConnected)
+        if (configuredAccessAuthenticationRequired() &&
+            organizationAccessState != OrganizationAccessState.AUTHENTICATING &&
+            !isChangingConfigurations
+        ) {
+            organizationAccessState = OrganizationAccessState.LOCKED
+        }
         super.onStop()
     }
 
@@ -1012,6 +1115,22 @@ class R2CActivity :
                             onConfirm = confirmAppExit,
                         )
                     }
+                    return@content
+                }
+                val organizationName = CaltopoClient.GetHomeOrgName().trim()
+                if (configuredAccessAuthenticationRequired() &&
+                    organizationAccessState != OrganizationAccessState.UNLOCKED
+                ) {
+                    OrganizationAccessGate(
+                        protectedAccountName = organizationName.ifEmpty { "CalTopo Teams" },
+                        state = organizationAccessState,
+                        errorMessage = organizationAccessError,
+                        onUnlock = ::requestOrganizationAccessAuthentication,
+                        onOpenSecuritySettings = {
+                            startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS))
+                        },
+                        onQuit = { CaltopoClient.QuitApplication() },
+                    )
                     return@content
                 }
                 val localContext = LocalContext.current
@@ -1349,6 +1468,81 @@ class R2CActivity :
         }
     }
 
+    fun lockOrganizationAccessAndAuthenticate() {
+        if (!configuredAccessAuthenticationRequired()) return
+        organizationAccessState = OrganizationAccessState.LOCKED
+        organizationAccessError = null
+        requestOrganizationAccessAuthentication()
+    }
+
+    private fun requestOrganizationAccessAuthentication() {
+        if (!configuredAccessAuthenticationRequired()) {
+            organizationAuthenticationCancellation?.cancel()
+            organizationAuthenticationCancellation = null
+            organizationAccessState = OrganizationAccessState.UNLOCKED
+            organizationAccessError = null
+            return
+        }
+        if (organizationAccessState == OrganizationAccessState.UNLOCKED ||
+            organizationAccessState == OrganizationAccessState.AUTHENTICATING
+        ) {
+            return
+        }
+
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        if (!keyguardManager.isDeviceSecure) {
+            organizationAccessState = OrganizationAccessState.DEVICE_SECURITY_REQUIRED
+            organizationAccessError =
+                "No secure device credential is configured. Set up a PIN, pattern, " +
+                    "password, or biometrics in system Settings; protected access cannot be bypassed."
+            CTError(TAG, "Organization access requires a secure device lock.")
+            return
+        }
+
+        organizationAccessState = OrganizationAccessState.AUTHENTICATING
+        organizationAccessError = null
+        val cancellation = CancellationSignal()
+        organizationAuthenticationCancellation = cancellation
+        val prompt = BiometricPrompt.Builder(this)
+            .setTitle("Unlock protected access")
+            .setSubtitle("Use biometrics or your device PIN, pattern, or password")
+            .setDeviceCredentialAllowed(true)
+            .build()
+        prompt.authenticate(
+            cancellation,
+            mainExecutor,
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(
+                    result: BiometricPrompt.AuthenticationResult
+                ) {
+                    organizationAuthenticationCancellation = null
+                    organizationAccessState = OrganizationAccessState.UNLOCKED
+                    organizationAccessError = null
+                    CTDebug(TAG, "Device owner authenticated for organization access")
+                    pendingOrganizationAccessIntent?.let { pendingIntent ->
+                        pendingOrganizationAccessIntent = null
+                        setIntent(
+                            Intent(this@R2CActivity, R2CActivity::class.java)
+                                .setAction(Intent.ACTION_MAIN)
+                        )
+                        handleR2cIntent(pendingIntent)
+                    }
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    organizationAuthenticationCancellation = null
+                    organizationAccessState = OrganizationAccessState.LOCKED
+                    organizationAccessError =
+                        "Authentication was not completed. Organization maps remain locked."
+                    CTDebug(
+                        TAG,
+                        "Organization authentication not completed code=$errorCode",
+                    )
+                }
+            },
+        )
+    }
+
     private fun acceptLaunchDisclaimer() {
         if (launchDisclaimerAccepted) return
         CTDebug(TAG, "Launch disclaimer accepted")
@@ -1365,9 +1559,18 @@ class R2CActivity :
             return
         }
         launchDisclaimerAccepted = true
+        if (configuredAccessAuthenticationRequired() &&
+            organizationAccessState != OrganizationAccessState.UNLOCKED &&
+            intent?.action == Intent.ACTION_VIEW
+        ) {
+            pendingOrganizationAccessIntent = Intent(intent)
+        }
+        requestOrganizationAccessAuthentication()
         refreshExternalDisplay()
         // Handle org-config QR scan that launched or re-launched this activity.
-        handleR2cIntent(intent)
+        if (pendingOrganizationAccessIntent == null) {
+            handleR2cIntent(intent)
+        }
         handleStreamsQualificationIntent(intent)
         if (!InitializedCalled) {
 

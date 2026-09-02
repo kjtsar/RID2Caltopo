@@ -851,6 +851,7 @@ fun MainScreen(
                 OrgConfigManager.joinFromToken(context, token) { success, message ->
                     showConfigImportToast(context, message)
                     if (success) {
+                        R2CActivity.getR2CActivity()?.lockOrganizationAccessAndAuthenticate()
                         NotamCenter.requestImmediateRefresh()
                         AirspaceCenter.requestImmediateRefresh()
                     }
@@ -877,6 +878,7 @@ fun MainScreen(
                             applyTrackerEnrollmentAndRefreshNotams(it)
                         }
                     }.onSuccess { result ->
+                        R2CActivity.getR2CActivity()?.lockOrganizationAccessAndAuthenticate()
                         result.reauthenticationUrl?.let { url ->
                             R2CActivity.getR2CActivity()?.beginTrackerReauthentication(url)
                         }

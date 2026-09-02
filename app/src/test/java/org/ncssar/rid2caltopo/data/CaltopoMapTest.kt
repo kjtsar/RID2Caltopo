@@ -389,7 +389,7 @@ class CaltopoMapTest {
     }
 
     @Test
-    fun screenOffFlightProtection_preservesAnchorUntilTwoHourFallback() {
+    fun screenOffFlightProtection_preservesAnchorUntilRidIsQuiet() {
         var nowMs = 1_000_000_000L
         var disconnectCount = 0
         CaltopoMap.setTimeSourceForTesting { nowMs }
@@ -408,7 +408,7 @@ class CaltopoMapTest {
         assertEquals(0, disconnectCount)
         assertTrue(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
 
-        nowMs += 120L * 60L * 1000L + 1L
+        nowMs += FIVE_MINUTES_MS + 1L
         CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
 
         assertEquals(1, disconnectCount)

@@ -1,4 +1,5 @@
 import CoreLocation
+import LocalAuthentication
 import R2CCore
 import R2CAppleRadios
 import SwiftUI
@@ -33,108 +34,6 @@ private struct TrackerReauthenticationPromptModifier: ViewModifier {
                     + "sharing and online organization services. RID, video, maps, and "
                     + "your existing CalTopo configuration remain available."
             )
-        }
-    }
-}
-
-private struct NavigationBarDoubleTapBridge: UIViewRepresentable {
-    let action: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
-    }
-
-    func makeUIView(context: Context) -> InstallerView {
-        let view = InstallerView()
-        view.coordinator = context.coordinator
-        return view
-    }
-
-    func updateUIView(_ uiView: InstallerView, context: Context) {
-        context.coordinator.action = action
-        uiView.installWhenReady()
-    }
-
-    static func dismantleUIView(_ uiView: InstallerView, coordinator: Coordinator) {
-        coordinator.uninstall()
-    }
-
-    @MainActor
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var action: () -> Void
-        weak var navigationBar: UINavigationBar?
-        lazy var recognizer: UITapGestureRecognizer = {
-            let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
-            recognizer.numberOfTapsRequired = 2
-            recognizer.cancelsTouchesInView = false
-            recognizer.delegate = self
-            return recognizer
-        }()
-
-        init(action: @escaping () -> Void) {
-            self.action = action
-        }
-
-        func install(on navigationBar: UINavigationBar) {
-            guard self.navigationBar !== navigationBar else { return }
-            uninstall()
-            navigationBar.addGestureRecognizer(recognizer)
-            self.navigationBar = navigationBar
-        }
-
-        func uninstall() {
-            navigationBar?.removeGestureRecognizer(recognizer)
-            navigationBar = nil
-        }
-
-        @objc private func handleDoubleTap() {
-            action()
-        }
-
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldReceive touch: UITouch
-        ) -> Bool {
-            var candidate: UIView? = touch.view
-            while let view = candidate, view !== navigationBar {
-                if view is UIControl { return false }
-                candidate = view.superview
-            }
-            return true
-        }
-
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            true
-        }
-    }
-
-    @MainActor
-    final class InstallerView: UIView {
-        weak var coordinator: Coordinator?
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            installWhenReady()
-        }
-
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            installWhenReady()
-        }
-
-        func installWhenReady() {
-            var responder: UIResponder? = self
-            while let current = responder {
-                if let controller = current as? UIViewController,
-                   let navigationBar = controller.navigationController?.navigationBar {
-                    coordinator?.install(on: navigationBar)
-                    return
-                }
-                responder = current.next
-            }
         }
     }
 }
@@ -189,18 +88,18 @@ struct ContentView: View {
     @State private var trackerReauthenticationBrowserOpen = false
     @State private var trackerReauthenticationURL: URL?
     @State private var showTrackerReauthenticationPrompt = false
+    @State private var organizationAccessGranted = false
+    @State private var organizationAuthenticationInFlight = false
+    @State private var organizationAuthenticationError: String?
+    @State private var pendingOrganizationAccessURL: URL?
     @State private var incidentMapConnectedAt = Date()
     @State private var incidentMapBackgroundedAt: Date?
-    @State private var incidentMapBackgroundFlightProtectedUntil: Date?
     @State private var incidentMapBackgroundDisconnectTask: Task<Void, Never>?
     @State private var incidentMapRelocationGuard = IncidentMapRelocationGuard()
     @AppStorage("video.captureStreams") private var captureStreams = false
 
     private var startupRoot: some View {
-        NavigationStack {
-            rootScreen
-            .navigationTitle("RID-2-Caltopo")
-            .navigationBarTitleDisplayMode(.inline)
+        rootScreen
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Menu {
@@ -271,10 +170,6 @@ struct ContentView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                 }
-            }
-            .background {
-                NavigationBarDoubleTapBridge(action: togglePrimaryScreenFromTopBar)
-                    .frame(width: 0, height: 0)
             }
             .navigationDestination(isPresented: $showTrackMap) {
                 operationalMapView
@@ -810,7 +705,6 @@ struct ContentView: View {
                     try? await Task.sleep(for: .seconds(2))
                 }
             }
-        }
     }
 
     private var lifecycleRoot: some View {
@@ -849,37 +743,54 @@ struct ContentView: View {
                 }
             }
             .onOpenURL { url in
-                let rawValue = url.absoluteString
-                if url.scheme == "r2creauth" {
-                    trackerReauthenticationBrowserOpen = false
-                    trackerReauthenticationURL = nil
-                    showTrackerReauthenticationPrompt = false
-                    if url.host == "complete" {
-                        AppleLog.info(
-                            "TrackerPeer",
-                            "Reauthentication completed; configuration preserved"
-                        )
-                        configurePeerCoordinator(forceReconnect: true)
-                    } else if url.host == "erase" {
-                        droneConfirmations.resetPersistedState()
-                        caltopoSettings.resetPersistedState()
-                        orgConfigSettings.resetPersistedState()
-                        configurePeerCoordinator()
-                    }
-                    return
-                }
-                if let enrollmentURL = AppleTrackerEnrollmentClient.normalizedEnrollmentURL(rawValue) {
-                    pendingImportToken = enrollmentURL
-                    showImportConfig = true
-                    return
-                }
-                guard AndroidConfigTokenCodec.decode(rawValue) != nil else {
-                    AppleLog.error("OrgConfig", "Ignored unrecognised URL scheme payload")
-                    return
-                }
-                pendingImportToken = rawValue
-                showImportConfig = true
+                receiveIncomingURL(url)
             }
+    }
+
+    private func receiveIncomingURL(_ url: URL) {
+        if organizationAuthenticationRequired, !organizationAccessGranted {
+            pendingOrganizationAccessURL = url
+            AppleLog.info(
+                "OrganizationAccess",
+                "Deferred incoming configuration URL until authentication"
+            )
+            reconcileOrganizationAuthentication()
+            return
+        }
+        handleIncomingURL(url)
+    }
+
+    private func handleIncomingURL(_ url: URL) {
+        let rawValue = url.absoluteString
+        if url.scheme == "r2creauth" {
+            trackerReauthenticationBrowserOpen = false
+            trackerReauthenticationURL = nil
+            showTrackerReauthenticationPrompt = false
+            if url.host == "complete" {
+                AppleLog.info(
+                    "TrackerPeer",
+                    "Reauthentication completed; configuration preserved"
+                )
+                configurePeerCoordinator(forceReconnect: true)
+            } else if url.host == "erase" {
+                droneConfirmations.resetPersistedState()
+                caltopoSettings.resetPersistedState()
+                orgConfigSettings.resetPersistedState()
+                configurePeerCoordinator()
+            }
+            return
+        }
+        if let enrollmentURL = AppleTrackerEnrollmentClient.normalizedEnrollmentURL(rawValue) {
+            pendingImportToken = enrollmentURL
+            showImportConfig = true
+            return
+        }
+        guard AndroidConfigTokenCodec.decode(rawValue) != nil else {
+            AppleLog.error("OrgConfig", "Ignored unrecognised URL scheme payload")
+            return
+        }
+        pendingImportToken = rawValue
+        showImportConfig = true
     }
 
     private var mediaMonitoredRoot: some View {
@@ -1010,9 +921,12 @@ struct ContentView: View {
                     incidentMapBackgroundDisconnectTask?.cancel()
                     incidentMapBackgroundDisconnectTask = nil
                     incidentMapBackgroundedAt = nil
-                    incidentMapBackgroundFlightProtectedUntil = nil
                 }
                 locationProvider.setIncidentMapBackgroundMonitoringEnabled(!newMapID.isEmpty)
+            }
+            .onChange(of: peerCoordinator.trackerSilenceGeneration) { _, _ in
+                guard scenePhase != .active else { return }
+                _ = disconnectInactiveIncidentMap(reason: "tracker silent for 60 seconds")
             }
     }
 
@@ -1123,7 +1037,18 @@ struct ContentView: View {
     }
 
     var body: some View {
-        monitoredRoot
+        NavigationStack {
+            Group {
+                if organizationAccessBlocked {
+                    organizationAccessGate
+                } else {
+                    monitoredRoot
+                        .privacySensitive()
+                }
+            }
+            .navigationTitle("RID-2-Caltopo")
+            .navigationBarTitleDisplayMode(.inline)
+        }
             .background {
                 PrimaryWindowSceneReader { scene in
                     AppleApplicationCleanupCenter.shared.registerPrimaryWindowScene(scene)
@@ -1146,7 +1071,199 @@ struct ContentView: View {
                         await mediaMTX.shutdown()
                     }
                 )
+                reconcileOrganizationAuthentication()
             }
+            .onChange(of: orgConfigSettings.organizationName, initial: true) { oldValue, newValue in
+                let wasRequired = OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
+                    organizationName: oldValue,
+                    trackerURLPrefix: orgConfigSettings.trackerURLPrefix,
+                    trackerAPIKey: orgConfigSettings.trackerAPIKey,
+                    caltopoTeamID: caltopoSettings.teamID,
+                    caltopoCredentialID: caltopoSettings.credentialID,
+                    caltopoCredentialSecret: caltopoSettings.credentialSecret
+                )
+                let isRequired = OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
+                    organizationName: newValue,
+                    trackerURLPrefix: orgConfigSettings.trackerURLPrefix,
+                    trackerAPIKey: orgConfigSettings.trackerAPIKey,
+                    caltopoTeamID: caltopoSettings.teamID,
+                    caltopoCredentialID: caltopoSettings.credentialID,
+                    caltopoCredentialSecret: caltopoSettings.credentialSecret
+                )
+                if isRequired && (!wasRequired || oldValue != newValue) {
+                    organizationAccessGranted = false
+                }
+                reconcileOrganizationAuthentication()
+            }
+            .onChange(of: caltopoTeamsAuthenticationConfigured, initial: true) { wasRequired, isRequired in
+                if isRequired && !wasRequired {
+                    organizationAccessGranted = false
+                }
+                reconcileOrganizationAuthentication()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active && organizationAuthenticationRequired {
+                    organizationAccessGranted = false
+                } else if phase == .active {
+                    reconcileOrganizationAuthentication()
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: UIApplication.willResignActiveNotification
+                )
+            ) { _ in
+                if organizationAuthenticationRequired {
+                    organizationAccessGranted = false
+                }
+            }
+    }
+
+    private var organizationAuthenticationRequired: Bool {
+        OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
+            organizationName: orgConfigSettings.organizationName,
+            trackerURLPrefix: orgConfigSettings.trackerURLPrefix,
+            trackerAPIKey: orgConfigSettings.trackerAPIKey,
+            caltopoTeamID: caltopoSettings.teamID,
+            caltopoCredentialID: caltopoSettings.credentialID,
+            caltopoCredentialSecret: caltopoSettings.credentialSecret
+        )
+    }
+
+    private var caltopoTeamsAuthenticationConfigured: Bool {
+        OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
+            organizationName: "",
+            caltopoTeamID: caltopoSettings.teamID,
+            caltopoCredentialID: caltopoSettings.credentialID,
+            caltopoCredentialSecret: caltopoSettings.credentialSecret
+        )
+    }
+
+    private var organizationAuthenticationBypassedForTesting: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--skip-organization-authentication")
+        #else
+        false
+        #endif
+    }
+
+    private var organizationAccessBlocked: Bool {
+        organizationAuthenticationRequired
+            && !organizationAuthenticationBypassedForTesting
+            && !organizationAccessGranted
+    }
+
+    private var organizationAccessGate: some View {
+        ZStack {
+            Color(uiColor: .systemBackground).ignoresSafeArea()
+            VStack(spacing: 18) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 52))
+                    .foregroundStyle(.orange)
+                Text("Protected access locked")
+                    .font(.title2.bold())
+                Text(
+                    "Authenticate with this device's biometric or passcode to access "
+                        + protectedAccessDescription + "."
+                )
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                if let organizationAuthenticationError {
+                    Text(organizationAuthenticationError)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.red)
+                }
+                Button(organizationAuthenticationInFlight ? "Authenticating…" : "Unlock") {
+                    authenticateOrganizationAccess()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(organizationAuthenticationInFlight)
+                Text(
+                    "Set up a device passcode or biometrics in Settings before an ORG or "
+                        + "CalTopo Teams configuration can be used."
+                )
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: 560)
+            .padding(32)
+        }
+    }
+
+    private var protectedAccessDescription: String {
+        let organizationName = orgConfigSettings.organizationName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return organizationName.isEmpty
+            ? "the configured CalTopo Teams account, maps, and settings"
+            : organizationName + "'s CalTopo maps and settings"
+    }
+
+    private func reconcileOrganizationAuthentication() {
+        guard organizationAuthenticationRequired,
+              !organizationAuthenticationBypassedForTesting
+        else {
+            organizationAccessGranted = true
+            organizationAuthenticationError = nil
+            return
+        }
+        guard scenePhase == .active, !organizationAccessGranted else { return }
+        authenticateOrganizationAccess()
+    }
+
+    private func authenticateOrganizationAccess() {
+        guard organizationAuthenticationRequired,
+              !organizationAuthenticationBypassedForTesting,
+              !organizationAuthenticationInFlight
+        else { return }
+
+        let context = LAContext()
+        context.localizedCancelTitle = "Cancel"
+        context.localizedFallbackTitle = "Use Device Passcode"
+        var policyError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
+            organizationAuthenticationError =
+                "Device authentication is unavailable. Set up a device passcode or biometrics in Settings, then try again."
+            AppleLog.error(
+                "OrganizationAccess",
+                "Device-owner authentication unavailable code=\(policyError?.code ?? -1)"
+            )
+            return
+        }
+
+        organizationAuthenticationInFlight = true
+        organizationAuthenticationError = nil
+        context.evaluatePolicy(
+            .deviceOwnerAuthentication,
+            localizedReason: "Access your organization's CalTopo maps and settings"
+        ) { success, error in
+            Task { @MainActor in
+                if success {
+                    // LocalAuthentication reports success before its system UI has fully
+                    // dismissed. Keep the protected gate mounted until that transition
+                    // finishes so UIKit is not asked to replace navigation content mid-layout.
+                    try? await Task.sleep(for: .milliseconds(500))
+                    organizationAccessGranted = true
+                    organizationAuthenticationInFlight = false
+                    organizationAuthenticationError = nil
+                    AppleLog.info("OrganizationAccess", "Device owner authenticated")
+                    if let pendingURL = pendingOrganizationAccessURL {
+                        pendingOrganizationAccessURL = nil
+                        handleIncomingURL(pendingURL)
+                    }
+                } else {
+                    organizationAuthenticationInFlight = false
+                    organizationAccessGranted = false
+                    organizationAuthenticationError =
+                        "Authentication was not completed. Organization maps remain locked."
+                    let code = (error as NSError?)?.code ?? -1
+                    AppleLog.info(
+                        "OrganizationAccess",
+                        "Device-owner authentication not completed code=\(code)"
+                    )
+                }
+            }
+        }
     }
 
     private var rootScreen: some View {
@@ -1972,8 +2089,7 @@ struct ContentView: View {
             hasManagedVideoOrTransfer:
                 peerCoordinator.hasOperationalActivityPreventingIncidentDisconnect
                 || !streamRegistry.activePublisherStreamIDs.isEmpty,
-            offlineMapPreparationActive: AppleMapOfflineManager.shared.isRunning,
-            backgroundFlightProtectedUntil: incidentMapBackgroundFlightProtectedUntil
+            offlineMapPreparationActive: AppleMapOfflineManager.shared.isRunning
         )
     }
 
@@ -2002,20 +2118,6 @@ struct ContentView: View {
                 horizontalAccuracyMeters: location.horizontalAccuracy
             )
         }
-        let lastRIDIsRecent = ridTracks.lastRIDMessageAt.map {
-            now.timeIntervalSince($0) < IncidentMapAutoDisconnectPolicy.quietInterval
-        } ?? false
-        if !ridTracks.tracks.isEmpty || lastRIDIsRecent {
-            incidentMapBackgroundFlightProtectedUntil = now.addingTimeInterval(
-                IncidentMapAutoDisconnectPolicy.backgroundFlightProtectionInterval
-            )
-            AppleLog.info(
-                "Lifecycle",
-                "Display inactive during active/recent flight; incident map protected for up to 120 minutes"
-            )
-        } else {
-            incidentMapBackgroundFlightProtectedUntil = nil
-        }
         incidentMapBackgroundDisconnectTask?.cancel()
         incidentMapBackgroundDisconnectTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(
@@ -2034,7 +2136,6 @@ struct ContentView: View {
         incidentMapBackgroundDisconnectTask?.cancel()
         incidentMapBackgroundDisconnectTask = nil
         incidentMapBackgroundedAt = nil
-        incidentMapBackgroundFlightProtectedUntil = nil
         if let backgroundedAt,
            now.timeIntervalSince(backgroundedAt)
             >= IncidentMapAutoDisconnectPolicy.backgroundGraceInterval {

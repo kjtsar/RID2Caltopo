@@ -106,6 +106,11 @@ public interface PeerCoordinator {
     default boolean hasOperationalActivityPreventingMapDisconnect() {
         return false;
     }
+    /** True when configured tracker coordination has received no server acknowledgement
+     * for at least the requested interval. Intentional healthy standby is not silence. */
+    default boolean hasTrackerAcknowledgementSilence(long thresholdMs) {
+        return false;
+    }
     default void respondToVideoStreamRequest(
             @NonNull String requestId,
             boolean approved,

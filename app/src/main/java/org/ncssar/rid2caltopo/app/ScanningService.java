@@ -11,6 +11,7 @@ package org.ncssar.rid2caltopo.app;
 import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -67,6 +68,7 @@ public class ScanningService extends Service {
     private static final String EXTRA_EXTERNAL_DISPLAY_CONNECTED = "external_display_connected";
     private static final long INCIDENT_MAP_BACKGROUND_DISCONNECT_DELAY_MS = 5L * 60L * 1000L;
     private static final long INCIDENT_MAP_BACKGROUND_RECHECK_MS = 60L * 1000L;
+    private static final long TRACKER_SILENCE_RECHECK_MS = 15L * 1000L;
     private static final String CHANNEL_ID = "OpenDroneIdScanner";
     private static final String CHANNEL_NAME = "OpenDroneId Scanner Service";
     private static final int NOTIFICATION_ID = 1;
@@ -89,6 +91,18 @@ public class ScanningService extends Service {
                     : "Display remained inactive; incident map retained because operational work is active");
             if (!disconnected && CaltopoMap.GetMapNode() != null) {
                 lifecycleHandler.postDelayed(this, INCIDENT_MAP_BACKGROUND_RECHECK_MS);
+            }
+        }
+    };
+    private final Runnable trackerSilenceDisconnect = new Runnable() {
+        @Override public void run() {
+            boolean disconnected = CaltopoMap.DisconnectIncidentMapAfterTrackerSilenceIfInactive();
+            if (disconnected) {
+                CTWarn(TAG, "Tracker silent for 60 seconds; inactive incident map disconnected");
+                return;
+            }
+            if (CaltopoMap.GetMapNode() != null) {
+                lifecycleHandler.postDelayed(this, TRACKER_SILENCE_RECHECK_MS);
             }
         }
     };
@@ -203,6 +217,7 @@ public class ScanningService extends Service {
                 "onDestroy(): ScanningService 0x%x", this.hashCode()));
         stopForegroundSafely();
         lifecycleHandler.removeCallbacks(incidentMapBackgroundDisconnect);
+        lifecycleHandler.removeCallbacks(trackerSilenceDisconnect);
         stopBackgroundLocationUpdates();
         if (scanning) {
             stopScanning();
@@ -253,12 +268,16 @@ public class ScanningService extends Service {
             externalDisplayConnected = intent.getBooleanExtra(
                     EXTRA_EXTERNAL_DISPLAY_CONNECTED, false);
             lifecycleHandler.removeCallbacks(incidentMapBackgroundDisconnect);
+            lifecycleHandler.removeCallbacks(trackerSilenceDisconnect);
             if (displayActive) {
                 CaltopoMap.EndIncidentDisplayInactive();
                 stopBackgroundLocationUpdates();
             } else {
                 CaltopoMap.BeginIncidentDisplayInactive();
                 startBackgroundLocationUpdates();
+                lifecycleHandler.postDelayed(
+                        trackerSilenceDisconnect,
+                        TRACKER_SILENCE_RECHECK_MS);
                 if (!externalDisplayConnected) {
                     lifecycleHandler.postDelayed(
                             incidentMapBackgroundDisconnect,

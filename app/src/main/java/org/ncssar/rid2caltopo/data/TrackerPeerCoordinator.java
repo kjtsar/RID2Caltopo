@@ -80,6 +80,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private static final long RECONNECT_BASE_DELAY_MS = 2_000L;
     private static final long RECONNECT_MAX_DELAY_MS = 10_000L;
     private static final long VIDEO_PRESENCE_INTERVAL_MS = 15_000L;
+    private static final long INCIDENT_STANDBY_SILENCE_MS = 60_000L;
 
     private static volatile TrackerCoordinationTransportFactory transportFactory =
             OkHttpTrackerCoordinationTransport::new;
@@ -165,6 +166,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private volatile long lastHeartbeatSeqAcked;
     private volatile long lastHeartbeatSentAtMs;
     private volatile long lastHeartbeatAckAtMs;
+    private volatile long coordinationAttemptStartedAtMs;
+    private volatile long lastServerAcknowledgementAtMs;
     private volatile long lastOwnerLeaseExpireTs;
     private volatile long lastOwnerActivityAtMs;
     private volatile int lastCloseCode;
@@ -275,6 +278,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.lastHeartbeatSeqAcked = 0L;
         this.lastHeartbeatSentAtMs = 0L;
         this.lastHeartbeatAckAtMs = 0L;
+        this.coordinationAttemptStartedAtMs = nowMs();
+        this.lastServerAcknowledgementAtMs = 0L;
         this.lastOwnerLeaseExpireTs = 0L;
         this.lastOwnerActivityAtMs = 0L;
         this.lastCloseCode = 0;
@@ -383,6 +388,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             activeTransport.disconnect();
         }
         started = false;
+        coordinationAttemptStartedAtMs = 0L;
+        lastServerAcknowledgementAtMs = 0L;
         managedVideoThumbnailPreviewUntilMs = 0L;
         hardFailureNotified = false;
         reconnectPending = false;
@@ -865,10 +872,27 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     @Override
     public boolean hasOperationalActivityPreventingMapDisconnect() {
+        if (hasLiveManagedVideoStream() || !approvedRecordingUploads.isEmpty()) {
+            return true;
+        }
+        // After the tracker has been unreachable for a full minute, its cached
+        // ownership/confirmation maps are no longer proof of current work. The
+        // authoritative local active-flight and RID-quiet gates still apply.
+        if (hasTrackerAcknowledgementSilence(INCIDENT_STANDBY_SILENCE_MS)) {
+            return false;
+        }
         return !pendingDrones.isEmpty() ||
                 !ownerByRemoteId.isEmpty() ||
-                !pendingConfirmationsByRemoteId.isEmpty() ||
-                hasLiveManagedVideoStream();
+                !pendingConfirmationsByRemoteId.isEmpty();
+    }
+
+    @Override
+    public boolean hasTrackerAcknowledgementSilence(long thresholdMs) {
+        if (!started || intentionallyParked || trackerApiKey == null || trackerWsUrl == null) {
+            return false;
+        }
+        long anchorMs = Math.max(lastServerAcknowledgementAtMs, coordinationAttemptStartedAtMs);
+        return anchorMs > 0L && nowMs() - anchorMs >= Math.max(thresholdMs, INCIDENT_STANDBY_SILENCE_MS);
     }
 
     private boolean shouldSkipIntervalHeartbeat() {
@@ -1398,6 +1422,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             switch (type) {
                 case "hello_ack":
                     helloAckAtMs = nowMs();
+                    lastServerAcknowledgementAtMs = helloAckAtMs;
                     handleAppUpdateRecommendation(jo);
                     long advertisedStandbySeconds = jo.optLong(
                             "standbyParkSec",
@@ -1951,6 +1976,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
         lastHeartbeatSeqAcked = ackSeq;
         lastHeartbeatAckAtMs = nowMs;
+        lastServerAcknowledgementAtMs = nowMs;
         if (ownerLeaseExpireTs > 0) {
             lastOwnerLeaseExpireTs = ownerLeaseExpireTs;
         }

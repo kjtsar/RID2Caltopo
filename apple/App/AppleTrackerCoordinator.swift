@@ -295,6 +295,7 @@ final class AppleTrackerCoordinator: ObservableObject {
     @Published private(set) var helloAcknowledgedAtMilliseconds: Int64 = 0
     @Published private(set) var heartbeatAcknowledgedAtMilliseconds: Int64 = 0
     @Published private(set) var heartbeatSequenceAcknowledged: Int64 = 0
+    @Published private(set) var trackerSilenceGeneration = 0
     @Published private(set) var recommendedAppVersionCode = 0
     @Published private(set) var reauthenticationRequiredGeneration = 0
     @Published private(set) var reauthenticationURL: URL?
@@ -395,10 +396,12 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var receiveFailureTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
+    private var trackerSilenceTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var standbyTask: Task<Void, Never>?
     private var authorizationRecoveryTask: Task<Void, Never>?
     private var standaloneStandbyEligible = false
+    private var coordinationAttemptStartedAtMilliseconds: Int64 = 0
     private var organizationConfigSyncInProgress = false
     private var standbyParkDelay: Duration = .seconds(30)
     private var observedSightings: [String: TrackerCoordinationSighting] = [:]
@@ -484,13 +487,25 @@ final class AppleTrackerCoordinator: ObservableObject {
     var localZoneID: String { zoneID }
 
     var hasOperationalActivityPreventingIncidentDisconnect: Bool {
-        pendingVideoStreamRequest != nil ||
+        let videoOrTransferActive = pendingVideoStreamRequest != nil ||
             pendingRecordingDownloadRequest != nil ||
             !approvedRecordingUploadsByRequestID.isEmpty ||
             hasLiveManagedVideoStream ||
-            !mediaPeersByRequestID.isEmpty ||
-            !pendingConfirmations.isEmpty ||
-            !observedSightings.isEmpty
+            !mediaPeersByRequestID.isEmpty
+        if videoOrTransferActive || hasTrackerAcknowledgementSilence {
+            return videoOrTransferActive
+        }
+        return !pendingConfirmations.isEmpty || !observedSightings.isEmpty
+    }
+
+    var hasTrackerAcknowledgementSilence: Bool {
+        guard coordinationRequired, status != .standby else { return false }
+        let lastAcknowledgement = max(
+            helloAcknowledgedAtMilliseconds,
+            heartbeatAcknowledgedAtMilliseconds
+        )
+        let anchor = max(lastAcknowledgement, coordinationAttemptStartedAtMilliseconds)
+        return anchor > 0 && Self.nowMilliseconds - anchor >= 60_000
     }
 
     func requireReauthentication(at url: URL) {
@@ -640,7 +655,23 @@ final class AppleTrackerCoordinator: ObservableObject {
         if forceReconnect {
             AppleLog.info("TrackerPeer", "Reconnecting tracker after credential refresh")
         }
+        coordinationAttemptStartedAtMilliseconds = Self.nowMilliseconds
+        startTrackerSilenceWatchdog()
         connect()
+    }
+
+    private func startTrackerSilenceWatchdog() {
+        trackerSilenceTask?.cancel()
+        trackerSilenceTask = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled, self.coordinationRequired {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+                if self.hasTrackerAcknowledgementSilence {
+                    self.trackerSilenceGeneration &+= 1
+                    try? await Task.sleep(for: .seconds(15))
+                }
+            }
+        }
     }
 
     func updatePosition(_ location: CLLocation?) {
@@ -2713,6 +2744,9 @@ final class AppleTrackerCoordinator: ObservableObject {
         reconnectTask = nil
         authorizationRecoveryTask?.cancel()
         authorizationRecoveryTask = nil
+        trackerSilenceTask?.cancel()
+        trackerSilenceTask = nil
+        coordinationAttemptStartedAtMilliseconds = 0
         for requestID in Array(mediaPeersByRequestID.keys) {
             stopLocalMediaSession(requestID: requestID)
         }

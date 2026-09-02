@@ -1192,6 +1192,34 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun trackerAcknowledgementSilence_reachesStandbyThresholdAfterSixtySeconds() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
+        coordinator.stopBackgroundTimersForTesting()
+
+        clock.advanceBy(59_999L)
+        assertFalse(coordinator.hasTrackerAcknowledgementSilence(60_000L))
+
+        clock.advanceBy(2L)
+        assertTrue(coordinator.hasTrackerAcknowledgementSilence(60_000L))
+    }
+
+    @Test
+    fun trackerSilence_doesNotTreatCachedOwnershipAsCurrentOperationalWork() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
+        val drone = CtDroneSpec("DRONE1")
+        coordinator.onLiveTrackCreated(FakeLiveTrack("DRONE1"), drone, 25.0, clock.now())
+        confirmLocalDrone()
+        assertTrue(coordinator.hasOperationalActivityPreventingMapDisconnect())
+
+        coordinator.stopBackgroundTimersForTesting()
+        clock.advanceBy(60_001L)
+
+        assertFalse(coordinator.hasOperationalActivityPreventingMapDisconnect())
+    }
+
+    @Test
     fun staleHeartbeatAck_isIgnoredWithoutReconnect() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         coordinator.handleHelloAckForTesting()

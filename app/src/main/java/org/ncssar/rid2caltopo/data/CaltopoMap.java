@@ -132,7 +132,7 @@ public class CaltopoMap {
     private static final double AUTO_QUIT_RELOCATION_DISTANCE_METERS = 50.0 * 0.3048;
     private static final float AUTO_QUIT_REQUIRED_ACCURACY_METERS = (float) (25.0 * 0.3048);
     private static final long AUTO_QUIT_FLIGHT_QUIET_MS = 5L * 60L * 1000L;
-    private static final long AUTO_QUIT_BACKGROUND_FLIGHT_PROTECTION_MS = 120L * 60L * 1000L;
+    private static final long TRACKER_SILENCE_STANDBY_MS = 60L * 1000L;
     @NonNull private static volatile TimeSource timeSource = System::currentTimeMillis;
     @NonNull private static volatile InactivityDisconnectHandler inactivityDisconnectHandler =
             () -> DisconnectIncidentMapIfInactive("relocation");
@@ -194,7 +194,6 @@ public class CaltopoMap {
     @NonNull private static R2cRuntime CurrentRuntime = R2cRuntimeRegistry.getDefaultRuntime();
     @Nullable private static RelocationAnchor AutoQuitRelocationAnchor;
     private static volatile boolean IncidentDisplayInactive = false;
-    private static volatile long IncidentBackgroundFlightProtectedUntilMs = 0L;
     public static List<CaltopoNode>GetSessionNodeMap() { return SessionNodeMap;}
 
     static void setTimeSourceForTesting(@NonNull TimeSource testTimeSource) {
@@ -210,7 +209,6 @@ public class CaltopoMap {
         timeSource = System::currentTimeMillis;
         inactivityDisconnectHandler = () -> DisconnectIncidentMapIfInactive("relocation");
         IncidentDisplayInactive = false;
-        IncidentBackgroundFlightProtectedUntilMs = 0L;
     }
 
     static boolean hasAutoQuitRelocationAnchorForTesting() {
@@ -1337,7 +1335,6 @@ public class CaltopoMap {
         if (MapStatus != MapStatusListener.mapStatus.up || MapNode == null) return false;
         if (!hasAccuracy || accuracyMeters >= AUTO_QUIT_REQUIRED_ACCURACY_METERS) return false;
         if (CaltopoClient.GetActiveFlightCount() > 0) return false;
-        if (isIncidentBackgroundFlightProtected(nowMs)) return false;
         if (getCurrentRuntime().getPeerCoordinator()
                 .hasOperationalActivityPreventingMapDisconnect()) return false;
         long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
@@ -1359,7 +1356,6 @@ public class CaltopoMap {
         }
         long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
         long nowMs = timeSource.now();
-        if (isIncidentBackgroundFlightProtected(nowMs)) return false;
         if (lastWaypointTimestampMs > 0L &&
                 nowMs - lastWaypointTimestampMs < AUTO_QUIT_FLIGHT_QUIET_MS) {
             return false;
@@ -1380,27 +1376,15 @@ public class CaltopoMap {
                 mapId, normalizedReason));
         OpenMap(null);
         IncidentDisplayInactive = false;
-        IncidentBackgroundFlightProtectedUntilMs = 0L;
         DisconnectInProgress = false;
         EnsureStandaloneTrackerCoordinationStarted();
         return true;
     }
 
-    /** Captures a relocation anchor while the UI is still alive and protects a
-     * flight that was active/recent when the display became inactive. */
+    /** Captures a relocation anchor while the UI is still alive. Active flights and
+     * the normal RID quiet interval remain the safety gates after the display sleeps. */
     public static void BeginIncidentDisplayInactive() {
         IncidentDisplayInactive = true;
-        long nowMs = timeSource.now();
-        long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
-        boolean recentRid = lastWaypointTimestampMs > 0L &&
-                nowMs - lastWaypointTimestampMs < AUTO_QUIT_FLIGHT_QUIET_MS;
-        if (CaltopoClient.GetActiveFlightCount() > 0 || recentRid) {
-            IncidentBackgroundFlightProtectedUntilMs =
-                    nowMs + AUTO_QUIT_BACKGROUND_FLIGHT_PROTECTION_MS;
-            CTInfo(TAG, "BeginIncidentDisplayInactive(): active/recent flight protected for up to 120 minutes.");
-        } else {
-            IncidentBackgroundFlightProtectedUntilMs = 0L;
-        }
         Location location = MyLocation;
         if (location != null && location.getAccuracy() > 0.0f &&
                 location.getAccuracy() < AUTO_QUIT_REQUIRED_ACCURACY_METERS) {
@@ -1411,18 +1395,14 @@ public class CaltopoMap {
 
     public static void EndIncidentDisplayInactive() {
         IncidentDisplayInactive = false;
-        IncidentBackgroundFlightProtectedUntilMs = 0L;
     }
 
-    private static boolean isIncidentBackgroundFlightProtected(long nowMs) {
-        if (!IncidentDisplayInactive) return false;
-        long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
-        if (lastWaypointTimestampMs > 0L) {
-            IncidentBackgroundFlightProtectedUntilMs = Math.max(
-                    IncidentBackgroundFlightProtectedUntilMs,
-                    lastWaypointTimestampMs + AUTO_QUIT_BACKGROUND_FLIGHT_PROTECTION_MS);
+    public static boolean DisconnectIncidentMapAfterTrackerSilenceIfInactive() {
+        if (!IncidentDisplayInactive || !getCurrentRuntime().getPeerCoordinator()
+                .hasTrackerAcknowledgementSilence(TRACKER_SILENCE_STANDBY_MS)) {
+            return false;
         }
-        return nowMs < IncidentBackgroundFlightProtectedUntilMs;
+        return DisconnectIncidentMapIfInactive("tracker silent for 60 seconds");
     }
 
     private static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {

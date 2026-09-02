@@ -119,12 +119,24 @@ CalTopo Teams API credential. Map selection remains in each app.
 The optional _connect_key_ selects the CalTopo Shared Locations namespace used
 for position reports.
 
+The Connect Key is configured separately from the Teams API credential. A
+CalTopo team administrator creates an Access URL under the team's tracking
+configuration, then copies only the resulting Connect Key into RID2Caltopo (do
+not include `FLEET:`, a device ID, or the surrounding URL). RID2Caltopo reports
+the device as `FLEET:<Connect Key>-<Remote ID>` and sends position reports to
+`/api/v1/position/report/<Connect Key>`. CalTopo adds a newly reported device
+to Trackable Devices and Shared Locations; the Shared Locations layer must be
+enabled to see it. If no Connect Key is configured, RID2Caltopo retains the
+legacy `DRONE` value.
+
 Managed organizations distribute an `R2C2` configuration containing team
 settings, RID mappings, and a signed r2c-tracker enrollment locator. Android or
 iOS redeems that locator for a unique, revocable device credential; an issued
-device secret is never copied into the organization bundle. The enrollment
-campaign must allow enough redemptions for the receiving devices. R2C1
-organization tokens are not accepted.
+device secret is never copied into the organization bundle. The encrypted
+CalTopo settings carried by the managed organization release include the
+Connect Key on both Android and iOS. The enrollment campaign must allow enough
+redemptions for the receiving devices. R2C1 organization tokens are not
+accepted.
 
 ## ct_mutual_aid_credentials
 If you can enlist the help of your Caltopo Teams Admin, have them create a subteam account 

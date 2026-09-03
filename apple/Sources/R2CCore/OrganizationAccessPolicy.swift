@@ -1,6 +1,8 @@
 import Foundation
 
 public enum OrganizationAccessPolicy {
+    public static let backgroundAuthenticationGraceInterval: TimeInterval = 15
+
     public static func requiresDeviceOwnerAuthentication(
         organizationName: String,
         trackerURLPrefix: String = "",
@@ -25,5 +27,16 @@ public enum OrganizationAccessPolicy {
         return organizationConfigured ||
             trackerOrganizationConfigured ||
             teamsAccountConfigured
+    }
+
+    public static func authenticatedSessionRemainsValid(
+        accessWasGranted: Bool,
+        backgroundedAt: Date?,
+        resumedAt: Date
+    ) -> Bool {
+        guard accessWasGranted else { return false }
+        guard let backgroundedAt else { return true }
+        return max(0, resumedAt.timeIntervalSince(backgroundedAt)) <
+            backgroundAuthenticationGraceInterval
     }
 }

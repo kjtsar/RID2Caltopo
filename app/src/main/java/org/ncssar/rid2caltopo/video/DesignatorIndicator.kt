@@ -373,6 +373,7 @@ private fun formatStreamErrorDetail(streamErrorDetail: String?): String? {
 @Composable
 fun DroneSpecPickerDialog(
     droneSpecStates: Map<String, DroneSpecState>,
+    closestMatchRemoteId: String?,
     onSelect: (Map.Entry<String, DroneSpecState>) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -381,17 +382,50 @@ fun DroneSpecPickerDialog(
         title = { Text("Select Drone Telemetry") },
         text = {
             Column {
-                droneSpecStates.forEach { droneSpecState ->
+                val orderedStates = droneSpecStates.entries.sortedWith(
+                    compareByDescending<Map.Entry<String, DroneSpecState>> {
+                        it.value.remoteId == closestMatchRemoteId
+                    }.thenBy {
+                        it.value.mappedId.ifBlank { it.key }.lowercase(Locale.US)
+                    }
+                )
+                orderedStates.forEach { droneSpecState ->
+                    val isClosestMatch = droneSpecState.value.remoteId == closestMatchRemoteId
+                    val rowModifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(droneSpecState) }
+                        .then(
+                            if (isClosestMatch) {
+                                Modifier.border(
+                                    width = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .padding(8.dp)
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(droneSpecState) }
-                            .padding(8.dp)
+                        modifier = rowModifier
                     ) {
                         Column {
                             val (mappedId, droneSpecState) = droneSpecState
                             val displayMappedId = droneSpecState.mappedId.ifBlank { mappedId }
-                            Text("Mapped ID: $displayMappedId")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Mapped ID: $displayMappedId")
+                                if (isClosestMatch) {
+                                    Text(
+                                        text = "Closest match",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                             Text("Remote ID: ${droneSpecState.remoteId}")
                         }
                     }

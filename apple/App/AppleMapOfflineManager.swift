@@ -167,7 +167,7 @@ final class AppleMapOfflineManager: ObservableObject {
         preset: OperationalOfflinePreset,
         includeContours: Bool,
         includeDEM: Bool,
-        demResolution: OperationalDEMResolution = .standard30m
+        demResolution: OperationalDEMResolution = .maximum1m
     ) -> (tiles: Int, dem: Int, bytes: Int64) {
         let tiles = OperationalOfflineMapPlanner.tileCount(
             bounds: bounds,
@@ -192,7 +192,7 @@ final class AppleMapOfflineManager: ObservableObject {
         baseLayer: OperationalMapBaseLayer,
         includeContours: Bool,
         includeDEM: Bool,
-        demResolution: OperationalDEMResolution = .standard30m,
+        demResolution: OperationalDEMResolution = .maximum1m,
         selectionDescription: String = "Selected map area"
     ) {
         guard !isRunning else { return }
@@ -469,7 +469,7 @@ final class AppleMapOfflineManager: ObservableObject {
             }
         }
 
-        // Preserve complete 10 m coverage underneath project-based 1 m tiles. The terrain
+        // Preserve complete 10 m coverage underneath S1M tiles. The terrain
         // sampler selects the finest valid overlap and falls through on 1 m NoData cells.
         var downloads: [DEMDownload] = OperationalOfflineMapPlanner.demTileNames(bounds: bounds).compactMap { name in
             let fileName = "USGS_13_\(name).tif"
@@ -483,32 +483,19 @@ final class AppleMapOfflineManager: ObservableObject {
                 .init(name: "bbox", value: "\(bounds.west),\(bounds.south),\(bounds.east),\(bounds.north)"),
                 .init(name: "prodFormats", value: "GeoTIFF"),
                 .init(name: "outputFormat", value: "JSON"),
-                .init(name: "datasets", value: "Digital Elevation Model (DEM) 1 meter"),
+                .init(name: "datasets", value: OperationalS1MCatalog.datasetName),
                 .init(name: "max", value: "100"), .init(name: "offset", value: String(offset)),
             ]
             let (data, response) = try await URLSession.shared.data(from: components.url!)
-            guard (response as? HTTPURLResponse)?.statusCode == 200,
-                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let items = object["items"] as? [[String: Any]]
-            else { throw URLError(.badServerResponse) }
-            for item in items {
-                guard let text = item["downloadURL"] as? String, let url = URL(string: text) else { continue }
-                let bytes = (item["sizeInBytes"] as? NSNumber)?.int64Value
-                let fileName: String
-                if let box = item["boundingBox"] as? [String: Any],
-                   let minX = (box["minX"] as? NSNumber)?.doubleValue,
-                   let maxX = (box["maxX"] as? NSNumber)?.doubleValue,
-                   let minY = (box["minY"] as? NSNumber)?.doubleValue,
-                   let maxY = (box["maxY"] as? NSNumber)?.doubleValue {
-                    fileName = "R2C_1M_\(Int64((minY * 100_000).rounded()))_\(Int64((maxY * 100_000).rounded()))_"
-                        + "\(Int64((minX * 100_000).rounded()))_\(Int64((maxX * 100_000).rounded()))_\(url.lastPathComponent)"
-                } else {
-                    fileName = url.lastPathComponent
-                }
-                downloads.append(DEMDownload(url: url, fileName: fileName, expectedBytes: bytes))
-            }
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+            let products = try OperationalS1MCatalog.products(data: data)
+            downloads.append(contentsOf: products.map {
+                DEMDownload(url: $0.url, fileName: $0.fileName, expectedBytes: $0.expectedBytes)
+            })
+            let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let items = object?["items"] as? [[String: Any]] ?? []
             offset += items.count
-            let total = (object["total"] as? NSNumber)?.intValue ?? downloads.count
+            let total = (object?["total"] as? NSNumber)?.intValue ?? downloads.count
             if items.isEmpty || offset >= total { break }
         } while offset < 2_000
         return Array(Set(downloads)).sorted { $0.fileName < $1.fileName }
@@ -664,7 +651,7 @@ struct AppleOfflineMapPreparationView: View {
     @State private var selectedBoundaryID = ""
     @State private var includeContours: Bool
     @State private var includeDEM = true
-    @State private var demResolution = OperationalDEMResolution.standard30m
+    @State private var demResolution = OperationalDEMResolution.maximum1m
 
     init(
         manager: AppleMapOfflineManager,

@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.video
 
+import org.ncssar.rid2caltopo.data.ManagedVideoStreamAdvertisement
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.After
@@ -48,6 +49,32 @@ class ManagedVideoStreamPresenceTest {
     }
 
     @Test
+    fun `paired drone designator is advertised without changing stream session identity`() {
+        val first = ManagedVideoStreamPresence.snapshot(
+            streams = mapOf(
+                "camera/path" to StreamInfo(
+                    designator = "1sar7mn4pr",
+                    sourcePath = "camera/path",
+                    state = StreamState.LIVE,
+                )
+            ),
+        ).single()
+        val paired = ManagedVideoStreamPresence.snapshot(
+            streams = mapOf(
+                "camera/path" to StreamInfo(
+                    designator = "1sar7mn4pr",
+                    sourcePath = "camera/path",
+                    state = StreamState.LIVE,
+                )
+            ),
+            droneDesignatorProvider = { "1sar7DjMn4Pr" },
+        ).single()
+
+        assertEquals("1sar7DjMn4Pr", paired.droneDesignator)
+        assertEquals(first.sessionId, paired.sessionId)
+    }
+
+    @Test
     fun `implausible controller time base is advertised as nominal thirty fps`() {
         assertEquals(30.0, nominalManagedVideoSourceFps(240.0), 0.0)
         assertEquals(30.0, nominalManagedVideoSourceFps(24.0), 0.0)
@@ -59,4 +86,40 @@ class ManagedVideoStreamPresenceTest {
         assertEquals(0.0, nominalManagedVideoSourceFps(0.0), 0.0)
         assertEquals(0.0, nominalManagedVideoSourceFps(Double.NaN), 0.0)
     }
+
+    @Test
+    fun `live thumbnail outranks older recordings after eligibility filtering`() {
+        val recordings = (0 until 12).map { index ->
+            thumbnailAdvertisement("recording-$index", "recording")
+        }
+        val live = thumbnailAdvertisement("live-session", "live")
+
+        val candidates = ManagedVideoStreamPresence.thumbnailCaptureCandidates(
+            advertisements = recordings + live,
+            forceDesignators = emptySet(),
+            hasThumbnail = { it in recordings.take(8).map { recording -> recording.sessionId } },
+        )
+
+        assertEquals(5, candidates.size)
+        assertEquals("live-session", candidates.first().sessionId)
+        assertTrue(candidates.any { it.sessionId == "recording-8" })
+    }
+
+    private fun thumbnailAdvertisement(
+        sessionId: String,
+        mediaKind: String,
+    ) = ManagedVideoStreamAdvertisement(
+        sessionId,
+        "1sar7DjMn4Pr",
+        1280,
+        720,
+        30.0,
+        0,
+        "H264",
+        mediaKind,
+        null,
+        0,
+        "",
+        null,
+    )
 }

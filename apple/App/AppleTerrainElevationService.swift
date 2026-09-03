@@ -11,6 +11,9 @@ actor AppleTerrainElevationService {
     private let cacheDirectory: URL
     private let localDEM: GeoTiffElevationSource
     private let maximumFreshAge: TimeInterval = 365 * 24 * 60 * 60
+    private var scheduledPrefetchCells = Set<String>()
+    private var pendingPrefetchCoordinates: [(latitude: Double, longitude: Double)] = []
+    private var prefetchWorkerRunning = false
 
     init(session: URLSession = .shared) {
         self.session = session
@@ -30,6 +33,7 @@ actor AppleTerrainElevationService {
         else { return nil }
         let coordinate = OperationalAltitudeCoordinator.Coordinate(latitude: latitude, longitude: longitude)
         let key = OperationalAltitudeCoordinator.terrainCacheKey(coordinate)
+        prefetch(latitude: latitude, longitude: longitude)
         let localDEM = self.localDEM
         if let localSample = await Task.detached(priority: .utility, operation: {
             localDEM.sample(latitude: latitude, longitude: longitude)
@@ -67,12 +71,115 @@ actor AppleTerrainElevationService {
             if let cached {
                 return OperationalTerrainSample(elevationMeters: cached.elevationMeters, stale: true)
             }
-            AppleLog.warning(
-                "Terrain",
-                String(format: "DEM unavailable lat=%.5f lng=%.5f error=%@", latitude, longitude, error.localizedDescription)
-            )
+            AppleLog.warning("Terrain", "DEM lookup unavailable")
             return nil
         }
+    }
+
+    func prefetch(latitude: Double, longitude: Double) {
+        guard latitude.isFinite, longitude.isFinite,
+              (-90 ... 90).contains(latitude), (-180 ... 180).contains(longitude)
+        else { return }
+        schedulePrefetch(latitude: latitude, longitude: longitude)
+    }
+
+    private func schedulePrefetch(latitude: Double, longitude: Double) {
+        let cell = "\(Int(floor(latitude * 20))):\(Int(floor(longitude * 20)))"
+        guard scheduledPrefetchCells.insert(cell).inserted else { return }
+        pendingPrefetchCoordinates.append((latitude, longitude))
+        guard !prefetchWorkerRunning else { return }
+        prefetchWorkerRunning = true
+        Task(priority: .utility) { [weak self] in
+            await self?.drainPrefetchQueue()
+        }
+    }
+
+    private func drainPrefetchQueue() async {
+        while !pendingPrefetchCoordinates.isEmpty {
+            let coordinate = pendingPrefetchCoordinates.removeFirst()
+            await prefetchBestDEM(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        }
+        prefetchWorkerRunning = false
+    }
+
+    private func prefetchBestDEM(latitude: Double, longitude: Double) async {
+        do {
+            if let download = try await resolveS1M(latitude: latitude, longitude: longitude) {
+                try await downloadDEM(download)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            AppleLog.warning("Terrain", "S1M prefetch unavailable; retaining terrain fallback")
+        }
+        do {
+            let tile = Self.geographicTileName(latitude: latitude, longitude: longitude)
+            let fileName = "USGS_1_\(tile).tif"
+            guard let url = URL(string: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/current/\(tile)/\(fileName)") else { return }
+            try await downloadDEM((url, fileName, nil))
+        } catch is CancellationError {
+            return
+        } catch {
+            AppleLog.warning("Terrain", "DEM fallback prefetch unavailable")
+        }
+    }
+
+    private func resolveS1M(latitude: Double, longitude: Double) async throws
+        -> (url: URL, fileName: String, expectedBytes: Int64?)?
+    {
+        let delta = 0.0001
+        var components = URLComponents(string: "https://tnmaccess.nationalmap.gov/api/v1/products")!
+        components.queryItems = [
+            .init(name: "bbox", value: "\(longitude - delta),\(latitude - delta),\(longitude + delta),\(latitude + delta)"),
+            .init(name: "prodFormats", value: "GeoTIFF"),
+            .init(name: "outputFormat", value: "JSON"),
+            .init(name: "datasets", value: OperationalS1MCatalog.datasetName),
+            .init(name: "max", value: "20"),
+        ]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 15
+        let (data, response) = try await session.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        return try OperationalS1MCatalog.products(
+            data: data,
+            containing: (latitude, longitude)
+        ).first.map { ($0.url, $0.fileName, $0.expectedBytes) }
+    }
+
+    private func downloadDEM(_ download: (url: URL, fileName: String, expectedBytes: Int64?)) async throws {
+        let destination = AppleMapCachePaths.demRoot.appendingPathComponent(download.fileName)
+        if let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
+            let minimum = download.expectedBytes.map { max(100_000, $0 * 95 / 100) } ?? 5_000_000
+            if Int64(size) >= minimum {
+                localDEM.invalidateCatalog()
+                return
+            }
+        }
+        let required = (download.expectedBytes ?? 400_000_000) + 250_000_000
+        let capacityURL = destination.deletingLastPathComponent().deletingLastPathComponent()
+        if let available = try? capacityURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage,
+           available < required {
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
+        let (temporary, response) = try await session.download(from: download.url)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        localDEM.invalidateCatalog()
+    }
+
+    private static func geographicTileName(latitude: Double, longitude: Double) -> String {
+        let north = Int(floor(latitude)) + 1
+        let longitudeBlock = Int(floor(longitude))
+        let latitudePart = north >= 0 ? String(format: "n%02d", north) : String(format: "s%02d", -north)
+        let longitudePart = longitudeBlock < 0
+            ? String(format: "w%03d", -longitudeBlock)
+            : String(format: "e%03d", longitudeBlock + 1)
+        return latitudePart + longitudePart
     }
 
     private static func elevation(from object: [String: Any]) -> Double? {

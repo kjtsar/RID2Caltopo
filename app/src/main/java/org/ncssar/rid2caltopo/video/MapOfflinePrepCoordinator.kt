@@ -49,7 +49,7 @@ internal object AndroidMapOfflinePrepCoordinator {
     val inFlight = mutableStateOf(false)
     val preset = mutableStateOf(OFFLINE_PREP_PRESETS[1])
     val includeDem = mutableStateOf(true)
-    val demResolution = mutableStateOf(DemResolutionOption.STANDARD_30M)
+    val demResolution = mutableStateOf(DemResolutionOption.MAXIMUM_1M)
     val includeContours = mutableStateOf(false)
     val maximizeThroughput = mutableStateOf(false)
     val areaMode = mutableStateOf(OfflinePrepAreaMode.Viewport)

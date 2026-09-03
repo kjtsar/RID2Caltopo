@@ -20,9 +20,9 @@ import java.io.File
 import java.util.Locale
 
 internal enum class DemResolutionOption(val meters: Int, val label: String, val explanation: String) {
-    STANDARD_30M(30, "Standard (30 m)", "Default; broad coverage and smallest download."),
-    ENHANCED_10M(10, "Enhanced (10 m)", "About 9x as many terrain samples as 30 m."),
-    MAXIMUM_1M(1, "Maximum available (1 m)", "Downloads available USGS lidar-derived project tiles; may be very large.")
+    MAXIMUM_1M(1, "USGS S1M (1 m)", "Default; downloads available USGS seamless 1 m tiles with 10 m fallback; may be very large."),
+    STANDARD_30M(30, "Standard (30 m)", "Broad coverage and smallest download."),
+    ENHANCED_10M(10, "Enhanced (10 m)", "About 9x as many terrain samples as 30 m.")
 }
 
 internal data class DemDownload(
@@ -76,7 +76,7 @@ internal fun resolveDemDownloads(
         }
     }
     val out = linkedMapOf<String, DemDownload>()
-    // Keep complete 10 m coverage below project-based 1 m tiles so gaps and NoData areas
+    // Keep complete 10 m coverage below S1M tiles so gaps and NoData areas
     // remain useful offline. The sampler will choose the finest valid overlapping value.
     demTileNamesForBounds(bounds).forEach { name ->
         val fileName = "USGS_13_$name.tif"
@@ -91,7 +91,7 @@ internal fun resolveDemDownloads(
             .addQueryParameter("bbox", "${bounds.lonWest},${bounds.latSouth},${bounds.lonEast},${bounds.latNorth}")
             .addQueryParameter("prodFormats", "GeoTIFF")
             .addQueryParameter("outputFormat", "JSON")
-            .addQueryParameter("datasets", "Digital Elevation Model (DEM) 1 meter")
+            .addQueryParameter("datasets", "Seamless 1-m DEM (S1M)")
             .addQueryParameter("max", "100").addQueryParameter("offset", offset.toString())
             .build()
         val page = client.newCall(Request.Builder().url(url).build()).execute().use { response ->
@@ -109,7 +109,7 @@ internal fun resolveDemDownloads(
                 val maxLat = kotlin.math.round(boundingBox.optDouble("maxY") * 100_000.0).toLong()
                 val minLon = kotlin.math.round(boundingBox.optDouble("minX") * 100_000.0).toLong()
                 val maxLon = kotlin.math.round(boundingBox.optDouble("maxX") * 100_000.0).toLong()
-                "R2C_1M_${minLat}_${maxLat}_${minLon}_${maxLon}_$originalName"
+                "R2C_S1M_${minLat}_${maxLat}_${minLon}_${maxLon}_$originalName"
             } else originalName
             val expected = item.optLong("sizeInBytes", -1L).takeIf { it > 0L }
             out[downloadUrl] = DemDownload(downloadUrl, fileName, expected)
@@ -211,6 +211,9 @@ internal fun tileNameForLocation(lat: Double, lng: Double): String {
     return "$latPart$lonPart"
 }
 
+internal fun demPrefetchCellKey(lat: Double, lng: Double): String =
+    "${kotlin.math.floor(lat * 20.0).toInt()}:${kotlin.math.floor(lng * 20.0).toInt()}"
+
 internal suspend fun autoDownloadDemTile(
     tileName: String,
     context: Context,
@@ -218,7 +221,7 @@ internal suspend fun autoDownloadDemTile(
     service: DemElevationService
 ) {
     val archiveRoot = CaltopoClient.GetArchiveDir() ?: run {
-        MapCacheDebug.log("auto-dem: no archive dir, skipping tile=$tileName")
+        MapCacheDebug.log("auto-dem: no archive dir; skipping fallback")
         return
     }
     val cacheDir = archiveRoot.findFile("cache") ?: archiveRoot.createDirectory("cache") ?: return
@@ -226,34 +229,129 @@ internal suspend fun autoDownloadDemTile(
     val fileName = "USGS_1_$tileName.tif"
     val existing = demDir.findFile(fileName)
     if (existing != null && existing.isFile && existing.length() > 5_000_000L) {
-        MapCacheDebug.log("auto-dem: already present tile=$tileName bytes=${existing.length()}")
+        MapCacheDebug.log("auto-dem: fallback already present bytes=${existing.length()}")
         service.refreshGeoTiffCatalog()
         return
     }
     val url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/current/$tileName/USGS_1_$tileName.tif"
-    CTDebug(MAP_PANE_TAG, "auto-dem: downloading tile=$tileName")
+    CTDebug(MAP_PANE_TAG, "auto-dem: downloading fallback")
     try {
         val ok = client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
             if (!resp.isSuccessful) {
-                CTError(MAP_PANE_TAG, "auto-dem http-fail code=${resp.code} tile=$tileName")
+                CTError(MAP_PANE_TAG, "auto-dem fallback http-fail code=${resp.code}")
                 return@use false
             }
-            val body = resp.body ?: run { CTError(MAP_PANE_TAG, "auto-dem no-body tile=$tileName"); return@use false }
+            val body = resp.body ?: run { CTError(MAP_PANE_TAG, "auto-dem fallback no-body"); return@use false }
             val destFile = demDir.findFile(fileName) ?: demDir.createFile("image/tiff", fileName)
-                ?: run { CTError(MAP_PANE_TAG, "auto-dem create-failed tile=$tileName"); return@use false }
+                ?: run { CTError(MAP_PANE_TAG, "auto-dem fallback create-failed"); return@use false }
             context.contentResolver.openOutputStream(destFile.uri, "wt")?.use { out ->
                 body.byteStream().copyTo(out)
-            } ?: run { CTError(MAP_PANE_TAG, "auto-dem stream-open-failed tile=$tileName"); return@use false }
+            } ?: run { CTError(MAP_PANE_TAG, "auto-dem fallback stream-open-failed"); return@use false }
             true
         }
         if (ok) {
-            CTDebug(MAP_PANE_TAG, "auto-dem: complete tile=$tileName")
+            CTDebug(MAP_PANE_TAG, "auto-dem: fallback complete")
             service.refreshGeoTiffCatalog()
         }
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        CTError(MAP_PANE_TAG, "auto-dem ex tile=$tileName: ${e.javaClass.simpleName}:${e.message}")
+        CTError(MAP_PANE_TAG, "auto-dem fallback ex=${e.javaClass.simpleName}")
+    }
+}
+
+/** Resolves the single S1M tile covering a point without requesting a broad-area catalog. */
+internal fun resolveS1mDownloadForLocation(
+    lat: Double,
+    lng: Double,
+    client: OkHttpClient,
+): DemDownload? {
+    val delta = 0.0001
+    val url = HttpUrl.Builder()
+        .scheme("https").host("tnmaccess.nationalmap.gov")
+        .addPathSegments("api/v1/products")
+        .addQueryParameter("bbox", "${lng - delta},${lat - delta},${lng + delta},${lat + delta}")
+        .addQueryParameter("prodFormats", "GeoTIFF")
+        .addQueryParameter("outputFormat", "JSON")
+        .addQueryParameter("datasets", "Seamless 1-m DEM (S1M)")
+        .addQueryParameter("max", "20")
+        .build()
+    val page = client.newCall(Request.Builder().url(url).build()).execute().use { response ->
+        if (!response.isSuccessful) return null
+        JSONObject(response.body?.string() ?: return null)
+    }
+    return parseS1mDownloadForLocation(page, lat, lng)
+}
+
+internal fun parseS1mDownloadForLocation(page: JSONObject, lat: Double, lng: Double): DemDownload? {
+    val items = page.optJSONArray("items") ?: return null
+    for (index in 0 until items.length()) {
+        val item = items.optJSONObject(index) ?: continue
+        val box = item.optJSONObject("boundingBox") ?: continue
+        val minLat = box.optDouble("minY")
+        val maxLat = box.optDouble("maxY")
+        val minLon = box.optDouble("minX")
+        val maxLon = box.optDouble("maxX")
+        if (lat < minLat || lat > maxLat || lng < minLon || lng > maxLon) continue
+        val downloadUrl = item.optString("downloadURL").takeIf { it.startsWith("https://") } ?: continue
+        val originalName = downloadUrl.substringAfterLast('/').takeIf { it.endsWith(".tif", ignoreCase = true) } ?: continue
+        val fileName = "R2C_S1M_${kotlin.math.round(minLat * 100_000.0).toLong()}_" +
+            "${kotlin.math.round(maxLat * 100_000.0).toLong()}_${kotlin.math.round(minLon * 100_000.0).toLong()}_" +
+            "${kotlin.math.round(maxLon * 100_000.0).toLong()}_$originalName"
+        return DemDownload(downloadUrl, fileName, item.optLong("sizeInBytes", -1L).takeIf { it > 0 })
+    }
+    return null
+}
+
+/** Prefers the point's S1M tile and retains the established 30 m tile as coverage fallback. */
+internal suspend fun autoDownloadBestDemForLocation(
+    lat: Double,
+    lng: Double,
+    context: Context,
+    client: OkHttpClient,
+    service: DemElevationService,
+) {
+    val s1m = try { resolveS1mDownloadForLocation(lat, lng, client) } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) { null }
+    if (s1m != null) {
+        downloadAutomaticDem(s1m, context, client, service)
+    }
+    autoDownloadDemTile(tileNameForLocation(lat, lng), context, client, service)
+}
+
+private suspend fun downloadAutomaticDem(
+    download: DemDownload,
+    context: Context,
+    client: OkHttpClient,
+    service: DemElevationService,
+) {
+    val archiveRoot = CaltopoClient.GetArchiveDir() ?: return
+    val cacheDir = archiveRoot.findFile("cache") ?: archiveRoot.createDirectory("cache") ?: return
+    val demDir = cacheDir.findFile("dem") ?: cacheDir.createDirectory("dem") ?: return
+    val existing = demDir.findFile(download.fileName)
+    val minimumBytes = download.expectedBytes?.let { maxOf(100_000L, it * 95L / 100L) } ?: 5_000_000L
+    if (existing != null && existing.isFile && existing.length() >= minimumBytes) {
+        service.refreshGeoTiffCatalog()
+        return
+    }
+    val requiredBytes = (download.expectedBytes ?: 400_000_000L) + 250_000_000L
+    if (queryAvailableCacheBytes(context)?.let { it < requiredBytes } == true) return
+    try {
+        client.newCall(Request.Builder().url(download.url).build()).execute().use { response ->
+            if (!response.isSuccessful) return
+            val body = response.body ?: return
+            val destination = existing ?: demDir.createFile("image/tiff", download.fileName) ?: return
+            val copied = context.contentResolver.openOutputStream(destination.uri, "wt")?.use { output ->
+                body.byteStream().copyTo(output)
+            } ?: return
+            if (copied < minimumBytes || destination.length() < minimumBytes) return
+        }
+        service.refreshGeoTiffCatalog()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        // The 30 m fallback below remains available; avoid logging location-bearing tile names.
     }
 }
 

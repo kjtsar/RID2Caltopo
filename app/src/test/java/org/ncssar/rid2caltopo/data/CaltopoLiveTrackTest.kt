@@ -230,6 +230,57 @@ class CaltopoLiveTrackTest {
         }
     }
 
+    @Test
+    fun newThumbnailRevision_republishesCurrentPointOnlyOnce() {
+        val oldTrackerUrl = CaltopoClient.GetTrackerCoordinationUrlPfx()
+        val oldDeviceName = R2CActivity.MyDeviceName
+        try {
+            CaltopoClient.SetTrackerUrlPfx("https://r2c-tracker.com/ncssar")
+            R2CActivity.MyDeviceName = "Kjt A5 Pro"
+            val peer = fixture.peerCoordinator as FakePeerCoordinator
+            val drone = CtDroneSpec("RID-THUMBNAIL")
+            setDroneTrackLabel(drone, "NCS1m3_124000Apr28")
+            val liveTrack = CaltopoLiveTrack(drone, 39.1, -121.1, 500.0, 1_000L)
+            liveTrack.mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus.up, null, null)
+            liveTrack.setLocalOwner(true)
+            forceLiveTrackId(liveTrack, "live-thumbnail-test")
+            fixture.calTopoSessionGateway.clear()
+
+            peer.updateManagedVideoStreams(
+                "Training",
+                listOf(ManagedVideoStreamAdvertisement(
+                    "00000000-0000-0000-0000-000000000001",
+                    "NCS1m3",
+                    1920,
+                    1080,
+                    30.0,
+                    4_000_000,
+                    "h264",
+                    "live",
+                    null,
+                    0L,
+                    "frame-42",
+                    "jpeg",
+                )),
+            )
+
+            CaltopoLiveTrack.RefreshActiveVideoCameraMetadata()
+            CaltopoLiveTrack.RefreshActiveVideoCameraMetadata()
+
+            val updates = fixture.calTopoSessionGateway.snapshotOperations()
+                .filter { it.kind == "addLiveTrackPoint" }
+            assertEquals(updates.toString(), 1, updates.size)
+            assertEquals(39.1, updates.single().payload?.getDouble("lat"))
+            assertEquals(
+                "https://r2c-tracker.com/r2c-thumbnail/Bz2DZg/00000000-0000-0000-0000-000000000001.jpg?timestamp=frame-42",
+                updates.single().payload?.getString("cameraThumbnailUrl"),
+            )
+        } finally {
+            CaltopoClient.SetTrackerUrlPfx(oldTrackerUrl)
+            R2CActivity.MyDeviceName = oldDeviceName
+        }
+    }
+
     private fun setDroneTrackLabel(drone: CtDroneSpec, trackLabel: String) {
         val mappedId = trackLabel.substringBefore('_')
         CtDroneSpec::class.java.getDeclaredField("mappedId").apply {

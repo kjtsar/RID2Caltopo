@@ -21,6 +21,8 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.data.RemoteVideoControlPrefs
+import org.ncssar.rid2caltopo.data.VideoThumbnailRefreshPolicy
+import org.ncssar.rid2caltopo.data.VideoThumbnailRefreshPrefs
 import org.ncssar.rid2caltopo.data.WifiRidScanPrefs
 import org.ncssar.rid2caltopo.notam.NotamAuthManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
@@ -82,6 +84,12 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         RemoteVideoControlPrefs.isEnabled(R2CApplication.getAppCtxt())
     )
     val remoteVideoControlEnabled = _remoteVideoControlEnabled.asStateFlow()
+    private val _thumbnailRefreshSeconds = MutableStateFlow(
+        VideoThumbnailRefreshPolicy.format(
+            VideoThumbnailRefreshPrefs.getSeconds(R2CApplication.getAppCtxt())
+        )
+    )
+    val thumbnailRefreshSeconds = _thumbnailRefreshSeconds.asStateFlow()
     private val _predictiveHeadEnabled = MutableStateFlow(CaltopoClient.GetPredictiveHeadEnabled())
     val predictiveHeadEnabled = _predictiveHeadEnabled.asStateFlow()
     private val _proximityAlertSpacingFeet = MutableStateFlow(CaltopoClient.GetProximityAlertSpacingFeet().toString())
@@ -187,6 +195,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _standaloneR2cCoordinationEnabled.value = CaltopoClient.GetStandaloneR2cCoordinationEnabled()
         _captureIncomingVideo.value = CaltopoClient.GetCaptureVideoStreamsFlag()
         _wifiRidScanningEnabled.value = WifiRidScanPrefs.isEnabled(R2CApplication.getAppCtxt())
+        _remoteVideoControlEnabled.value = RemoteVideoControlPrefs.isEnabled(R2CApplication.getAppCtxt())
+        _thumbnailRefreshSeconds.value = VideoThumbnailRefreshPolicy.format(
+            VideoThumbnailRefreshPrefs.getSeconds(R2CApplication.getAppCtxt())
+        )
         _predictiveHeadEnabled.value = CaltopoClient.GetPredictiveHeadEnabled()
         _proximityAlertSpacingFeet.value = CaltopoClient.GetProximityAlertSpacingFeet().toString()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
@@ -355,6 +367,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _remoteVideoControlEnabled.value = enabled
     }
 
+    fun onThumbnailRefreshSecondsChanged(seconds: String) {
+        _thumbnailRefreshSeconds.value = seconds
+    }
+
     fun onExternalDisplayReturnToPhoneOnlyChanged(enabled: Boolean) {
         _externalDisplayReturnToPhoneOnly.value = enabled
     }
@@ -442,6 +458,12 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
             R2CApplication.getAppCtxt(),
             _remoteVideoControlEnabled.value,
         )
+        val thumbnailRefreshSeconds = VideoThumbnailRefreshPrefs.setSeconds(
+            R2CApplication.getAppCtxt(),
+            _thumbnailRefreshSeconds.value.toDoubleOrNull()
+                ?: VideoThumbnailRefreshPolicy.DEFAULT_SECONDS,
+        )
+        _thumbnailRefreshSeconds.value = VideoThumbnailRefreshPolicy.format(thumbnailRefreshSeconds)
         CaltopoClient.SetPredictiveHeadEnabled(_predictiveHeadEnabled.value)
         _proximityAlertSpacingFeet.value.toLongOrNull()?.let { CaltopoClient.SetProximityAlertSpacingFeet(it) }
         CaltopoClient.SetCaltopoDomainAndPort(_caltopoDomainAndPort.value)

@@ -26,4 +26,16 @@ class AndroidDeviceIdentityTest {
             )
         )
     }
+
+    @Test
+    fun hardwareModelNameIncludesManufacturerWithoutDuplicatingIt() {
+        assertEquals(
+            "Samsung SM-S938U1",
+            AndroidDeviceIdentity.modelName("samsung", "SM-S938U1")
+        )
+        assertEquals(
+            "Google Pixel 9 Pro",
+            AndroidDeviceIdentity.modelName("Google", "Google Pixel 9 Pro")
+        )
+    }
 }

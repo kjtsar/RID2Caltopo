@@ -22,7 +22,10 @@ struct CaltopoSettingsView: View {
     @ObservedObject private var profileLifecycle = AppleCaltopoProfileLifecycle.shared
     @AppStorage("video.captureStreams") private var captureStreams = false
     @AppStorage("video.remoteControlEnabled") private var remoteVideoControlEnabled = false
+    @AppStorage(OperationalThumbnailRefreshInterval.storageKey)
+    private var thumbnailRefreshSeconds = OperationalThumbnailRefreshInterval.defaultSeconds
     @AppStorage(AppleDeviceIdentity.storedNameKey) private var deviceName = AppleDeviceIdentity.displayName
+    @AppStorage(AppleDeviceIdentity.managedNameKey) private var managedDeviceName = ""
     @State private var showingTeamMaps = false
     @State private var showingImportConfig = false
     @State private var importConfigNotice: ConfigImportNotice?
@@ -164,20 +167,43 @@ struct CaltopoSettingsView: View {
                     .autocorrectionDisabled()
             }
             Section("This device") {
-                TextField("Device Name", text: $deviceName)
-                    .textInputAutocapitalization(.words)
-                    .autocorrectionDisabled()
-                Text("Used for this iPad's R2C map marker, Map Folders item, tracker identity, and local track metadata. iOS does not expose the local Bluetooth adapter name, so set this once if Apple reports only “iPad.”")
+                if managedDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    TextField("Device Name", text: $deviceName)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                } else {
+                    LabeledContent("Device Name", value: managedDeviceName)
+                }
+                Text(managedDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Used for this device's R2C map marker, Map Folders item, tracker identity, and local track metadata."
+                    : "Assigned from the authenticated organization member and this device model. It is used consistently by RID2Caltopo, CalTopo, and r2c-tracker.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            Section("Video") {
+            Section("Video Streams") {
                 Toggle("Capture Streams", isOn: $captureStreams)
                 Text("When enabled, incoming streams are recorded as fMP4 under Files > RID2Caltopo > CapturedStreams. Changing this setting restarts the local media server.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Toggle("Remote Video Control", isOn: $remoteVideoControlEnabled)
                 Text("When enabled, an authenticated requester chooses video quality after the link test without a per-request approval prompt. Only one viewer can use this iPad at a time.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Stepper {
+                    LabeledContent(
+                        "Thumbnail Refresh",
+                        value: "\(OperationalThumbnailRefreshInterval.formatted(thumbnailRefreshSeconds)) seconds"
+                    )
+                } onIncrement: {
+                    thumbnailRefreshSeconds = OperationalThumbnailRefreshInterval.incremented(
+                        thumbnailRefreshSeconds
+                    )
+                } onDecrement: {
+                    thumbnailRefreshSeconds = OperationalThumbnailRefreshInterval.decremented(
+                        thumbnailRefreshSeconds
+                    )
+                }
+                Text("Defaults to 5.0 seconds. Shorter intervals use more battery and network data.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -241,14 +267,14 @@ struct CaltopoSettingsView: View {
                     in: 1 ... 1_000
                 )
                 Stepper(
-                    "Max App Idle Time: \(orgSettings.maximumIdleMinutes) min",
+                    "Max RID Idle Time: \(orgSettings.maximumIdleMinutes) min",
                     value: Binding(
                         get: { orgSettings.maximumIdleMinutes },
                         set: { orgSettings.setMaximumIdleMinutes($0) }
                     ),
                     in: 0 ... 1_440
                 )
-                Text("Track filtering, loss timing, bridge distance, proximity spacing, and maximum app idle time use the same operator-adjustable controls as Android. Set Max App Idle Time to 0 to disable automatic closing.")
+                Text("Track filtering, loss timing, bridge distance, proximity spacing, and maximum RID idle time use the same operator-adjustable controls as Android. Set Max RID Idle Time to 0 to disable automatic closing.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading) {

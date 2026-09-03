@@ -32,6 +32,72 @@ data class StreamTelemetryPairingControlDecision(
     val warning: StreamTelemetryPairingWarning? = null
 )
 
+fun automaticStreamTelemetryPairingTarget(
+    confirmedRemoteId: String,
+    candidateTelemetry: Collection<StreamTelemetryState>,
+    liveUnpairedStreamDesignators: Collection<String>
+): String? {
+    val confirmed = confirmedRemoteId.trim()
+    val soleCandidate = candidateTelemetry.singleOrNull() ?: return null
+    if (confirmed.isEmpty() || soleCandidate.remoteId.trim() != confirmed) return null
+    return liveUnpairedStreamDesignators
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .distinct()
+        .singleOrNull()
+}
+
+/**
+ * Returns the Remote ID of the uniquely closest displayed drone designator.
+ *
+ * This is presentation guidance only: callers must not use a near match as an automatic
+ * stream-to-telemetry binding. A tie intentionally produces no suggestion rather than giving
+ * the operator an arbitrary favorite.
+ */
+fun closestStreamTelemetryRemoteId(
+    streamDesignator: String,
+    candidateTelemetry: Collection<StreamTelemetryState>
+): String? {
+    val stream = streamDesignator.normalizedForClosestMatch()
+    if (stream.isEmpty()) return null
+
+    val ranked = candidateTelemetry.mapNotNull { telemetry ->
+        val candidate = telemetry.mappedId.ifBlank { telemetry.remoteId }
+            .normalizedForClosestMatch()
+        if (candidate.isEmpty() || telemetry.remoteId.isBlank()) null
+        else telemetry.remoteId to levenshteinDistance(stream, candidate)
+    }
+    val bestDistance = ranked.minOfOrNull { it.second } ?: return null
+    val closest = ranked.filter { it.second == bestDistance }
+    return closest.singleOrNull()?.first
+}
+
+private fun String.normalizedForClosestMatch(): String =
+    trim().uppercase(Locale.US)
+
+private fun levenshteinDistance(left: String, right: String): Int {
+    if (left == right) return 0
+    if (left.isEmpty()) return right.length
+    if (right.isEmpty()) return left.length
+
+    var previous = IntArray(right.length + 1) { it }
+    var current = IntArray(right.length + 1)
+    left.forEachIndexed { leftIndex, leftCharacter ->
+        current[0] = leftIndex + 1
+        right.forEachIndexed { rightIndex, rightCharacter ->
+            val insertion = current[rightIndex] + 1
+            val deletion = previous[rightIndex + 1] + 1
+            val substitution = previous[rightIndex] +
+                if (leftCharacter == rightCharacter) 0 else 1
+            current[rightIndex + 1] = minOf(insertion, deletion, substitution)
+        }
+        val swap = previous
+        previous = current
+        current = swap
+    }
+    return previous[right.length]
+}
+
 data class ConfiguredStreamTelemetryBindingMaps(
     val streamDesignatorToRemoteId: Map<String, String>,
     val remoteIdToStreamDesignator: Map<String, String>

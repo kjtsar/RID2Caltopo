@@ -29,6 +29,30 @@ import Testing
     ))
 }
 
+@Test func organizationAuthenticationSurvivesOnlyBriefBackgroundInactivity() {
+    let backgroundedAt = Date(timeIntervalSince1970: 1_000)
+    #expect(OrganizationAccessPolicy.authenticatedSessionRemainsValid(
+        accessWasGranted: true,
+        backgroundedAt: nil,
+        resumedAt: backgroundedAt.addingTimeInterval(100)
+    ))
+    #expect(OrganizationAccessPolicy.authenticatedSessionRemainsValid(
+        accessWasGranted: true,
+        backgroundedAt: backgroundedAt,
+        resumedAt: backgroundedAt.addingTimeInterval(14.999)
+    ))
+    #expect(!OrganizationAccessPolicy.authenticatedSessionRemainsValid(
+        accessWasGranted: true,
+        backgroundedAt: backgroundedAt,
+        resumedAt: backgroundedAt.addingTimeInterval(15)
+    ))
+    #expect(!OrganizationAccessPolicy.authenticatedSessionRemainsValid(
+        accessWasGranted: false,
+        backgroundedAt: backgroundedAt,
+        resumedAt: backgroundedAt
+    ))
+}
+
 @Test func operationalMapTrackFreshnessPrefersOnlyStrictlyNewerPeerSamples() {
     let local = Date(timeIntervalSince1970: 1_000)
 
@@ -399,6 +423,53 @@ import Testing
     #expect(!opened.contains("startReceiveLoop"))
 }
 
+@Test func appleThumbnailCaptureRepublishesCurrentCaltopoMetadata() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let coordinator = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleTrackerCoordinator.swift"),
+        encoding: .utf8
+    )
+    let viewModel = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/RIDTrackViewModel.swift"),
+        encoding: .utf8
+    )
+
+    #expect(coordinator.contains("managedVideoThumbnailUpdatedHandler?(droneDesignator)"))
+    #expect(coordinator.contains("let candidates = managedVideoStreams.filter"))
+    #expect(coordinator.contains("if leftIsLive != rightIsLive { return leftIsLive }"))
+    #expect(coordinator.contains("for advertisement in candidates.prefix(8)"))
+    #expect(!coordinator.contains("for advertisement in managedVideoStreams.prefix(8)"))
+    #expect(viewModel.contains("refreshCaltopoThumbnailMetadata(droneDesignator: droneDesignator)"))
+    #expect(viewModel.contains("observation: track.lastObservation"))
+}
+
+@Test func appleLateStreamAndManualLongPressBothOpenTelemetryPairing() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let contentView = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/ContentView.swift"),
+        encoding: .utf8
+    )
+    let mapView = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/RIDTrackMapView.swift"),
+        encoding: .utf8
+    )
+    let streamsView = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleStreamRegistry.swift"),
+        encoding: .utf8
+    )
+
+    #expect(contentView.contains("Presenting telemetry pairing prompt for late stream="))
+    #expect(contentView.contains("droneConfirmations.isCurrentFlightConfirmed(track.aircraftID)"))
+    #expect(mapView.contains("Manual telemetry pairing requested stream="))
+    #expect(streamsView.contains("LongPressGesture(minimumDuration: 0.5)"))
+}
+
 @Test func trackerReauthenticationChallengeDecodesFastAPIErrorResponse() throws {
     let data = try JSONSerialization.data(withJSONObject: [
         "detail": [
@@ -521,6 +592,30 @@ import Testing
     #expect(diagnostics.contains("self.latestPath = path"))
     #expect(diagnostics.contains("refresh(reason: RefreshReason) async"))
     #expect(diagnostics.contains("self.record(path: path, reason: .networkPathChanged)"))
+}
+
+@Test func appleDeviceLocationProactivelyPrefetchesTerrain() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let contentView = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/ContentView.swift"),
+        encoding: .utf8
+    )
+    let viewModel = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/RIDTrackViewModel.swift"),
+        encoding: .utf8
+    )
+    let terrainService = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleTerrainElevationService.swift"),
+        encoding: .utf8
+    )
+
+    #expect(contentView.contains("ridTracks.prefetchTerrainForDeviceLocation("))
+    #expect(viewModel.contains("await terrainService.prefetch(latitude: latitude, longitude: longitude)"))
+    #expect(terrainService.contains("func prefetch(latitude: Double, longitude: Double)"))
+    #expect(terrainService.contains("guard scheduledPrefetchCells.insert(cell).inserted else { return }"))
 }
 
 @Test func managedVideoProbeQueueUsesShallowBackpressureBound() {
@@ -1128,6 +1223,13 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     ) == nil)
 }
 
+@Test func operationalAppleDeviceModelUsesMarketingFamily() {
+    #expect(OperationalDeviceModelName.apple(machineIdentifier: "iPad16,4") == "iPad Pro")
+    #expect(OperationalDeviceModelName.apple(machineIdentifier: "iPad14,8") == "iPad Air")
+    #expect(OperationalDeviceModelName.apple(machineIdentifier: "iPad16,1") == "iPad mini")
+    #expect(OperationalDeviceModelName.apple(machineIdentifier: "iPad13,18") == "iPad")
+}
+
 @Test func mediaMTXRuntimeConfigurationMatchesAndroidCaptureSettings() throws {
     let base = Data("rtmp: yes\npathDefaults:\n  source: publisher\n".utf8)
     let root = URL(fileURLWithPath: "/tmp/stream archive")
@@ -1621,7 +1723,7 @@ func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
     #expect(!tiles.isEmpty)
     #expect(Set(tiles).count == tiles.count)
     #expect(OperationalOfflineMapPlanner.demTileNames(bounds: bounds) == ["n40w106", "n40w105"])
-    #expect(OperationalDEMResolution.allCases.first == .standard30m)
+    #expect(OperationalDEMResolution.allCases.first == .maximum1m)
     #expect(OperationalOfflineMapPlanner.estimatedBytes(
         tileCount: 0, includeContours: false, demTileCount: 1, demResolution: .enhanced10m
     ) > OperationalOfflineMapPlanner.estimatedBytes(
@@ -3234,9 +3336,29 @@ private func proximityDrone(
     #expect(abs(utm.y - 4_782_042) < 5)
 }
 
+@Test func geoTiffConusAlbersConversionMatchesEpsg6350Reference() {
+    let albers = GeoTiffElevationSource.latLonToConusAlbers(
+        latitude: 39.2616, longitude: -121.0608
+    )
+    #expect(abs(albers.x + 2_117_785.808) < 0.02)
+    #expect(abs(albers.y - 2_085_095.786) < 0.02)
+}
+
+@Test func s1mCatalogSelectsOnlyTheTileContainingTheRequestedPoint() throws {
+    let data = Data(#"{"items":[{"downloadURL":"https://example.test/outside.tif","boundingBox":{"minX":-120.0,"maxX":-119.9,"minY":38.0,"maxY":38.1}},{"downloadURL":"https://example.test/S1M_tile.tif","sizeInBytes":350000000,"boundingBox":{"minX":-121.1,"maxX":-121.0,"minY":39.2,"maxY":39.3}}]}"#.utf8)
+    let products = try OperationalS1MCatalog.products(
+        data: data,
+        containing: (latitude: 39.2616, longitude: -121.0608)
+    )
+    let result = try #require(products.first)
+    #expect(result.url.absoluteString == "https://example.test/S1M_tile.tif")
+    #expect(result.fileName.hasPrefix("R2C_S1M_"))
+    #expect(result.expectedBytes == 350_000_000)
+}
+
 @Test func geoTiffRecognizesPlannerEncodedOneMeterBounds() throws {
     let bounds = try #require(GeoTiffElevationSource.tileBounds(
-        fileName: "R2C_1M_4317269_4326281_-11100000_-11087679_USGS_1M_example.tif"
+        fileName: "R2C_S1M_4317269_4326281_-11100000_-11087679_S1M_example.tif"
     ))
     #expect(abs(bounds.south - 43.17269) < 0.000001)
     #expect(abs(bounds.east + 110.87679) < 0.000001)
@@ -5022,6 +5144,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
         mapID: "MAP1",
         zoneID: "zone-alpha",
         name: "Alpha",
+        deviceModel: "iPad Pro",
         platform: "ios",
         appVersion: "0.1(1)",
         appVersionCode: 1
@@ -5035,6 +5158,7 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(hello["incidentId"] as? String == "MAP1")
     #expect(hello["zoneId"] as? String == "zone-alpha")
     #expect(hello["guid"] as? String == "zone-alpha")
+    #expect(hello["deviceModel"] as? String == "iPad Pro")
     #expect(hello["appPlatform"] as? String == "ios")
     #expect((hello["appVersionCode"] as? NSNumber)?.intValue == 1)
     #expect(

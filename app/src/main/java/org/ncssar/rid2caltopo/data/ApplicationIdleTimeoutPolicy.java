@@ -13,6 +13,16 @@ public final class ApplicationIdleTimeoutPolicy {
 
     private ApplicationIdleTimeoutPolicy() {}
 
+    public static long sessionStartedAtMsec(
+            long existingSessionStartedAtMsec,
+            boolean activityRecreated,
+            long nowMsec) {
+        if (activityRecreated && existingSessionStartedAtMsec > 0L) {
+            return existingSessionStartedAtMsec;
+        }
+        return nowMsec;
+    }
+
     public static long remainingDelayMsec(
             long appStartedAtMsec,
             long lastRidMessageAtMsec,

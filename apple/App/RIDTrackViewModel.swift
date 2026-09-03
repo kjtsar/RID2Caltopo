@@ -59,6 +59,7 @@ final class RIDTrackViewModel: ObservableObject {
     private var activeCaltopoRemoteIDs: Set<String> = []
     private var pendingPublication: [String: [RidAircraftTrack]] = [:]
     private var publicationChains: [String: Task<Void, Never>] = [:]
+    private var thumbnailMetadataRefreshTasks: [String: Task<Void, Never>] = [:]
     private var ownershipActivationTasks: [String: Task<Void, Never>] = [:]
     private var archiveConfiguration: AppleTrackArchiveConfiguration?
     private var localDeviceMarker: CaltopoDeviceMarker?
@@ -325,6 +326,13 @@ final class RIDTrackViewModel: ObservableObject {
         )
     }
 
+    func prefetchTerrainForDeviceLocation(latitude: Double, longitude: Double) {
+        let terrainService = self.terrainService
+        Task {
+            await terrainService.prefetch(latitude: latitude, longitude: longitude)
+        }
+    }
+
     func centerpointElevationFeet(
         streamID: String,
         observation: RidObservation,
@@ -572,6 +580,9 @@ final class RIDTrackViewModel: ObservableObject {
         self.identityProvider = identityProvider
         self.peerConfirmationConsumer = peerConfirmationConsumer
         self.peerConfirmationClearer = peerConfirmationClearer
+        coordinator.setManagedVideoThumbnailUpdatedHandler { [weak self] droneDesignator in
+            self?.refreshCaltopoThumbnailMetadata(droneDesignator: droneDesignator)
+        }
         guard coordinationEventTask == nil else { return }
         coordinationEventTask = Task { [weak self, coordinator] in
             for await event in coordinator.events {
@@ -724,6 +735,9 @@ final class RIDTrackViewModel: ObservableObject {
         terrainTasks.removeAll()
         ownershipActivationTasks.values.forEach { $0.cancel() }
         ownershipActivationTasks.removeAll()
+        thumbnailMetadataRefreshTasks.values.forEach { $0.cancel() }
+        thumbnailMetadataRefreshTasks.removeAll()
+        peerCoordinator?.setManagedVideoThumbnailUpdatedHandler(nil)
 
         for track in await store.snapshot() {
             await archive(track)
@@ -902,7 +916,48 @@ final class RIDTrackViewModel: ObservableObject {
         peerCoordinator?.setCaltopoLiveTrackDesignators(designators)
     }
 
-    private func enqueuePublication(remoteID: String, label: String, observation: RidObservation) {
+    private func refreshCaltopoThumbnailMetadata(droneDesignator: String) {
+        let normalizedDesignator = droneDesignator
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalizedDesignator.isEmpty,
+              thumbnailMetadataRefreshTasks[normalizedDesignator] == nil
+        else { return }
+
+        thumbnailMetadataRefreshTasks[normalizedDesignator] = Task { @MainActor [weak self] in
+            // Give the tracker presence message a short head start so CalTopo
+            // does not request the new revision before the image is available.
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self else { return }
+            let tracks = await self.store.snapshot()
+            var publications: [Task<Void, Never>] = []
+            for track in tracks where self.activeCaltopoRemoteIDs.contains(track.aircraftID) {
+                guard self.publicationSuppressionProvider?(track.aircraftID) != true,
+                      self.peerCoordinator?.publicationAllowed(remoteID: track.aircraftID) != false
+                else { continue }
+                let label = self.identityProvider?(track.aircraftID)?.mappedID ?? track.aircraftID
+                guard label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    == normalizedDesignator
+                else { continue }
+                publications.append(self.enqueuePublication(
+                    remoteID: track.aircraftID,
+                    label: label,
+                    observation: track.lastObservation
+                ))
+            }
+            for publication in publications {
+                await publication.value
+            }
+            self.thumbnailMetadataRefreshTasks.removeValue(forKey: normalizedDesignator)
+        }
+    }
+
+    @discardableResult
+    private func enqueuePublication(
+        remoteID: String,
+        label: String,
+        observation: RidObservation
+    ) -> Task<Void, Never> {
         let previous = publicationChains[remoteID]
         let publicationObservation = RidObservation(
             source: observation.source,
@@ -936,6 +991,7 @@ final class RIDTrackViewModel: ObservableObject {
             )
         }
         publicationChains[remoteID] = task
+        return task
     }
 
     private func flushPendingPublication(remoteID: String) {

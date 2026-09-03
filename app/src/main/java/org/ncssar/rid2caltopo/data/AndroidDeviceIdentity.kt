@@ -8,6 +8,9 @@ import java.util.UUID
 
 /** Resolves the operator-assigned Android device name shown by Settings > About phone. */
 object AndroidDeviceIdentity {
+    private const val PREFS = "device_identity"
+    private const val MANAGED_NAME = "managed_display_name"
+
     @JvmStatic
     fun installationId(context: Context): String {
         val androidId = Settings.Secure.getString(
@@ -20,7 +23,19 @@ object AndroidDeviceIdentity {
     }
 
     @JvmStatic
-    fun displayName(context: Context): String = selectDisplayName(
+    fun displayName(context: Context): String {
+        val managed = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(MANAGED_NAME, "")
+            .orEmpty()
+            .trim()
+        if (CaltopoClient.GetHomeTrackerApiKey().isNotBlank() && managed.isNotBlank()) {
+            return managed
+        }
+        return localDisplayName(context)
+    }
+
+    @JvmStatic
+    fun localDisplayName(context: Context): String = selectDisplayName(
         runCatching {
             Settings.Global.getString(
                 context.contentResolver,
@@ -30,8 +45,35 @@ object AndroidDeviceIdentity {
         runCatching {
             Settings.Secure.getString(context.contentResolver, "bluetooth_name")
         }.getOrNull(),
-        "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+        modelName()
     )
+
+    @JvmStatic
+    @JvmOverloads
+    fun modelName(
+        manufacturer: String? = Build.MANUFACTURER,
+        model: String? = Build.MODEL,
+    ): String {
+        val cleanManufacturer = manufacturer.orEmpty().trim()
+        val cleanModel = model.orEmpty().trim()
+        if (cleanModel.isEmpty()) return cleanManufacturer.ifEmpty { "Android device" }
+        if (cleanManufacturer.isEmpty() || cleanModel.startsWith(cleanManufacturer, ignoreCase = true)) {
+            return cleanModel
+        }
+        return "${cleanManufacturer.replaceFirstChar { it.uppercase() }} $cleanModel"
+    }
+
+    @JvmStatic
+    fun applyManagedDisplayName(context: Context, value: String): String {
+        val clean = value.trim()
+        if (clean.isNotEmpty()) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(MANAGED_NAME, clean)
+                .apply()
+        }
+        return clean
+    }
 
     @JvmStatic
     fun selectDisplayName(vararg candidates: String?): String =

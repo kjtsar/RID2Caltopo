@@ -329,6 +329,9 @@ final class AppleOrgConfigSettings: ObservableObject {
     private static let trackerAccount = "tracker-api-key"
     private static let managedStandaloneMigrationKey =
         "org.managedTrackerStandaloneMigration.v1"
+    private static let idleTimeoutMigrationKey = "app.maximumIdleMinutesMigration.v1"
+    private static let defaultMaximumIdleMinutes = 30
+    private static let legacyDefaultMaximumIdleMinutes = 120
     private static let faaClientIDAccount = "faa-client-id"
     private static let faaClientSecretAccount = "faa-client-secret"
     private static let mutualAidCredentialIDAccount = "mutual-aid-credential-id"
@@ -355,8 +358,23 @@ final class AppleOrgConfigSettings: ObservableObject {
         minimumTrackDistanceFeet = max(2, defaults.object(forKey: "track.minimumDistanceFeet") as? Int ?? 2)
         newTrackDelaySeconds = max(1, defaults.object(forKey: "track.newTrackDelaySeconds") as? Int ?? 30)
         bridgeCheckDistanceFeet = max(1, defaults.object(forKey: "track.bridgeCheckDistanceFeet") as? Int ?? 20)
-        maximumIdleMinutes = max(0, defaults.object(forKey: "app.maximumIdleMinutes") as? Int ?? 120)
+        let storedMaximumIdleMinutes = defaults.object(forKey: "app.maximumIdleMinutes") as? Int
+        let shouldMigrateIdleTimeout =
+            !defaults.bool(forKey: Self.idleTimeoutMigrationKey) &&
+            storedMaximumIdleMinutes == Self.legacyDefaultMaximumIdleMinutes
+        if shouldMigrateIdleTimeout {
+            maximumIdleMinutes = Self.defaultMaximumIdleMinutes
+        } else {
+            maximumIdleMinutes = max(
+                0,
+                storedMaximumIdleMinutes ?? Self.defaultMaximumIdleMinutes
+            )
+        }
         sourceDescription = defaults.string(forKey: "org.sourceDescription") ?? "Not loaded"
+        if shouldMigrateIdleTimeout {
+            defaults.set(Self.defaultMaximumIdleMinutes, forKey: "app.maximumIdleMinutes")
+        }
+        defaults.set(true, forKey: Self.idleTimeoutMigrationKey)
         if sourceDescription == "Managed r2c-tracker enrollment" {
             let scopedPrefix = TrackerCoordinationEndpoint.organizationScopedPrefix(
                 from: trackerURLPrefix,
@@ -648,6 +666,7 @@ final class AppleOrgConfigSettings: ObservableObject {
     }
 
     func resetPersistedState() {
+        AppleDeviceIdentity.applyManagedDisplayName("")
         organizationName = ""
         incident = "Training"
         operationalPeriod = "1"
@@ -662,7 +681,8 @@ final class AppleOrgConfigSettings: ObservableObject {
         minimumTrackDistanceFeet = 2
         newTrackDelaySeconds = 30
         bridgeCheckDistanceFeet = 20
-        maximumIdleMinutes = 120
+        maximumIdleMinutes = Self.defaultMaximumIdleMinutes
+        defaults.set(maximumIdleMinutes, forKey: "app.maximumIdleMinutes")
         sourceDescription = "Not loaded"
         trackerEnrollmentURL = ""
         for key in [
@@ -765,7 +785,11 @@ final class AppleOrgConfigSettings: ObservableObject {
         minimumTrackDistanceFeet = max(2, (object["minimum_track_distance_feet"] as? NSNumber)?.intValue ?? 2)
         newTrackDelaySeconds = max(1, (object["new_track_delay_seconds"] as? NSNumber)?.intValue ?? 30)
         bridgeCheckDistanceFeet = max(1, (object["bridge_check_distance_feet"] as? NSNumber)?.intValue ?? 20)
-        maximumIdleMinutes = max(0, (object["maximum_idle_minutes"] as? NSNumber)?.intValue ?? 120)
+        maximumIdleMinutes = max(
+            0,
+            (object["maximum_idle_minutes"] as? NSNumber)?.intValue
+                ?? Self.defaultMaximumIdleMinutes
+        )
         sourceDescription = object["source_description"] as? String ?? "Local backup"
         defaults.set(organizationName, forKey: "org.name")
         defaults.set(incident, forKey: "org.incident")

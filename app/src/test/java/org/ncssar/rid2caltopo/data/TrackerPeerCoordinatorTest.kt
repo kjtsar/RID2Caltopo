@@ -150,6 +150,7 @@ class TrackerPeerCoordinatorTest {
 
         assertEquals("hello", hello.optString("type"))
         assertEquals("android", hello.optString("appPlatform"))
+        assertTrue(hello.optString("deviceModel").isNotBlank())
         assertEquals(BuildConfig.VERSION_CODE, hello.optInt("appVersionCode"))
         assertEquals(BuildConfig.VERSION_NAME, hello.optString("appVersion"))
         assertEquals(

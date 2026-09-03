@@ -284,6 +284,7 @@ fun StreamTile(
     val tileInteractionsEnabled = showTileControls
     val pauseLocalPlaybackOnOpen = if (isLocalPlayback) viewModel.pauseLocalPlaybackOnOpenEnabled() else false
     val designatorState = viewModel.designatorStateFor(streamDesignator)
+    val automaticPairingRequest = viewModel.automaticStreamPairingRequest
     val anomalyConfig = viewModel.anomalyConfigFor(streamDesignator)
     val anomalyMode = anomalyConfig.detectorMode()
     val anomalyPauseReason = viewModel.anomalyPauseReasonFor(streamDesignator)
@@ -401,6 +402,29 @@ fun StreamTile(
             }
             is DesignatorState.Green -> showUnmatchDialog = true
             else -> {}
+        }
+    }
+
+    LaunchedEffect(
+        automaticPairingRequest?.generation,
+        designatorState,
+        streamState,
+        tileInteractionsEnabled,
+    ) {
+        val request = automaticPairingRequest ?: return@LaunchedEffect
+        if (
+            tileInteractionsEnabled &&
+            streamState == StreamState.LIVE &&
+            designatorState is DesignatorState.Yellow &&
+            request.streamDesignator == streamDesignator
+        ) {
+            CTDebug(
+                tag,
+                "Presenting automatic telemetry pairing prompt stream=$streamDesignator " +
+                    "remoteId=${request.remoteId}",
+            )
+            openTelemetryPairingControl()
+            viewModel.consumeAutomaticStreamPairingRequest(request)
         }
     }
 
@@ -1026,6 +1050,7 @@ fun StreamTile(
         if (showPicker) {
             DroneSpecPickerDialog(
                 droneSpecStates = viewModel.droneStates,
+                closestMatchRemoteId = viewModel.closestTelemetryRemoteId(streamDesignator),
                 onSelect = { (selectedMappedId, droneSpecState) ->
                     CTDebug(tag, "DroneSpecPickerDialog() User paired stream '${streamDesignator}' to telemetry ${selectedMappedId}:${droneSpecState.remoteId}")
                     val warning = viewModel.streamPairingWarning(

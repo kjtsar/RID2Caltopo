@@ -181,6 +181,7 @@ final class AppleNetworkDiagnosticCenter: ObservableObject {
 
 enum AppleDeviceIdentity {
     static let storedNameKey = "device.stableDisplayName"
+    static let managedNameKey = "device.managedDisplayName"
     static let installationIDKey = "tracker.zoneID"
 
     static func installationID(defaults: UserDefaults = .standard) -> String {
@@ -195,6 +196,10 @@ enum AppleDeviceIdentity {
     @MainActor
     static var displayName: String {
         let defaults = UserDefaults.standard
+        if let managed = defaults.string(forKey: managedNameKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !managed.isEmpty {
+            return managed
+        }
         let stored = defaults.string(forKey: storedNameKey)
         let userAssignedName = UIDevice.current.name
         let resolved = OperationalDeviceName.preferredDisplayName(
@@ -206,6 +211,27 @@ enum AppleDeviceIdentity {
             defaults.set(resolved, forKey: storedNameKey)
         }
         return resolved
+    }
+
+    static func applyManagedDisplayName(_ value: String, defaults: UserDefaults = .standard) {
+        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty {
+            defaults.removeObject(forKey: managedNameKey)
+        } else {
+            defaults.set(clean, forKey: managedNameKey)
+        }
+    }
+
+    static var modelName: String {
+        var info = utsname()
+        uname(&info)
+        let machine = withUnsafeBytes(of: &info.machine) { bytes in
+            String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        return OperationalDeviceModelName.apple(
+            machineIdentifier: machine,
+            fallback: "Apple device"
+        )
     }
 
     static func displayName(fromHostname hostname: String) -> String {

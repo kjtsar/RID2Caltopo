@@ -104,9 +104,11 @@ import org.ncssar.rid2caltopo.video.StreamAdmissionState
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheSettings
 import org.ncssar.rid2caltopo.video.StreamState
+import org.ncssar.rid2caltopo.video.automaticStreamTelemetryPairingTarget
 import org.ncssar.rid2caltopo.video.bindStreamToRemoteId
 import org.ncssar.rid2caltopo.video.buildLocalPlaybackFrameAnnotationSummary
 import org.ncssar.rid2caltopo.video.clearStreamTelemetryBinding
+import org.ncssar.rid2caltopo.video.closestStreamTelemetryRemoteId
 import org.ncssar.rid2caltopo.video.configuredStreamTelemetryBindingMaps
 import org.ncssar.rid2caltopo.video.localPlaybackReviewFromJson
 import org.ncssar.rid2caltopo.video.resolveStreamTelemetryBinding
@@ -886,6 +888,12 @@ data class DroneDisplayState(
     val rangeFt: Double? = null,
 )
 
+data class AutomaticStreamPairingRequest(
+    val generation: Long,
+    val streamDesignator: String,
+    val remoteId: String,
+)
+
 internal fun streamTelemetryDisplayState(
     streamDesignator: String,
     pairedMappedId: String?,
@@ -1060,6 +1068,9 @@ class StreamsViewModel(
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
     private val runtimeStreamTelemetryBindings = mutableStateMapOf<String, String>()
+    private var automaticPairingGeneration = 0L
+    var automaticStreamPairingRequest by mutableStateOf<AutomaticStreamPairingRequest?>(null)
+        private set
     private var configuredStreamBindings by mutableStateOf<Map<String, String>>(emptyMap())
     private var configuredStreamDesignatorsByRemoteId by mutableStateOf<Map<String, String>>(emptyMap())
     private val _anomalyConfigByDesignator = mutableStateMapOf<String, AnomalyConfig>()
@@ -1882,6 +1893,13 @@ class StreamsViewModel(
         return pairedDroneSpecStateFor(streamDesignator) != null
     }
 
+    fun managedVideoDroneDesignator(streamDesignator: String): String =
+        pairedDroneSpecStateFor(streamDesignator)
+            ?.mappedId
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: streamDesignator
+
     private fun notePairedLiveVideoFrame(streamDesignator: String, observedAtMs: Long) {
         val streamInfo = streamInfoByDesignator[streamDesignator] ?: return
         if (streamInfo.isLocalPlayback || streamInfo.state != StreamState.LIVE) return
@@ -1915,6 +1933,50 @@ class StreamsViewModel(
             candidateTelemetry = streamTelemetryStates(),
             configuredStreamDesignatorByRemoteId = configuredStreamDesignatorsByRemoteId
         )
+    }
+
+    fun closestTelemetryRemoteId(streamDesignator: String): String? =
+        closestStreamTelemetryRemoteId(streamDesignator, streamTelemetryStates())
+
+    fun requestAutomaticStreamPairingAfterConfirmation(remoteId: String) {
+        val liveUnpairedStreams = streamInfoByDesignator.values
+            .filter { info ->
+                info.state == StreamState.LIVE &&
+                    !info.isLocalPlayback &&
+                    isStreamVisible(info) &&
+                    !hasPairedTelemetry(info.designator)
+            }
+            .map { it.designator }
+        val target = automaticStreamTelemetryPairingTarget(
+            confirmedRemoteId = remoteId,
+            candidateTelemetry = streamTelemetryStates(),
+            liveUnpairedStreamDesignators = liveUnpairedStreams,
+        )
+        if (target == null) {
+            CTDebug(
+                tag,
+                "Automatic telemetry pairing prompt skipped after confirmation remoteId=$remoteId " +
+                    "activeTelemetry=${_droneStates.size} liveUnpaired=${liveUnpairedStreams.size}",
+            )
+            automaticStreamPairingRequest = null
+            return
+        }
+        automaticPairingGeneration += 1
+        automaticStreamPairingRequest = AutomaticStreamPairingRequest(
+            generation = automaticPairingGeneration,
+            streamDesignator = target,
+            remoteId = remoteId.trim(),
+        )
+        CTDebug(
+            tag,
+            "Automatic telemetry pairing prompt queued stream=$target remoteId=$remoteId",
+        )
+    }
+
+    fun consumeAutomaticStreamPairingRequest(request: AutomaticStreamPairingRequest) {
+        if (automaticStreamPairingRequest == request) {
+            automaticStreamPairingRequest = null
+        }
     }
 
     private fun pairedDroneSpecStateFor(streamDesignator: String): DroneSpecState? {

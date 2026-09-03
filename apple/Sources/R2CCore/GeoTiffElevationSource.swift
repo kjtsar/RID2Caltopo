@@ -3,7 +3,8 @@ import Foundation
 
 /// Random-access elevation sampler for the USGS 3DEP GeoTIFFs downloaded by
 /// both RID2Caltopo platforms. Supports geographic 30/10 m products and
-/// NAD83/WGS84 UTM 1 m project tiles, plus raw, LZW, Deflate, PackBits, and predictors 2/3.
+/// NAD83/WGS84 UTM project tiles and EPSG:6350 S1M tiles, plus raw, LZW,
+/// Deflate, PackBits, and predictors 2/3.
 public final class GeoTiffElevationSource: @unchecked Sendable {
     public struct Sample: Sendable, Equatable {
         public let elevationMeters: Double
@@ -39,6 +40,9 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
 
         func modelCoordinate(latitude: Double, longitude: Double) -> (x: Double, y: Double)? {
             guard let epsg = projectedCSTypeCode else { return (longitude, latitude) }
+            if epsg == 6350 {
+                return GeoTiffElevationSource.latLonToConusAlbers(latitude: latitude, longitude: longitude)
+            }
             return GeoTiffElevationSource.latLonToUTM(latitude: latitude, longitude: longitude, epsg: epsg)
         }
 
@@ -91,7 +95,7 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
     }
 
     public static func tileBounds(fileName: String) -> (south: Double, north: Double, west: Double, east: Double)? {
-        let plannedPattern = #"(?i)^R2C_1M_(-?[0-9]+)_(-?[0-9]+)_(-?[0-9]+)_(-?[0-9]+)_.*\.tiff?$"#
+        let plannedPattern = #"(?i)^R2C_(?:S1M|1M)_(-?[0-9]+)_(-?[0-9]+)_(-?[0-9]+)_(-?[0-9]+)_.*\.tiff?$"#
         if let regex = try? NSRegularExpression(pattern: plannedPattern),
            let match = regex.firstMatch(in: fileName, range: NSRange(fileName.startIndex..., in: fileName)),
            let southRange = Range(match.range(at: 1), in: fileName),
@@ -150,6 +154,32 @@ public final class GeoTiffElevationSource: @unchecked Sendable {
             + (61 - 58 * t + pow(t, 2) + 600 * c - 330 * ep2) * pow(aa, 6) / 720))
         if !northern { y += 10_000_000 }
         return (x, y)
+    }
+
+    /// WGS84/NAD83 latitude-longitude to EPSG:6350 NAD83(2011) / Conus Albers.
+    public static func latLonToConusAlbers(
+        latitude: Double,
+        longitude: Double
+    ) -> (x: Double, y: Double) {
+        let a = 6_378_137.0, f = 1 / 298.257222101
+        let e2 = f * (2 - f), e = sqrt(e2)
+        func q(_ phi: Double) -> Double {
+            let sine = sin(phi)
+            return (1 - e2) * (sine / (1 - e2 * sine * sine)
+                - log((1 - e * sine) / (1 + e * sine)) / (2 * e))
+        }
+        func m(_ phi: Double) -> Double {
+            cos(phi) / sqrt(1 - e2 * pow(sin(phi), 2))
+        }
+        let phi0 = 23.0 * .pi / 180, lambda0 = -96.0 * .pi / 180
+        let phi1 = 29.5 * .pi / 180, phi2 = 45.5 * .pi / 180
+        let m1 = m(phi1), m2 = m(phi2), q1 = q(phi1), q2 = q(phi2)
+        let n = (m1 * m1 - m2 * m2) / (q2 - q1)
+        let c = m1 * m1 + n * q1
+        func rho(_ phi: Double) -> Double { a * sqrt(c - n * q(phi)) / n }
+        let radius = rho(latitude * .pi / 180)
+        let theta = n * (longitude * .pi / 180 - lambda0)
+        return (radius * sin(theta), rho(phi0) - radius * cos(theta))
     }
 
     private func refreshCatalog() {

@@ -23,7 +23,16 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 18
+    const val SCHEMA_VERSION = 19
+    private const val LEGACY_MAX_IDLE_TIME_MINUTES = 120L
+
+    internal fun resolveMaximumIdleMinutes(config: AppConfig): Long = when {
+        config.schemaVersion < SCHEMA_VERSION &&
+            config.maxIdleTimeMinutes == LEGACY_MAX_IDLE_TIME_MINUTES ->
+            CaltopoClient.DEFAULT_MAX_IDLE_TIME_MINUTES
+        config.maxIdleTimeMinutes >= 0L -> config.maxIdleTimeMinutes
+        else -> CaltopoClient.DEFAULT_MAX_IDLE_TIME_MINUTES
+    }
 
     internal data class LandRestrictionDefaults(
         val enabled: Boolean,
@@ -345,7 +354,7 @@ object AppConfigStore {
             else -> CaltopoClient.DEFAULT_ALARM_VOLUME_PERCENT
         }
         state.debugLevel = config.debugLevel
-        state.maxIdleTimeInMinutes = if (config.maxIdleTimeMinutes >= 0) config.maxIdleTimeMinutes else 120
+        state.maxIdleTimeInMinutes = resolveMaximumIdleMinutes(config)
         state.incident = activeProfile?.incident?.ifBlank { "Training" } ?: config.incident.ifBlank { "Training" }
         state.opPeriod = activeProfile?.opPeriod?.ifBlank { "1" } ?: config.opPeriod.ifBlank { "1" }
         state.trackerApiKey = activeProfile?.trackerApiKey ?: config.trackerApiKey

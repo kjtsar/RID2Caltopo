@@ -106,6 +106,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import androidx.documentfile.provider.DocumentFile
 import okhttp3.OkHttpClient
 import okhttp3.Call
@@ -769,7 +771,8 @@ internal fun SplitMapPane(
     var firstLiveTilePriorityPassComplete by remember { mutableStateOf(false) }
     var lastViewportSignature by remember { mutableStateOf<String?>(null) }
     // Auto-download: GeoTIFF tiles already initiated (prevents redundant re-downloads).
-    val autoFetchedDemTiles = remember { HashSet<String>() }
+    val autoFetchedDemTiles = remember { Collections.synchronizedSet(HashSet<String>()) }
+    val demAutoFetchMutex = remember { Mutex() }
     val autoPrefetchedMapTiles = remember { Collections.synchronizedSet(HashSet<String>()) }
     val demAutoFetchClient = remember {
         OkHttpClient.Builder()
@@ -980,10 +983,13 @@ internal fun SplitMapPane(
     }
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
-    // GeoTIFF tile names covering all currently-visible drone positions.
-    // Used to trigger proactive background downloads so DEM lookups are served locally.
-    val neededDemTileNames: Set<String> = remember(dronePoints) {
-        dronePoints.mapTo(LinkedHashSet()) { tileNameForLocation(it.lat, it.lng) }
+    // Point targets for proactive S1M downloads. Quantizing to small cells keeps requests
+    // bounded while still detecting movement into another 10 km S1M tile.
+    val neededDemTargets: Map<String, Pair<Double, Double>> = remember(dronePoints) {
+        dronePoints.associateBy(
+            keySelector = { demPrefetchCellKey(it.lat, it.lng) },
+            valueTransform = { it.lat to it.lng },
+        )
     }
     var offlineBoundaryOptions by remember { mutableStateOf<List<OfflineBoundaryOption>>(emptyList()) }
     LaunchedEffect(artifactOverlayState) {
@@ -1048,11 +1054,12 @@ internal fun SplitMapPane(
         if (!loc.latitude.isFinite() || !loc.longitude.isFinite()) return@LaunchedEffect
         val lat = loc.latitude
         val lng = loc.longitude
-        val tileName = tileNameForLocation(lat, lng)
+        val cellKey = demPrefetchCellKey(lat, lng)
         withContext(Dispatchers.IO) {
-            if (autoFetchedDemTiles.add(tileName)) {
-                // Download or verify tile; refreshGeoTiffCatalog() is called inside when done.
-                autoDownloadDemTile(tileName, context, demAutoFetchClient, demElevationService)
+            if (autoFetchedDemTiles.add(cellKey)) {
+                demAutoFetchMutex.withLock {
+                    autoDownloadBestDemForLocation(lat, lng, context, demAutoFetchClient, demElevationService)
+                }
             }
             // Pre-decode the TIFF block(s) covering our GPS position into the persistent
             // .f32raw cache.  Runs after the tile is confirmed available so the decode
@@ -1061,14 +1068,21 @@ internal fun SplitMapPane(
             demElevationService.prewarmForLocation(lat, lng)
         }
     }
-    // Proactive DEM tile download keyed on active drone positions. Fires whenever the set of
-    // required 1° tiles changes (new drone, drone crossing a tile boundary). Each unique tile
-    // is downloaded at most once per session; already-present files are skipped quickly.
-    LaunchedEffect(neededDemTileNames) {
-        for (tileName in neededDemTileNames) {
-            if (!autoFetchedDemTiles.add(tileName)) continue
+    // Proactive S1M download keyed on active drone positions. Each small location cell is
+    // queried at most once per session; the downloader also keeps the 30 m coverage fallback.
+    LaunchedEffect(neededDemTargets) {
+        for ((cellKey, coordinate) in neededDemTargets) {
+            if (!autoFetchedDemTiles.add(cellKey)) continue
             uiScope.launch(Dispatchers.IO) {
-                autoDownloadDemTile(tileName, context, demAutoFetchClient, demElevationService)
+                demAutoFetchMutex.withLock {
+                    autoDownloadBestDemForLocation(
+                        coordinate.first,
+                        coordinate.second,
+                        context,
+                        demAutoFetchClient,
+                        demElevationService,
+                    )
+                }
             }
         }
     }

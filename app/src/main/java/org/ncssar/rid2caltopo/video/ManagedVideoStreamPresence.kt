@@ -13,6 +13,7 @@ object ManagedVideoStreamPresence {
     @Synchronized
     fun snapshot(
         streams: Map<String, StreamInfo>,
+        droneDesignatorProvider: (String) -> String = { it },
         sourceInfoProvider: (String) -> org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge.VideoSourceInfo? = { null },
         hasRecentFrame: (String) -> Boolean = { true },
         recordings: List<ManagedVideoSessionRecording> = emptyList(),
@@ -42,7 +43,9 @@ object ManagedVideoStreamPresence {
             val thumbnail = thumbnailProvider(sessionId)
             ManagedVideoStreamAdvertisement(
                 sessionId,
-                stream.designator,
+                droneDesignatorProvider(stream.designator)
+                    .trim()
+                    .ifEmpty { stream.designator },
                 source?.width ?: 0,
                 source?.height ?: 0,
                 nominalManagedVideoSourceFps(source?.fps ?: 0.0),
@@ -70,6 +73,26 @@ object ManagedVideoStreamPresence {
             )
         }
     }
+
+    internal fun thumbnailCaptureCandidates(
+        advertisements: List<ManagedVideoStreamAdvertisement>,
+        forceDesignators: Set<String>,
+        hasThumbnail: (String) -> Boolean,
+        limit: Int = 8,
+    ): List<ManagedVideoStreamAdvertisement> = advertisements
+        .filter { advertisement ->
+            val force = advertisement.mediaKind == "live" &&
+                forceDesignators.any {
+                    it.equals(advertisement.droneDesignator, ignoreCase = true)
+                }
+            !hasThumbnail(advertisement.sessionId) || force
+        }
+        .sortedWith(
+            compareByDescending<ManagedVideoStreamAdvertisement> {
+                it.mediaKind == "live"
+            }.thenBy { it.sessionId.lowercase() }
+        )
+        .take(limit)
 
     @Synchronized
     internal fun resetForTests() {

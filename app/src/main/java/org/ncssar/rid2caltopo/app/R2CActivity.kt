@@ -26,6 +26,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.os.CancellationSignal
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Display
 import android.view.View
@@ -88,7 +89,10 @@ import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
+import org.ncssar.rid2caltopo.data.AndroidDeviceIdentity
 import org.ncssar.rid2caltopo.data.PeerCoordinator
+import org.ncssar.rid2caltopo.data.VideoThumbnailRefreshPolicy
+import org.ncssar.rid2caltopo.data.VideoThumbnailRefreshPrefs
 import org.ncssar.rid2caltopo.data.VideoStreamViewRequest
 import org.ncssar.rid2caltopo.data.VideoMediaOffer
 import org.ncssar.rid2caltopo.data.RecordingDownloadRequest
@@ -190,6 +194,49 @@ internal fun organizationAccessAuthenticationRequired(
 ): Boolean = !organizationName.isNullOrBlank() ||
     trackerOrganizationConfigured ||
     caltopoTeamsAccountConfigured
+
+internal const val ORGANIZATION_ACCESS_BACKGROUND_GRACE_MSEC = 15_000L
+
+internal fun organizationAccessSessionRemainsValid(
+    authenticated: Boolean,
+    backgroundedAtMsec: Long?,
+    resumedAtMsec: Long,
+): Boolean {
+    if (!authenticated) return false
+    val backgroundedAt = backgroundedAtMsec ?: return true
+    return (resumedAtMsec - backgroundedAt).coerceAtLeast(0L) <
+        ORGANIZATION_ACCESS_BACKGROUND_GRACE_MSEC
+}
+
+private object OrganizationAccessSession {
+    private var authenticated = false
+    private var backgroundedAtMsec: Long? = null
+
+    fun markAuthenticated() {
+        authenticated = true
+        backgroundedAtMsec = null
+    }
+
+    fun markBackgrounded(nowMsec: Long) {
+        if (authenticated) backgroundedAtMsec = nowMsec
+    }
+
+    fun resume(nowMsec: Long): Boolean {
+        val valid = organizationAccessSessionRemainsValid(
+            authenticated,
+            backgroundedAtMsec,
+            nowMsec,
+        )
+        authenticated = valid
+        backgroundedAtMsec = null
+        return valid
+    }
+
+    fun invalidate() {
+        authenticated = false
+        backgroundedAtMsec = null
+    }
+}
 
 private fun configuredAccessAuthenticationRequired(): Boolean =
     CaltopoClient.GetCaltopoCredentials().let { credentials ->
@@ -1015,6 +1062,18 @@ class R2CActivity :
     override fun onResume() {
         super.onResume()
         if (launchDisclaimerAccepted) {
+            if (configuredAccessAuthenticationRequired() &&
+                organizationAccessState != OrganizationAccessState.AUTHENTICATING
+            ) {
+                organizationAccessState = if (
+                    OrganizationAccessSession.resume(SystemClock.elapsedRealtime())
+                ) {
+                    organizationAccessError = null
+                    OrganizationAccessState.UNLOCKED
+                } else {
+                    OrganizationAccessState.LOCKED
+                }
+            }
             requestOrganizationAccessAuthentication()
         }
         ScanningService.setDisplayActive(applicationContext, true, externalDisplayConnected)
@@ -1043,6 +1102,11 @@ class R2CActivity :
             organizationAccessState != OrganizationAccessState.AUTHENTICATING &&
             !isChangingConfigurations
         ) {
+            if (organizationAccessState == OrganizationAccessState.UNLOCKED) {
+                OrganizationAccessSession.markBackgrounded(SystemClock.elapsedRealtime())
+            } else {
+                OrganizationAccessSession.invalidate()
+            }
             organizationAccessState = OrganizationAccessState.LOCKED
         }
         super.onStop()
@@ -1058,7 +1122,9 @@ class R2CActivity :
             CaltopoMap.SetMyLocationOverride(null)
         }
         setVolumeControlStream(AudioManager.STREAM_ALARM)
-        CaltopoClient.MarkAppActive()
+        // Preserve the process/session idle baseline across configuration-driven Activity
+        // recreation. The scanning service can remain up while Android rebuilds this UI.
+        CaltopoClient.MarkAppActive(savedInstanceState != null)
         CTDebug(TAG, "onCreate().")
         if (AppActivity != null) {
             CTDebug(TAG, "onCreate() with an existing activity.")
@@ -1113,12 +1179,14 @@ class R2CActivity :
                 val confirmAppExit = {
                     val source = pendingAppExitSource
                     pendingAppExitSource = null
-                    CaltopoClient.CTEvent(
+                    // Request Activity removal before archive logging. A stalled SAF-backed
+                    // diagnostic stream must never prevent the operator from closing the app.
+                    CaltopoClient.QuitApplication()
+                    CaltopoClient.CTEventAsync(
                         TAG,
                         "QuitConfirmed source=${source?.logValue ?: "unknown"}",
                         null,
                     )
-                    CaltopoClient.QuitApplication()
                 }
                 if (!launchDisclaimerAccepted) {
                     LaunchDisclaimerScreen(
@@ -1210,7 +1278,9 @@ class R2CActivity :
                             .filter {
                                 it.state == org.ncssar.rid2caltopo.video.StreamState.LIVE &&
                                     !it.isLocalPlayback &&
-                                    CaltopoLiveTrack.HasActiveLocalTrackForMappedId(it.designator)
+                                    CaltopoLiveTrack.HasActiveLocalTrackForMappedId(
+                                        streamsViewModel.managedVideoDroneDesignator(it.designator)
+                                    )
                             }
                             .map { it.designator }
                             .toSet()
@@ -1221,11 +1291,11 @@ class R2CActivity :
                             applicationContext
                         )
                         var advertisements = ManagedVideoStreamPresence.snapshot(
-                            streams,
-                            streamsViewModel::managedVideoSourceInfo,
-                            streamsViewModel::hasRecentManagedVideoFrame,
-                            recordings,
-                            ManagedVideoThumbnailStore::get,
+                            streams = streams,
+                            sourceInfoProvider = streamsViewModel::managedVideoSourceInfo,
+                            hasRecentFrame = streamsViewModel::hasRecentManagedVideoFrame,
+                            recordings = recordings,
+                            thumbnailProvider = ManagedVideoThumbnailStore::get,
                         )
                         refreshManagedVideoThumbnails(
                             advertisements,
@@ -1233,6 +1303,7 @@ class R2CActivity :
                         )
                         advertisements = ManagedVideoStreamPresence.snapshot(
                             streams,
+                            streamsViewModel::managedVideoDroneDesignator,
                             streamsViewModel::managedVideoSourceInfo,
                             streamsViewModel::hasRecentManagedVideoFrame,
                             recordings,
@@ -1242,7 +1313,12 @@ class R2CActivity :
                             CaltopoClient.GetIncident(),
                             advertisements,
                         )
-                        delay(5_000L)
+                        CaltopoLiveTrack.RefreshActiveVideoCameraMetadata()
+                        delay(
+                            VideoThumbnailRefreshPolicy.milliseconds(
+                                VideoThumbnailRefreshPrefs.getSeconds(applicationContext)
+                            )
+                        )
                     }
                 }
                 when (activeScreen) {
@@ -1343,6 +1419,9 @@ class R2CActivity :
                         onSave = {
                             CTDebug("R2CActivity", "Drone confirmation Save clicked: remoteId=${confirmationState.remoteId}")
                             localViewModel.savePendingDroneConfirmation()
+                            streamsViewModel.requestAutomaticStreamPairingAfterConfirmation(
+                                confirmationState.remoteId
+                            )
                         },
                         onUnknown = {
                             CTDebug("R2CActivity", "Drone confirmation Ignore clicked: remoteId=${confirmationState.remoteId}")
@@ -1492,6 +1571,7 @@ class R2CActivity :
 
     fun lockOrganizationAccessAndAuthenticate() {
         if (!configuredAccessAuthenticationRequired()) return
+        OrganizationAccessSession.invalidate()
         organizationAccessState = OrganizationAccessState.LOCKED
         organizationAccessError = null
         requestOrganizationAccessAuthentication()
@@ -1499,6 +1579,7 @@ class R2CActivity :
 
     private fun requestOrganizationAccessAuthentication() {
         if (!configuredAccessAuthenticationRequired()) {
+            OrganizationAccessSession.invalidate()
             organizationAuthenticationCancellation?.cancel()
             organizationAuthenticationCancellation = null
             organizationAccessState = OrganizationAccessState.UNLOCKED
@@ -1538,6 +1619,7 @@ class R2CActivity :
                     result: BiometricPrompt.AuthenticationResult
                 ) {
                     organizationAuthenticationCancellation = null
+                    OrganizationAccessSession.markAuthenticated()
                     organizationAccessState = OrganizationAccessState.UNLOCKED
                     organizationAccessError = null
                     CTDebug(TAG, "Device owner authenticated for organization access")
@@ -1553,6 +1635,7 @@ class R2CActivity :
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     organizationAuthenticationCancellation = null
+                    OrganizationAccessSession.invalidate()
                     organizationAccessState = OrganizationAccessState.LOCKED
                     organizationAccessError =
                         "Authentication was not completed. Organization maps remain locked."
@@ -1660,7 +1743,7 @@ class R2CActivity :
             ),
             "support check",
         )
-        MyDeviceName = bluetoothAdapter.name
+        MyDeviceName = AndroidDeviceIdentity.displayName(this)
         CTDebug(TAG, "Setting MyDeviceName to:${MyDeviceName}")
         if (bluetoothAdapter.isLeCodedPhySupported) {
             codedPhySupported = true
@@ -2041,6 +2124,7 @@ class R2CActivity :
         )
 
         if (shouldShutdown) {
+            OrganizationAccessSession.invalidate()
             try {
                 stopLocationUpdates()
                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.setPeerListChangedListener(null)
@@ -2522,15 +2606,12 @@ class R2CActivity :
         advertisements: List<ManagedVideoStreamAdvertisement>,
         forceDesignators: Set<String> = emptySet(),
     ) {
-        for (advertisement in advertisements.take(8)) {
-            val force = advertisement.mediaKind == "live" &&
-                forceDesignators.any {
-                    it.equals(advertisement.droneDesignator, ignoreCase = true)
-                }
-            if (
-                ManagedVideoThumbnailStore.get(advertisement.sessionId) != null &&
-                !force
-            ) continue
+        val candidates = ManagedVideoStreamPresence.thumbnailCaptureCandidates(
+            advertisements = advertisements,
+            forceDesignators = forceDesignators,
+            hasThumbnail = { ManagedVideoThumbnailStore.get(it) != null },
+        )
+        for (advertisement in candidates) {
             val recording = if (advertisement.mediaKind == "recording") {
                 ManagedVideoSessionRecordingCatalog.find(
                     applicationContext,

@@ -5,6 +5,22 @@ import org.junit.Test
 
 class ApplicationIdleTimeoutPolicyTest {
     @Test
+    fun activityRecreationPreservesSessionStart() {
+        assertEquals(
+            1_000L,
+            ApplicationIdleTimeoutPolicy.sessionStartedAtMsec(1_000L, true, 5_000L),
+        )
+    }
+
+    @Test
+    fun newActivitySessionRefreshesSessionStart() {
+        assertEquals(
+            5_000L,
+            ApplicationIdleTimeoutPolicy.sessionStartedAtMsec(1_000L, false, 5_000L),
+        )
+    }
+
+    @Test
     fun disabledTimeoutDoesNotSchedule() {
         assertEquals(
             ApplicationIdleTimeoutPolicy.DISABLED,

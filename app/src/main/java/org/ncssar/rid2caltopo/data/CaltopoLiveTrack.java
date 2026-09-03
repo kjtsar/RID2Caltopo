@@ -127,6 +127,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     private long trackObservedStartedAtMs;
     private long trackObservedEndedAtMs;
     private long lastSeiPositionTimestampMs;
+    @Nullable private CaltopoOp thumbnailMetadataRefreshOp;
+    @NonNull private String lastThumbnailMetadataRevision = "";
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
     private CaltopoMap.MapStatusListener.mapStatus mapStatus;
 
@@ -200,6 +202,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
         trackObservedStartedAtMs = trackObservedEndedAtMs = startedAtMs;
         lastSeiPositionTimestampMs = 0L;
+        thumbnailMetadataRefreshOp = null;
+        lastThumbnailMetadataRevision = "";
 
         StreamCameraTelemetrySample cameraTelemetry = currentCameraTelemetry(lat, lng, ele);
         double effectiveLat = preferredLatitude(cameraTelemetry, lat);
@@ -670,6 +674,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         active = false;
         lastInterruptedJournalWriteMs = 0L;
         lastSeiPositionTimestampMs = 0L;
+        thumbnailMetadataRefreshOp = null;
+        lastThumbnailMetadataRevision = "";
     }
 
     private void clearLiveTrackState() {
@@ -680,6 +686,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         active = false;
         lastInterruptedJournalWriteMs = 0L;
         lastSeiPositionTimestampMs = 0L;
+        thumbnailMetadataRefreshOp = null;
+        lastThumbnailMetadataRevision = "";
     }
 
     public String getTrackLabel() {
@@ -805,6 +813,17 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             }
         }
         return false;
+    }
+
+    /** Publish a newly captured video thumbnail without waiting for another RID waypoint. */
+    public static void RefreshActiveVideoCameraMetadata() {
+        for (CaltopoLiveTrack liveTrack : new LinkedList<>(LiveTrackByRemoteId.values())) {
+            try {
+                liveTrack.refreshActiveVideoCameraMetadata();
+            } catch (Exception error) {
+                CTError(TAG, "Unable to refresh CalTopo video thumbnail metadata", error);
+            }
+        }
     }
 
     /** Re-register all active live tracks with R2CMqttManager after a map reconnect. */
@@ -1070,6 +1089,42 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                         cameraTelemetry == null ? null : cameraTelemetry.getTiltDeg(),
                         cameraTelemetry == null ? null : cameraTelemetry.getHorizontalFovDeg(),
                         cameraTelemetry == null ? null : cameraTelemetry.getVerticalFovDeg());
+    }
+
+    private synchronized void refreshActiveVideoCameraMetadata() {
+        if (!active || shuttingDown || !localOwner ||
+                mapStatus != CaltopoMap.MapStatusListener.mapStatus.up ||
+                liveTrackId == null || linePoints.isEmpty()) return;
+        if (thumbnailMetadataRefreshOp != null && !thumbnailMetadataRefreshOp.isDone()) return;
+
+        String mappedId = droneSpec.getMappedId().trim();
+        if (mappedId.isEmpty()) return;
+        ManagedVideoStreamAdvertisement publishingVideo = runtime.getPeerCoordinator()
+                .getManagedVideoStreams()
+                .stream()
+                .filter(stream -> "live".equals(stream.mediaKind))
+                .filter(stream -> stream.droneDesignator.trim().equalsIgnoreCase(mappedId))
+                .findFirst()
+                .orElse(null);
+        if (publishingVideo == null || publishingVideo.thumbnailRevision.isEmpty() ||
+                publishingVideo.thumbnailRevision.equals(lastThumbnailMetadataRevision)) return;
+
+        QueuedPoint point = linePoints.peekLast();
+        if (point == null) return;
+        CaltopoCameraMetadata cameraMetadata = activeVideoCameraMetadata(point.cameraTelemetry);
+        if (cameraMetadata == null || cameraMetadata.thumbnailUrl == null) return;
+        thumbnailMetadataRefreshOp = runtime.getCalTopoSessionGateway().addLiveTrackPoint(
+                myRemoteId,
+                point.lat,
+                point.lng,
+                point.ele,
+                point.telemetry,
+                cameraMetadata,
+                null);
+        lastThumbnailMetadataRevision = publishingVideo.thumbnailRevision;
+        CTDebug(TAG, String.format(Locale.US,
+                "thumbnail metadata refreshed remoteId=%s mappedId=%s revision=%s",
+                myRemoteId, mappedId, publishingVideo.thumbnailRevision));
     }
 
     @Nullable

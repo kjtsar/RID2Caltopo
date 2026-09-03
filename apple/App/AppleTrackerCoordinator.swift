@@ -379,9 +379,10 @@ final class AppleTrackerCoordinator: ObservableObject {
     private let defaults: UserDefaults
     private var organizationConfigSnapshotProvider: (() throws -> [String: Any])?
     private var organizationConfigApplyHandler: (([String: Any], Int64) throws -> Void)?
+    private var managedVideoThumbnailUpdatedHandler: ((String) -> Void)?
     private var mapID = ""
     private let zoneID: String
-    private let zoneName: String
+    private var zoneName: String
     private var client: TrackerCoordinationClient
     private var position = TrackerCoordinationPosition(latitude: 0, longitude: 0)
     private var protocolState: TrackerCoordinationProtocolState
@@ -976,6 +977,12 @@ final class AppleTrackerCoordinator: ObservableObject {
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let type = object["type"] as? String {
             if type == "hello_ack" {
+                if let canonicalName = (object["canonicalDeviceName"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !canonicalName.isEmpty {
+                    AppleDeviceIdentity.applyManagedDisplayName(canonicalName)
+                    zoneName = canonicalName
+                    client = Self.makeClient(mapID: mapID, zoneID: zoneID, zoneName: zoneName)
+                }
                 let seconds = (object["standbyParkSec"] as? NSNumber)?.intValue
                     ?? (object["idleParkSec"] as? NSNumber)?.intValue
                     ?? 30
@@ -1404,7 +1411,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     func updateManagedVideoStreams(
         incidentName: String,
         incidentKey: String,
-        sessions: [AppleLiveStreamSession]
+        sessions: [AppleLiveStreamSession],
+        droneDesignatorProvider: (AppleLiveStreamSession) -> String = { $0.id }
     ) {
         // Stream inventory is intentionally independent of telemetry binding. A camera
         // commonly starts publishing before its drone emits Remote ID; the tablet-level
@@ -1455,7 +1463,11 @@ final class AppleTrackerCoordinator: ObservableObject {
             }
             return AppleManagedVideoStreamAdvertisement(
                 sessionId: sessionID,
-                droneDesignator: session.id,
+                droneDesignator: {
+                    let designator = droneDesignatorProvider(session)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    return designator.isEmpty ? session.id : designator
+                }(),
                 sourceWidth: sourceIsReady ? session.model.sourceWidth : 0,
                 sourceHeight: sourceIsReady ? session.model.sourceHeight : 0,
                 sourceFps: sourceIsReady ? session.model.sourceFrameRate : 0,
@@ -1559,11 +1571,19 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     private func refreshManagedVideoThumbnails(forceSessionIDs: Set<String> = []) {
-        for advertisement in managedVideoStreams.prefix(8)
-        where (advertisement.thumbnailRevision.isEmpty ||
-               (advertisement.mediaKind == "live" &&
-                forceSessionIDs.contains(advertisement.sessionId))) &&
-              managedVideoThumbnailTasks[advertisement.sessionId] == nil {
+        let candidates = managedVideoStreams.filter { advertisement in
+            (advertisement.thumbnailRevision.isEmpty ||
+             (advertisement.mediaKind == "live" &&
+              forceSessionIDs.contains(advertisement.sessionId))) &&
+            managedVideoThumbnailTasks[advertisement.sessionId] == nil
+        }.sorted { left, right in
+            let leftIsLive = left.mediaKind == "live"
+            let rightIsLive = right.mediaKind == "live"
+            if leftIsLive != rightIsLive { return leftIsLive }
+            return left.sessionId.localizedCaseInsensitiveCompare(right.sessionId)
+                == .orderedAscending
+        }
+        for advertisement in candidates.prefix(8) {
             let sessionID = advertisement.sessionId
             managedVideoThumbnailTasks[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -1599,9 +1619,28 @@ final class AppleTrackerCoordinator: ObservableObject {
                         revision: revision,
                         jpegBase64: jpeg.base64EncodedString()
                     )
+                let droneDesignator = self.managedVideoStreams[index].droneDesignator
+                AppleLog.debug(
+                    "TrackerPeer",
+                    "Managed video thumbnail captured session=\(sessionID) drone=\(droneDesignator) revision=\(revision)"
+                )
                 self.sendManagedVideoPresence()
+                self.managedVideoThumbnailUpdatedHandler?(droneDesignator)
             }
         }
+    }
+
+    private var managedVideoThumbnailRefreshDuration: Duration {
+        let defaults = UserDefaults.standard
+        let storedSeconds: Double? = defaults.object(
+            forKey: OperationalThumbnailRefreshInterval.storageKey
+        ) == nil ? nil : defaults.double(
+            forKey: OperationalThumbnailRefreshInterval.storageKey
+        )
+        let milliseconds = Int64(
+            OperationalThumbnailRefreshInterval.normalized(storedSeconds) * 1_000
+        )
+        return .milliseconds(milliseconds)
     }
 
     private func startManagedVideoThumbnailPreviewTaskIfNeeded() {
@@ -1616,7 +1655,7 @@ final class AppleTrackerCoordinator: ObservableObject {
                     })
                     self.refreshManagedVideoThumbnails(forceSessionIDs: liveSessionIDs)
                 }
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: self.managedVideoThumbnailRefreshDuration)
             }
             self?.managedVideoThumbnailPreviewTask = nil
         }
@@ -1649,12 +1688,16 @@ final class AppleTrackerCoordinator: ObservableObject {
                     return stream.sessionId
                 })
                 self.refreshManagedVideoThumbnails(forceSessionIDs: sessionIDs)
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: self.managedVideoThumbnailRefreshDuration)
             }
             if self?.caltopoThumbnailRefreshGeneration == generation {
                 self?.caltopoThumbnailRefreshTask = nil
             }
         }
+    }
+
+    func setManagedVideoThumbnailUpdatedHandler(_ handler: ((String) -> Void)?) {
+        managedVideoThumbnailUpdatedHandler = handler
     }
 
     private static func catalogThumbnailJPEG(_ source: Data) -> Data? {
@@ -2824,6 +2867,7 @@ final class AppleTrackerCoordinator: ObservableObject {
             mapID: mapID,
             zoneID: zoneID,
             name: zoneName,
+            deviceModel: AppleDeviceIdentity.modelName,
             platform: "ios",
             appVersion: "\(version)(\(build))",
             appVersionCode: build

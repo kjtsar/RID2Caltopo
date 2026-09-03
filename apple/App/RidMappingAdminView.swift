@@ -97,6 +97,7 @@ enum AppleTrackerEnrollmentClient {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "token": token,
             "device_name": deviceName,
+            "device_model": AppleDeviceIdentity.modelName,
             "platform": "ios",
             "installation_id": AppleDeviceIdentity.installationID(),
             "functionality_release": TrackerCoordinationClient.trackerFunctionalityRelease,

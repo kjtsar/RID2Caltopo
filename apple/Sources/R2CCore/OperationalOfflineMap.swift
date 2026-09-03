@@ -90,24 +90,70 @@ public struct OperationalOfflinePreset: Sendable, Hashable, Identifiable {
 }
 
 public enum OperationalDEMResolution: Int, Sendable, Hashable, Identifiable, CaseIterable {
+    case maximum1m = 1
     case standard30m = 30
     case enhanced10m = 10
-    case maximum1m = 1
 
     public var id: Int { rawValue }
     public var label: String {
         switch self {
         case .standard30m: "Standard (30 m)"
         case .enhanced10m: "Enhanced (10 m)"
-        case .maximum1m: "Maximum available (1 m)"
+        case .maximum1m: "USGS S1M (1 m)"
         }
     }
 
     public var explanation: String {
         switch self {
-        case .standard30m: "Default; broad coverage and smallest download."
+        case .standard30m: "Broad coverage and smallest download."
         case .enhanced10m: "About 9x as many terrain samples as 30 m."
-        case .maximum1m: "Downloads available USGS lidar-derived project tiles; may be very large."
+        case .maximum1m: "Default; downloads available USGS seamless 1 m tiles with 10 m fallback; may be very large."
+        }
+    }
+}
+
+public struct OperationalS1MProduct: Sendable, Hashable {
+    public let url: URL
+    public let fileName: String
+    public let expectedBytes: Int64?
+}
+
+public enum OperationalS1MCatalog {
+    public static let datasetName = "Seamless 1-m DEM (S1M)"
+
+    public static func products(
+        data: Data,
+        containing coordinate: (latitude: Double, longitude: Double)? = nil
+    ) throws -> [OperationalS1MProduct] {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = object["items"] as? [[String: Any]]
+        else { throw CocoaError(.fileReadCorruptFile) }
+        return items.compactMap { item in
+            guard let text = item["downloadURL"] as? String,
+                  let url = URL(string: text), url.scheme?.lowercased() == "https",
+                  ["tif", "tiff"].contains(url.pathExtension.lowercased())
+            else { return nil }
+            let box = item["boundingBox"] as? [String: Any]
+            let minX = (box?["minX"] as? NSNumber)?.doubleValue
+            let maxX = (box?["maxX"] as? NSNumber)?.doubleValue
+            let minY = (box?["minY"] as? NSNumber)?.doubleValue
+            let maxY = (box?["maxY"] as? NSNumber)?.doubleValue
+            if let coordinate {
+                guard let minX, let maxX, let minY, let maxY,
+                      (minY ... maxY).contains(coordinate.latitude),
+                      (minX ... maxX).contains(coordinate.longitude)
+                else { return nil }
+            }
+            let fileName: String
+            if let minX, let maxX, let minY, let maxY {
+                fileName = "R2C_S1M_\(Int64((minY * 100_000).rounded()))_\(Int64((maxY * 100_000).rounded()))_"
+                    + "\(Int64((minX * 100_000).rounded()))_\(Int64((maxX * 100_000).rounded()))_\(url.lastPathComponent)"
+            } else {
+                fileName = url.lastPathComponent
+            }
+            let expectedBytes = (item["sizeInBytes"] as? NSNumber)?.int64Value
+                ?? (item["sizeInBytes"] as? String).flatMap(Int64.init)
+            return OperationalS1MProduct(url: url, fileName: fileName, expectedBytes: expectedBytes)
         }
     }
 }
@@ -188,13 +234,13 @@ public enum OperationalOfflineMapPlanner {
         tileCount: Int,
         includeContours: Bool,
         demTileCount: Int,
-        demResolution: OperationalDEMResolution = .standard30m
+        demResolution: OperationalDEMResolution = .maximum1m
     ) -> Int64 {
         let mapOperations = Int64(tileCount) * Int64(includeContours ? 2 : 1)
         let demBytesPerPlanningTile: Int64 = switch demResolution {
         case .standard30m: 54_000_000
         case .enhanced10m: 486_000_000
-        // Maximum detail includes 10 m fallback coverage under project-based 1 m tiles.
+        // Maximum detail includes 10 m fallback coverage under S1M tiles.
         case .maximum1m: 486_000_000
         }
         return mapOperations * 32_000 + Int64(demTileCount) * demBytesPerPlanningTile

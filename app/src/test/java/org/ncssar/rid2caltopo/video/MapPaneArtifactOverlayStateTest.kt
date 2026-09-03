@@ -38,15 +38,38 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
-    fun demPlannerDefaultsToThirtyMetersAndPricesFinerProductsHigher() {
+    fun demPlannerDefaultsToS1mAndPricesFinerProductsHigher() {
         val bounds = BoundingBox(39.75, -104.98, 39.73, -105.01)
-        assertEquals(30, DemResolutionOption.values().first().meters)
+        assertEquals(1, DemResolutionOption.values().first().meters)
         val count = estimateDemDownloadCount(bounds, DemResolutionOption.STANDARD_30M)
         assertEquals(2, count)
         assertTrue(
             conservativeDemBytes(count, DemResolutionOption.ENHANCED_10M) >
                 conservativeDemBytes(count, DemResolutionOption.STANDARD_30M)
         )
+        assertEquals(demPrefetchCellKey(39.001, -121.001), demPrefetchCellKey(39.049, -121.049))
+    }
+
+    @Test
+    fun s1mCatalogSelectsOnlyTheTileContainingTheRequestedPoint() {
+        val page = JSONObject().put("items", JSONArray()
+            .put(JSONObject()
+                .put("downloadURL", "https://example.test/outside.tif")
+                .put("boundingBox", JSONObject()
+                    .put("minX", -120.0).put("maxX", -119.9)
+                    .put("minY", 38.0).put("maxY", 38.1)))
+            .put(JSONObject()
+                .put("downloadURL", "https://example.test/S1M_tile.tif")
+                .put("sizeInBytes", 350_000_000L)
+                .put("boundingBox", JSONObject()
+                    .put("minX", -121.1).put("maxX", -121.0)
+                    .put("minY", 39.2).put("maxY", 39.3))))
+
+        val result = parseS1mDownloadForLocation(page, 39.2616, -121.0608)!!
+
+        assertEquals("https://example.test/S1M_tile.tif", result.url)
+        assertTrue(result.fileName.startsWith("R2C_S1M_"))
+        assertEquals(350_000_000L, result.expectedBytes)
     }
 
     @Before

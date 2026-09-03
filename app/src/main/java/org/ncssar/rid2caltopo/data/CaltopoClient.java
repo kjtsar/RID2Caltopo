@@ -279,7 +279,7 @@ class ClientClassState {
         bridgeCheckDistanceFeet = CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET;
         alarmVolumePercent = CaltopoClient.DEFAULT_ALARM_VOLUME_PERCENT;
         alarmVolumeConfigured = false;
-        maxIdleTimeInMinutes = 120;
+        maxIdleTimeInMinutes = CaltopoClient.DEFAULT_MAX_IDLE_TIME_MINUTES;
         debugLevel = -1; // undefined.
         incident = "Training";
         opPeriod = "1";
@@ -400,6 +400,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static final long TAKEOFF_NEAR_TABLET_DISTANCE_FEET = 50;
     public static final long HOME_LOCATION_MAX_TABLET_AGE_MS = 60 * 1000;
     public static final int DEFAULT_ALARM_VOLUME_PERCENT = 100;
+    public static final long DEFAULT_MAX_IDLE_TIME_MINUTES = 30;
     static final long DEFAULT_BRIDGE_CHECK_DISTANCE_FEET = 20;
     static final long MainThreadId = Process.myTid();
     static final long ProcessId = Process.myPid();
@@ -1103,6 +1104,16 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String cleanEventName = eventName.replaceAll("[^a-zA-Z0-9]", "_");
         fbAnalytics.logEvent("r2c_" + cleanEventName, parameters);
         CTDebug(tag, String.format(Locale.US, "CTEvent(r2c_%s): %s", cleanEventName, parameters));
+    }
+
+    public static void CTEventAsync(
+            @NonNull String tag,
+            @NonNull String eventName,
+            @Nullable Bundle parameters) {
+        Thread eventThread = new Thread(
+                () -> CTEvent(tag, eventName, parameters),
+                "R2C-ExitEvent");
+        eventThread.start();
     }
 
     public static void CTInfo(String tag, String msg) {
@@ -2763,6 +2774,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void ResetPersistedClientState() {
         Ccstate = new ClientClassState();
+        if (R2CApplication.getAppCtxt() != null) {
+            R2CActivity.MyDeviceName = AndroidDeviceIdentity.displayName(
+                    R2CApplication.getAppCtxt());
+        }
         SessionUnknownDroneRemoteIds.clear();
         SessionConfirmedDroneRemoteIds.clear();
         CurrentPeerConfirmedDroneRemoteIds.clear();
@@ -4012,28 +4027,31 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         Context context = R2CApplication.getAppCtxt();
 
-        // Stop process-owned offline preparation before the activity becomes cached.
-        MapOfflinePrepRuntime.cancelActive();
-
-        // 1. Stop the Scanning Service
-        ScanningService.requestStop(context);
-
-        // 2. Stop the MediaMTX Service
-        MediaMTXService.requestStop(context);
-
-        // 3. Clear any remaining notifications (optional but clean)
-        // NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        // notificationManager.cancelAll();
-
         Activity activity = R2CActivity.getR2CActivity();
         if (null != activity) {
-            // 4. Finish the Activity
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                activity.finishAndRemoveTask(); // Removes it from the "Recent Apps" list too
+            Runnable finishActivity = () -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    activity.finishAndRemoveTask();
+                } else {
+                    activity.finish();
+                }
+                MapOfflinePrepRuntime.cancelActive();
+            };
+            // The idle watchdog runs on a background scheduler. Activity lifecycle calls must
+            // always be dispatched to Android's main thread.
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                finishActivity.run();
             } else {
-                activity.finish();
+                activity.runOnUiThread(finishActivity);
             }
+        } else {
+            new Handler(Looper.getMainLooper()).post(MapOfflinePrepRuntime::cancelActive);
         }
+
+        // Submit the activity removal before any cleanup that can block on Android services,
+        // radio teardown, archive I/O, or a long-lived document-provider stream.
+        ScanningService.requestStop(context);
+        MediaMTXService.requestStop(context);
         ShutdownAsync();
     }
 
@@ -4130,14 +4148,22 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void MarkAppActive() {
+        MarkAppActive(false);
+    }
+
+    public static void MarkAppActive(boolean activityRecreated) {
+        long nowMsec = System.currentTimeMillis();
         synchronized (ShutdownLock) {
             AppExitRequested = false;
         }
         synchronized (DebugLogLock) {
             DebugLogGeneration++;
         }
-        AppActiveStartedAtMsec = System.currentTimeMillis();
-        RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), true);
+        AppActiveStartedAtMsec = ApplicationIdleTimeoutPolicy.sessionStartedAtMsec(
+                AppActiveStartedAtMsec,
+                activityRecreated,
+                nowMsec);
+        RemoveExpiredCaltopoProfiles(nowMsec, true);
     }
 
     public static boolean IsExitRequested() {
@@ -4269,14 +4295,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         long idleBaselineMsec = Math.max(appActiveStartedAtMsec, lastRidMessageMsec);
         long idleInMsec = Math.max(0L, nowMsec - idleBaselineMsec);
-        CaltopoClient.CTEvent(TAG, "MaxIdleExiting", null);
-        CTWarn(TAG, String.format(Locale.US,
+        String exitMessage = String.format(Locale.US,
                 "CheckIdle(): app idle timeout expired after %.3f/%.3f minutes without RID messages (appActiveStarted=%s lastRidMessage=%s). Shutting down app and map to save battery.",
                 idleInMsec / 60000.0,
                 (double) maxIdleInMinutes,
                 TimeDatestampString(appActiveStartedAtMsec),
-                TimeDatestampString(lastRidMessageMsec)));
+                TimeDatestampString(lastRidMessageMsec));
+        Log.w(TAG, exitMessage);
         QuitApplication();
+        CTEventAsync(TAG, "MaxIdleExiting", null);
+        Thread warningThread = new Thread(
+                () -> CTWarn(TAG, exitMessage),
+                "R2C-IdleExitLog");
+        warningThread.start();
     }
 
     public static long GetMaxIdleTimeInMinutes() {

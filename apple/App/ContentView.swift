@@ -79,6 +79,8 @@ struct ContentView: View {
     @State private var pendingImportToken = ""
     @State private var selectedAircraftID: String?
     @State private var pendingDroneConfirmation: DroneConfirmationRequest?
+    @State private var automaticStreamPairingAircraftID: String?
+    @State private var automaticPairingOfferedStreamIDs: Set<String> = []
     @State private var controllerRTMPURL = "Connect this device to Wi-Fi"
     @State private var appStartedAt = Date()
     @State private var lastBridgePacketDiagnosticLogAt = Date.distantPast
@@ -90,6 +92,8 @@ struct ContentView: View {
     @State private var showTrackerReauthenticationPrompt = false
     @State private var organizationAccessEvaluated = false
     @State private var organizationAccessGranted = false
+    @State private var organizationAccessObscured = false
+    @State private var organizationAccessBackgroundedAt: Date?
     @State private var organizationAuthenticationInFlight = false
     @State private var organizationAuthenticationError: String?
     @State private var pendingOrganizationAccessURL: URL?
@@ -495,7 +499,8 @@ struct ContentView: View {
                         peerCoordinator.updateManagedVideoStreams(
                             incidentName: currentIncidentName,
                             incidentKey: currentIncidentKey,
-                            sessions: streamRegistry.sessions
+                            sessions: streamRegistry.sessions,
+                            droneDesignatorProvider: managedVideoDroneDesignator
                         )
                     }
                 }
@@ -692,7 +697,8 @@ struct ContentView: View {
                 peerCoordinator.updateManagedVideoStreams(
                     incidentName: currentIncidentName,
                     incidentKey: currentIncidentKey,
-                    sessions: streamRegistry.sessions
+                    sessions: streamRegistry.sessions,
+                    droneDesignatorProvider: managedVideoDroneDesignator
                 )
             }
             .task {
@@ -701,11 +707,20 @@ struct ContentView: View {
                     peerCoordinator.updateManagedVideoStreams(
                         incidentName: currentIncidentName,
                         incidentKey: currentIncidentKey,
-                        sessions: streamRegistry.sessions
+                        sessions: streamRegistry.sessions,
+                        droneDesignatorProvider: managedVideoDroneDesignator
                     )
                     try? await Task.sleep(for: .seconds(2))
                 }
             }
+    }
+
+    private func managedVideoDroneDesignator(for session: AppleLiveStreamSession) -> String {
+        guard let aircraftID = streamRegistry.boundAircraftID(for: session.id),
+              let identity = droneConfirmations.identity(for: aircraftID)
+        else { return session.id }
+        let mappedID = identity.mappedID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return mappedID.isEmpty ? session.id : mappedID
     }
 
     private var lifecycleRoot: some View {
@@ -877,6 +892,12 @@ struct ContentView: View {
                 peerCoordinator.updatePosition(locationProvider.lastLocation)
                 publishLocalDeviceMarker()
                 evaluateIncidentMapRelocation()
+                if let coordinate = locationProvider.lastLocation?.coordinate {
+                    ridTracks.prefetchTerrainForDeviceLocation(
+                        latitude: coordinate.latitude,
+                        longitude: coordinate.longitude
+                    )
+                }
             }
             .onChange(of: networkDiagnostics.currentSnapshotID) { _, _ in
                 refreshControllerRTMPURL()
@@ -1100,19 +1121,28 @@ struct ContentView: View {
                 reconcileOrganizationAuthentication()
             }
             .onChange(of: scenePhase) { _, phase in
-                if phase != .active && organizationAuthenticationRequired {
-                    organizationAccessGranted = false
-                } else if phase == .active {
-                    reconcileOrganizationAuthentication()
+                guard organizationAuthenticationRequired else {
+                    organizationAccessObscured = false
+                    organizationAccessBackgroundedAt = nil
+                    return
                 }
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(
-                    for: UIApplication.willResignActiveNotification
-                )
-            ) { _ in
-                if organizationAuthenticationRequired {
-                    organizationAccessGranted = false
+                if phase == .background {
+                    organizationAccessObscured = true
+                    organizationAccessBackgroundedAt = Date()
+                } else if phase == .inactive {
+                    // Hide protected content from system overlays and app-switcher
+                    // snapshots without expiring a still-recent authentication.
+                    organizationAccessObscured = true
+                } else if phase == .active {
+                    organizationAccessGranted =
+                        OrganizationAccessPolicy.authenticatedSessionRemainsValid(
+                            accessWasGranted: organizationAccessGranted,
+                            backgroundedAt: organizationAccessBackgroundedAt,
+                            resumedAt: Date()
+                        )
+                    organizationAccessBackgroundedAt = nil
+                    organizationAccessObscured = false
+                    reconcileOrganizationAuthentication()
                 }
             }
     }
@@ -1146,7 +1176,8 @@ struct ContentView: View {
     }
 
     private var organizationAccessBlocked: Bool {
-        !organizationAccessEvaluated
+        organizationAccessObscured
+            || !organizationAccessEvaluated
             || (organizationAuthenticationRequired
                 && !organizationAuthenticationBypassedForTesting
                 && !organizationAccessGranted)
@@ -1255,6 +1286,7 @@ struct ContentView: View {
                         callbackPending: trackerCallbackPending
                     )
                     organizationAccessGranted = true
+                    organizationAccessBackgroundedAt = nil
                     organizationAuthenticationInFlight = false
                     organizationAuthenticationError = nil
                     AppleLog.info("OrganizationAccess", "Device owner authenticated")
@@ -1988,6 +2020,7 @@ struct ContentView: View {
             ingestAddress: controllerRTMPURL,
             networkSSID: controllerWiFiSSID,
             bridgeSignalStrengthDbm: bluetoothScanner.bridgeSignalStrengthDbm,
+            automaticStreamPairingAircraftID: $automaticStreamPairingAircraftID,
             onMapStatusTap: openCaltopoMapActions,
             onSwitchMap: { showTeamMaps = true },
             onDisconnectMap: {
@@ -2365,6 +2398,7 @@ struct ContentView: View {
 
     private func confirmDrone(_ identity: RidAircraftIdentity) {
         peerCoordinator.confirm(identity)
+        automaticStreamPairingAircraftID = identity.remoteID
         guard let flightEpoch = ridTracks.peerTrafficFlightEpoch(remoteID: identity.remoteID) else {
             return
         }
@@ -2398,7 +2432,9 @@ struct ContentView: View {
     }
 
     private func reconcileStreamFlightPairings() {
-        for streamID in streamRegistry.activePublisherStreamIDs {
+        let activeStreamIDs = streamRegistry.activePublisherStreamIDs
+        automaticPairingOfferedStreamIDs.formIntersection(activeStreamIDs)
+        for streamID in activeStreamIDs {
             let normalizedStreamID = streamID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
             let matches = ridTracks.tracks.filter { track in
                 let identity = droneConfirmations.identity(for: track.aircraftID)
@@ -2409,6 +2445,30 @@ struct ContentView: View {
                 streamRegistry.pairIfUnbound(streamID: streamID, aircraftID: matches[0].aircraftID)
             }
         }
+
+        guard automaticStreamPairingAircraftID == nil else { return }
+        let liveUnpairedStreamIDs = activeStreamIDs.filter {
+            streamRegistry.boundAircraftID(for: $0) == nil
+                && !automaticPairingOfferedStreamIDs.contains($0)
+        }
+        let confirmedCandidateIDs = ridTracks.tracks.compactMap { track in
+            droneConfirmations.isCurrentFlightConfirmed(track.aircraftID)
+                ? track.aircraftID
+                : nil
+        }
+        guard confirmedCandidateIDs.count == 1,
+              let streamID = OperationalStreamDesignatorMatch.automaticPairingStreamID(
+                confirmedCandidateID: confirmedCandidateIDs[0],
+                activeCandidateIDs: ridTracks.tracks.map(\.aircraftID),
+                liveUnpairedStreamIDs: Array(liveUnpairedStreamIDs)
+              )
+        else { return }
+        automaticPairingOfferedStreamIDs.insert(streamID)
+        AppleLog.info(
+            "Streams",
+            "Presenting telemetry pairing prompt for late stream=\(streamID) remoteID=\(confirmedCandidateIDs[0])"
+        )
+        automaticStreamPairingAircraftID = confirmedCandidateIDs[0]
     }
 
     private func updateOperationalAlerts() {

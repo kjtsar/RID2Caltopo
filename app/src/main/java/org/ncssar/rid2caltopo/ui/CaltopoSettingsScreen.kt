@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -59,6 +60,7 @@ fun CaltopoSettingsScreen(
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
     val wifiRidScanningEnabled by settingsViewModel.wifiRidScanningEnabled.collectAsState()
     val remoteVideoControlEnabled by settingsViewModel.remoteVideoControlEnabled.collectAsState()
+    val thumbnailRefreshSeconds by settingsViewModel.thumbnailRefreshSeconds.collectAsState()
     val standaloneR2cCoordinationEnabled by settingsViewModel.standaloneR2cCoordinationEnabled.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
     val proximityAlertSpacingFeet by settingsViewModel.proximityAlertSpacingFeet.collectAsState()
@@ -372,7 +374,7 @@ fun CaltopoSettingsScreen(
                     value = maxIdleTimeInMinutes,
                     onValueChange = { settingsViewModel.onMaxIdleTimeInMinutesChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Max App Idle Time (minutes)") },
+                    label = { Text("Max RID Idle Time (minutes)") },
                     modifier = Modifier.fillMaxWidth()
                 )
                 LabeledSwitch(
@@ -402,7 +404,7 @@ fun CaltopoSettingsScreen(
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    "Video",
+                    "Video Streams",
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -420,6 +422,27 @@ fun CaltopoSettingsScreen(
                     "When enabled, an authenticated requester chooses video quality after the link test without a per-request approval prompt. Only one viewer can use this tablet at a time.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = thumbnailRefreshSeconds,
+                    onValueChange = { value ->
+                        settingsViewModel.onThumbnailRefreshSecondsChanged(
+                            value.filterIndexed { index, character ->
+                                character.isDigit() || (character == '.' &&
+                                    value.indexOf('.') == index)
+                            }
+                        )
+                    },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Decimal,
+                        imeAction = ImeAction.Done,
+                    ),
+                    label = { Text("Thumbnail Refresh (seconds)") },
+                    supportingText = {
+                        Text("0.5–60.0 seconds; default 5.0. Shorter intervals use more battery and network data.")
+                    },
+                    singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
 

@@ -15,7 +15,7 @@ object AppConfigSerializer : Serializer<AppConfig> {
         .setBridgeCheckDistanceFeet(CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET)
         .setAlarmVolumePercent(CaltopoClient.DEFAULT_ALARM_VOLUME_PERCENT)
         .setAlarmVolumeConfigured(false)
-        .setMaxIdleTimeMinutes(120)
+        .setMaxIdleTimeMinutes(CaltopoClient.DEFAULT_MAX_IDLE_TIME_MINUTES)
         .setDebugLevel(-1)
         .setCoordinateDisplayFormat("decimal")
         .setCaptureVideoStreams(false)

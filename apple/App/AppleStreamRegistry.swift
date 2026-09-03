@@ -132,6 +132,7 @@ final class AppleStreamRegistry: ObservableObject {
     func pair(streamID: String, aircraftID: String) {
         seiPositionContinuationByStreamID.removeValue(forKey: streamID)
         flightActivity.pair(streamID: streamID, aircraftID: aircraftID)
+        managedPresenceRevision &+= 1
         objectWillChange.send()
         AppleLog.info("Streams", "Paired stream \(streamID) to Remote ID \(aircraftID)")
     }
@@ -140,6 +141,7 @@ final class AppleStreamRegistry: ObservableObject {
     func pairIfUnbound(streamID: String, aircraftID: String) -> Bool {
         let paired = flightActivity.pairIfUnbound(streamID: streamID, aircraftID: aircraftID)
         if paired {
+            managedPresenceRevision &+= 1
             objectWillChange.send()
             AppleLog.info("Streams", "Automatically paired stream \(streamID) to Remote ID \(aircraftID)")
         }
@@ -149,6 +151,7 @@ final class AppleStreamRegistry: ObservableObject {
     func unpair(streamID: String) {
         seiPositionContinuationByStreamID.removeValue(forKey: streamID)
         flightActivity.unpair(streamID: streamID)
+        managedPresenceRevision &+= 1
         objectWillChange.send()
         AppleLog.info("Streams", "Unpaired stream \(streamID) for the current app session")
     }
@@ -862,31 +865,34 @@ private struct AppleStreamTile: View {
                 onFocus()
             }
         }
-        .onLongPressGesture(minimumDuration: 0.5) {
-            let minimumDimension = min(tileSize.width, tileSize.height)
-            let radius = min(96, max(48, minimumDimension * 0.20))
-            let pressNearCenter = latestTouchLocation.map {
-                OperationalCenterpointElevation.isNearCenter(
-                    x: $0.x,
-                    y: $0.y,
-                    width: tileSize.width,
-                    height: tileSize.height,
-                    radius: radius
-                )
-            } ?? false
-            if OperationalCenterpointElevation.shouldSetReference(
-                focused: focused,
-                elevationEnabled: centerpointElevationEnabled,
-                pressNearCenter: pressNearCenter
-            ) {
-                if let sample = centerpointElevationSample {
-                    centerpointReferenceElevationFeet = sample.elevationFeet
-                    centerpointDisplayMode = .reference
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.5)
+                .onEnded { _ in
+                    let minimumDimension = min(tileSize.width, tileSize.height)
+                    let radius = min(96, max(48, minimumDimension * 0.20))
+                    let pressNearCenter = latestTouchLocation.map {
+                        OperationalCenterpointElevation.isNearCenter(
+                            x: $0.x,
+                            y: $0.y,
+                            width: tileSize.width,
+                            height: tileSize.height,
+                            radius: radius
+                        )
+                    } ?? false
+                    if OperationalCenterpointElevation.shouldSetReference(
+                        focused: focused,
+                        elevationEnabled: centerpointElevationEnabled,
+                        pressNearCenter: pressNearCenter
+                    ) {
+                        if let sample = centerpointElevationSample {
+                            centerpointReferenceElevationFeet = sample.elevationFeet
+                            centerpointDisplayMode = .reference
+                        }
+                    } else {
+                        onLongPress()
+                    }
                 }
-            } else {
-                onLongPress()
-            }
-        }
+        )
         .onChange(of: focused) { _, isFocused in
             if !isFocused {
                 centerpointElevationEnabled = false

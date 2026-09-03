@@ -143,6 +143,13 @@ class DroneAltitudeCoordinatorTest {
     }
 
     @Test
+    fun geoTiffConusAlbersConversionMatchesEpsg6350Reference() {
+        val albers = GeoTiffDemSource.latLonToConusAlbers(39.2616, -121.0608)
+        assertEquals(-2_117_785.808, albers.first, 0.02)
+        assertEquals(2_085_095.786, albers.second, 0.02)
+    }
+
+    @Test
     fun sealedCorrectionUsesTakeoffTerrainAndPreservesExistingWhenUnavailable() {
         assertEquals(
             -20.78,

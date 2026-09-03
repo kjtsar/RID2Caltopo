@@ -203,6 +203,34 @@ class StreamTelemetryBindingTest {
     }
 
     @Test
+    fun confirmedDroneTargetsOnlyUnambiguousLiveUnpairedStream() {
+        val target = automaticStreamTelemetryPairingTarget(
+            confirmedRemoteId = "1581F8",
+            candidateTelemetry = listOf(
+                testTelemetry(remoteId = "1581F8", mappedId = "1SAR7DjMn4Pr")
+            ),
+            liveUnpairedStreamDesignators = listOf("1sar7mn4pr")
+        )
+
+        assertEquals("1sar7mn4pr", target)
+        assertNull(automaticStreamTelemetryPairingTarget(
+            confirmedRemoteId = "1581F8",
+            candidateTelemetry = listOf(
+                testTelemetry(remoteId = "1581F8", mappedId = "1SAR7DjMn4Pr"),
+                testTelemetry(remoteId = "1581F9", mappedId = "1SAR62Mn4Pr")
+            ),
+            liveUnpairedStreamDesignators = listOf("1sar7mn4pr")
+        ))
+        assertNull(automaticStreamTelemetryPairingTarget(
+            confirmedRemoteId = "1581F8",
+            candidateTelemetry = listOf(
+                testTelemetry(remoteId = "1581F8", mappedId = "1SAR7DjMn4Pr")
+            ),
+            liveUnpairedStreamDesignators = listOf("stream-one", "stream-two")
+        ))
+    }
+
+    @Test
     fun configuredBindingMapsAreBuiltOnceFromPersistedRidMapDefaults() {
         val maps = configuredStreamTelemetryBindingMaps(
             listOf(

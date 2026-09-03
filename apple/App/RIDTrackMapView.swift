@@ -421,6 +421,7 @@ struct RIDTrackMapView: View {
     let ingestAddress: String
     let networkSSID: String
     let bridgeSignalStrengthDbm: Int?
+    @Binding var automaticStreamPairingAircraftID: String?
     let onMapStatusTap: () -> Void
     let onSwitchMap: () -> Void
     let onDisconnectMap: () -> Void
@@ -617,6 +618,9 @@ struct RIDTrackMapView: View {
                 )
             }
         }
+        .onChange(of: automaticStreamPairingAircraftID, initial: true) { _, aircraftID in
+            handleAutomaticStreamPairing(aircraftID)
+        }
         .sheet(isPresented: $showNotams) { AppleNotamPanel(center: notams, location: locationProvider.lastLocation) }
         .sheet(isPresented: $showAirspace) {
             AppleAirspacePanel(
@@ -772,6 +776,37 @@ struct RIDTrackMapView: View {
             } else {
                 applyPipPreference()
             }
+        }
+    }
+
+    private func handleAutomaticStreamPairing(_ aircraftID: String?) {
+        guard let aircraftID else { return }
+        let liveUnpairedStreamIDs: [String] = streamRegistry.sessions.compactMap {
+            (session: AppleLiveStreamSession) -> String? in
+            guard session.id != "demo",
+                  session.state == .live,
+                  streamRegistry.boundAircraftID(for: session.id) == nil
+            else { return nil }
+            return session.id
+        }
+        let target = OperationalStreamDesignatorMatch.automaticPairingStreamID(
+            confirmedCandidateID: aircraftID,
+            activeCandidateIDs: model.tracks.map(\.aircraftID),
+            liveUnpairedStreamIDs: liveUnpairedStreamIDs
+        )
+        automaticStreamPairingAircraftID = nil
+        if let target {
+            AppleLog.info(
+                "Streams",
+                "Presenting automatic telemetry pairing prompt stream=\(target) remoteID=\(aircraftID)"
+            )
+            pairingStreamID = target
+        } else {
+            AppleLog.info(
+                "Streams",
+                "Automatic telemetry pairing prompt skipped after confirmation remoteID=\(aircraftID) "
+                    + "activeTelemetry=\(model.tracks.count) liveUnpaired=\(liveUnpairedStreamIDs.count)"
+            )
         }
     }
 
@@ -1254,7 +1289,10 @@ struct RIDTrackMapView: View {
                 showsNavigationTitle: false,
                 expandedSessionID: expandedStreamID,
                 onSelectSession: toggleExpandedStream,
-                onLongPressSession: { pairingStreamID = $0 },
+                onLongPressSession: { streamID in
+                    AppleLog.info("Streams", "Manual telemetry pairing requested stream=\(streamID)")
+                    pairingStreamID = streamID
+                },
                 onDoubleTapSession: { streamID, zoomScale, normalizedPan in
                     expandedStreamID = streamID
                     beginSnapshotCapture(
@@ -1912,7 +1950,8 @@ private struct StreamAircraftPairingView: View {
                             description: Text("Wait for a Remote ID update, then try again.")
                         )
                     } else {
-                        ForEach(tracks) { track in
+                        ForEach(orderedTracks) { track in
+                            let isClosestMatch = track.aircraftID == closestMatchAircraftID
                             Button {
                                 if pairingMatchesStream(track) {
                                     onSelect(track.aircraftID)
@@ -1928,8 +1967,21 @@ private struct StreamAircraftPairingView: View {
                                             .foregroundStyle(.secondary)
                                     }
                                     Spacer()
+                                    if isClosestMatch {
+                                        Text("Closest match")
+                                            .font(.caption)
+                                            .fontWeight(.semibold)
+                                            .foregroundStyle(Color.accentColor)
+                                    }
                                     if selectedAircraftID == track.aircraftID {
                                         Image(systemName: "checkmark")
+                                    }
+                                }
+                                .padding(.vertical, 6)
+                                .overlay {
+                                    if isClosestMatch {
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(Color.accentColor, lineWidth: 2)
                                     }
                                 }
                             }
@@ -1969,10 +2021,35 @@ private struct StreamAircraftPairingView: View {
                 }
             } message: { track in
                 Text(
-                    "Stream “\(streamID)” does not match “\(displayName(for: track))”. "
-                    + "Pair only if you have positively identified this video source."
+                    "Stream “\(streamID)” does not match the drone designator “\(displayName(for: track))”. "
+                    + "Change the controller's RTMP stream designator to “\(displayName(for: track))” "
+                    + "so other tablets can match it automatically. Pair anyway only if you have "
+                    + "positively identified this video source."
                 )
             }
+        }
+    }
+
+    private var closestMatchAircraftID: String? {
+        OperationalStreamDesignatorMatch.closestCandidateID(
+            streamDesignator: streamID,
+            candidates: tracks.map { track in
+                OperationalStreamDesignatorCandidate(
+                    id: track.aircraftID,
+                    designator: displayName(for: track)
+                )
+            }
+        )
+    }
+
+    private var orderedTracks: [RidAircraftTrack] {
+        let closestAircraftID = closestMatchAircraftID
+        return tracks.sorted { left, right in
+            let leftIsClosest = left.aircraftID == closestAircraftID
+            let rightIsClosest = right.aircraftID == closestAircraftID
+            if leftIsClosest != rightIsClosest { return leftIsClosest }
+            return displayName(for: left).localizedCaseInsensitiveCompare(displayName(for: right))
+                == .orderedAscending
         }
     }
 

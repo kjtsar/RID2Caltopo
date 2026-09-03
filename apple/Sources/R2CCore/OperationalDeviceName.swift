@@ -105,3 +105,34 @@ public enum OperationalDeviceName {
         }.joined(separator: " ")
     }
 }
+
+public enum OperationalDeviceModelName {
+    public static func apple(machineIdentifier: String, fallback: String = "iPad") -> String {
+        let identifier = machineIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        if identifier.lowercased().hasPrefix("iphone") { return "iPhone" }
+        if identifier.lowercased().hasPrefix("ipod") { return "iPod" }
+        guard identifier.lowercased().hasPrefix("ipad") else { return fallback }
+        let mini = Set([
+            "iPad2,5", "iPad2,6", "iPad2,7", "iPad4,4", "iPad4,5", "iPad4,6",
+            "iPad5,1", "iPad5,2", "iPad11,1", "iPad11,2", "iPad14,1", "iPad14,2",
+            "iPad16,1", "iPad16,2",
+        ])
+        if mini.contains(identifier) { return "iPad mini" }
+        let air = Set([
+            "iPad4,1", "iPad4,2", "iPad4,3", "iPad5,3", "iPad5,4", "iPad11,3",
+            "iPad11,4", "iPad13,1", "iPad13,2", "iPad13,16", "iPad13,17",
+            "iPad14,8", "iPad14,9", "iPad14,10", "iPad14,11", "iPad15,3",
+            "iPad15,4", "iPad15,5", "iPad15,6",
+        ])
+        if air.contains(identifier) { return "iPad Air" }
+        let pro = Set([
+            "iPad6,3", "iPad6,4", "iPad6,7", "iPad6,8", "iPad7,1", "iPad7,2",
+            "iPad7,3", "iPad7,4", "iPad8,1", "iPad8,2", "iPad8,3", "iPad8,4",
+            "iPad8,5", "iPad8,6", "iPad8,7", "iPad8,8", "iPad8,9", "iPad8,10",
+            "iPad8,11", "iPad8,12", "iPad13,4", "iPad13,5", "iPad13,6", "iPad13,7",
+            "iPad13,8", "iPad13,9", "iPad13,10", "iPad13,11", "iPad14,3", "iPad14,4",
+            "iPad14,5", "iPad14,6", "iPad16,3", "iPad16,4", "iPad16,5", "iPad16,6",
+        ])
+        return pro.contains(identifier) ? "iPad Pro" : "iPad"
+    }
+}

@@ -1174,6 +1174,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("zoneId", myGuid);
             jo.put("guid", myGuid);
             jo.put("name", myName);
+            jo.put("deviceModel", AndroidDeviceIdentity.modelName());
             jo.put("appPlatform", "android");
             putFinite(jo, "lat", myLat);
             putFinite(jo, "lng", myLon);
@@ -1423,6 +1424,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 case "hello_ack":
                     helloAckAtMs = nowMs();
                     lastServerAcknowledgementAtMs = helloAckAtMs;
+                    String canonicalDeviceName = jo.optString("canonicalDeviceName", "").trim();
+                    Context identityContext = R2CApplication.getAppCtxt();
+                    if (!canonicalDeviceName.isEmpty() && identityContext != null) {
+                        AndroidDeviceIdentity.applyManagedDisplayName(
+                                identityContext, canonicalDeviceName);
+                        R2CActivity.MyDeviceName = canonicalDeviceName;
+                        myName = canonicalDeviceName;
+                    }
                     handleAppUpdateRecommendation(jo);
                     long advertisedStandbySeconds = jo.optLong(
                             "standbyParkSec",

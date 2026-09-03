@@ -793,7 +793,7 @@ internal class GeoTiffDemSource(context: Context) {
     ) {
         fun modelCoordinate(lat: Double, lng: Double): Pair<Double, Double>? {
             val epsg = projectedCSTypeCode ?: return lng to lat
-            return latLonToUtm(lat, lng, epsg)
+            return if (epsg == 6350) latLonToConusAlbers(lat, lng) else latLonToUtm(lat, lng, epsg)
         }
 
         fun horizontalResolutionMeters(latitude: Double): Double {
@@ -808,7 +808,37 @@ internal class GeoTiffDemSource(context: Context) {
         private val TILE_NAME_PATTERN: Pattern =
             Pattern.compile(".*([nNsS])(\\d{2})([eEwW])(\\d{3}).*\\.tiff?$")
         private val PLANNED_1M_NAME_PATTERN: Pattern =
-            Pattern.compile("R2C_1M_(-?\\d+)_(-?\\d+)_(-?\\d+)_(-?\\d+)_.*\\.tiff?$", Pattern.CASE_INSENSITIVE)
+            Pattern.compile("R2C_(?:S1M|1M)_(-?\\d+)_(-?\\d+)_(-?\\d+)_(-?\\d+)_.*\\.tiff?$", Pattern.CASE_INSENSITIVE)
+
+        /** WGS84/NAD83 latitude-longitude to EPSG:6350 NAD83(2011) / Conus Albers. */
+        internal fun latLonToConusAlbers(lat: Double, lng: Double): Pair<Double, Double> {
+            val a = 6_378_137.0
+            val f = 1.0 / 298.257222101
+            val e2 = f * (2.0 - f)
+            val e = sqrt(e2)
+            fun q(phi: Double): Double {
+                val sinPhi = sin(phi)
+                return (1.0 - e2) * (
+                    sinPhi / (1.0 - e2 * sinPhi * sinPhi) -
+                        kotlin.math.ln((1.0 - e * sinPhi) / (1.0 + e * sinPhi)) / (2.0 * e)
+                    )
+            }
+            fun m(phi: Double): Double = cos(phi) / sqrt(1.0 - e2 * sin(phi).pow(2))
+            val phi0 = Math.toRadians(23.0)
+            val lambda0 = Math.toRadians(-96.0)
+            val phi1 = Math.toRadians(29.5)
+            val phi2 = Math.toRadians(45.5)
+            val m1 = m(phi1)
+            val m2 = m(phi2)
+            val q1 = q(phi1)
+            val q2 = q(phi2)
+            val n = (m1 * m1 - m2 * m2) / (q2 - q1)
+            val c = m1 * m1 + n * q1
+            fun rhoAt(phi: Double): Double = a * sqrt(c - n * q(phi)) / n
+            val rho = rhoAt(Math.toRadians(lat))
+            val theta = n * (Math.toRadians(lng) - lambda0)
+            return rho * sin(theta) to rhoAt(phi0) - rho * cos(theta)
+        }
 
         /** Convert WGS84 latitude/longitude to the UTM coordinates used by USGS 1 m DEM projects. */
         internal fun latLonToUtm(lat: Double, lng: Double, epsg: Int): Pair<Double, Double>? {

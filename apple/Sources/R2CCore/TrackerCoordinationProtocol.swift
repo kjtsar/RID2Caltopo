@@ -11,6 +11,7 @@ public struct TrackerCoordinationClient: Sendable, Equatable {
     public let mapID: String
     public let zoneID: String
     public let name: String
+    public let deviceModel: String
     public let platform: String
     public let appVersion: String
     public let appVersionCode: Int
@@ -19,6 +20,7 @@ public struct TrackerCoordinationClient: Sendable, Equatable {
         mapID: String,
         zoneID: String,
         name: String,
+        deviceModel: String = "",
         platform: String = "",
         appVersion: String,
         appVersionCode: Int
@@ -26,6 +28,7 @@ public struct TrackerCoordinationClient: Sendable, Equatable {
         self.mapID = mapID
         self.zoneID = zoneID
         self.name = name
+        self.deviceModel = deviceModel
         self.platform = platform
         self.appVersion = appVersion
         self.appVersionCode = appVersionCode
@@ -302,6 +305,7 @@ public enum TrackerCoordinationWire {
             "zoneId": client.zoneID,
             "guid": client.zoneID,
             "name": client.name,
+            "deviceModel": client.deviceModel,
             "appPlatform": client.platform,
             "lat": finite(position.latitude),
             "lng": finite(position.longitude),

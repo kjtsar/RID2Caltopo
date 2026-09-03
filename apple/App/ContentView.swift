@@ -88,6 +88,7 @@ struct ContentView: View {
     @State private var trackerReauthenticationBrowserOpen = false
     @State private var trackerReauthenticationURL: URL?
     @State private var showTrackerReauthenticationPrompt = false
+    @State private var organizationAccessEvaluated = false
     @State private var organizationAccessGranted = false
     @State private var organizationAuthenticationInFlight = false
     @State private var organizationAuthenticationError: String?
@@ -886,11 +887,7 @@ struct ContentView: View {
                 switch phase {
                 case .active:
                     handleIncidentMapBecameActive()
-                    if trackerReauthenticationBrowserOpen,
-                       trackerReauthenticationURL != nil {
-                        showTrackerReauthenticationPrompt = true
-                    }
-                    trackerReauthenticationBrowserOpen = false
+                    resumeTrackerAfterBrowserReturnIfNeeded(callbackPending: false)
                     mediaMTX.ensureHealthy(captureStreams: captureStreams)
                     Task {
                         await networkDiagnostics.refresh(reason: .applicationBecameActive)
@@ -1072,6 +1069,7 @@ struct ContentView: View {
                     }
                 )
                 reconcileOrganizationAuthentication()
+                organizationAccessEvaluated = true
             }
             .onChange(of: orgConfigSettings.organizationName, initial: true) { oldValue, newValue in
                 let wasRequired = OrganizationAccessPolicy.requiresDeviceOwnerAuthentication(
@@ -1148,43 +1146,50 @@ struct ContentView: View {
     }
 
     private var organizationAccessBlocked: Bool {
-        organizationAuthenticationRequired
-            && !organizationAuthenticationBypassedForTesting
-            && !organizationAccessGranted
+        !organizationAccessEvaluated
+            || (organizationAuthenticationRequired
+                && !organizationAuthenticationBypassedForTesting
+                && !organizationAccessGranted)
     }
 
     private var organizationAccessGate: some View {
         ZStack {
             Color(uiColor: .systemBackground).ignoresSafeArea()
             VStack(spacing: 18) {
-                Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 52))
-                    .foregroundStyle(.orange)
-                Text("Protected access locked")
-                    .font(.title2.bold())
-                Text(
-                    "Authenticate with this device's biometric or passcode to access "
-                        + protectedAccessDescription + "."
-                )
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                if let organizationAuthenticationError {
-                    Text(organizationAuthenticationError)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.red)
+                if organizationAccessEvaluated {
+                    Image(systemName: "lock.shield.fill")
+                        .font(.system(size: 52))
+                        .foregroundStyle(.orange)
+                    Text("Protected access locked")
+                        .font(.title2.bold())
+                    Text(
+                        "Authenticate with this device's biometric or passcode to access "
+                            + protectedAccessDescription + "."
+                    )
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    if let organizationAuthenticationError {
+                        Text(organizationAuthenticationError)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.red)
+                    }
+                    Button(organizationAuthenticationInFlight ? "Authenticating…" : "Unlock") {
+                        authenticateOrganizationAccess()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(organizationAuthenticationInFlight)
+                    Text(
+                        "Set up a device passcode or biometrics in Settings before an ORG or "
+                            + "CalTopo Teams configuration can be used."
+                    )
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                } else {
+                    ProgressView()
+                    Text("Checking protected access…")
+                        .foregroundStyle(.secondary)
                 }
-                Button(organizationAuthenticationInFlight ? "Authenticating…" : "Unlock") {
-                    authenticateOrganizationAccess()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(organizationAuthenticationInFlight)
-                Text(
-                    "Set up a device passcode or biometrics in Settings before an ORG or "
-                        + "CalTopo Teams configuration can be used."
-                )
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
             }
             .frame(maxWidth: 560)
             .padding(32)
@@ -1243,11 +1248,17 @@ struct ContentView: View {
                     // dismissed. Keep the protected gate mounted until that transition
                     // finishes so UIKit is not asked to replace navigation content mid-layout.
                     try? await Task.sleep(for: .milliseconds(500))
+                    let pendingURL = pendingOrganizationAccessURL
+                    let trackerCallbackPending =
+                        pendingURL?.scheme?.lowercased() == "r2creauth"
+                    resumeTrackerAfterBrowserReturnIfNeeded(
+                        callbackPending: trackerCallbackPending
+                    )
                     organizationAccessGranted = true
                     organizationAuthenticationInFlight = false
                     organizationAuthenticationError = nil
                     AppleLog.info("OrganizationAccess", "Device owner authenticated")
-                    if let pendingURL = pendingOrganizationAccessURL {
+                    if let pendingURL {
                         pendingOrganizationAccessURL = nil
                         handleIncomingURL(pendingURL)
                     }
@@ -1264,6 +1275,24 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func resumeTrackerAfterBrowserReturnIfNeeded(callbackPending: Bool) {
+        let shouldRetry = TrackerReauthenticationBrowserReturnPolicy.shouldRetryCredential(
+            browserWasOpen: trackerReauthenticationBrowserOpen,
+            challengeURLPresent: trackerReauthenticationURL != nil,
+            callbackPending: callbackPending
+        )
+        trackerReauthenticationBrowserOpen = false
+        guard shouldRetry else { return }
+
+        trackerReauthenticationURL = nil
+        showTrackerReauthenticationPrompt = false
+        AppleLog.info(
+            "TrackerPeer",
+            "Returned from Tracker sign-in browser without an app callback; retrying Tracker access"
+        )
+        configurePeerCoordinator(forceReconnect: true)
     }
 
     private var rootScreen: some View {

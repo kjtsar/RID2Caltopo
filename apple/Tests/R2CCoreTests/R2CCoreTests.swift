@@ -78,6 +78,9 @@ import Testing
 
     #expect(contentView.contains("AppleTrackerEnrollmentClient.normalizedEnrollmentURL"))
     #expect(contentView.contains("trackerReauthenticationBrowserOpen"))
+    #expect(contentView.contains("organizationAccessEvaluated = false"))
+    #expect(contentView.contains("!organizationAccessEvaluated"))
+    #expect(contentView.contains("Checking protected access…"))
     #expect(contentView.contains(
         "if organizationAuthenticationRequired, !organizationAccessGranted"
     ))
@@ -431,6 +434,29 @@ import Testing
     #expect(TrackerReauthenticationChallenge.url(fromEnrollmentResponse: untrusted) == nil)
 }
 
+@Test func trackerBrowserReturnRetriesOnlyWhenNoCallbackIsPending() {
+    #expect(TrackerReauthenticationBrowserReturnPolicy.shouldRetryCredential(
+        browserWasOpen: true,
+        challengeURLPresent: true,
+        callbackPending: false
+    ))
+    #expect(!TrackerReauthenticationBrowserReturnPolicy.shouldRetryCredential(
+        browserWasOpen: false,
+        challengeURLPresent: true,
+        callbackPending: false
+    ))
+    #expect(!TrackerReauthenticationBrowserReturnPolicy.shouldRetryCredential(
+        browserWasOpen: true,
+        challengeURLPresent: false,
+        callbackPending: false
+    ))
+    #expect(!TrackerReauthenticationBrowserReturnPolicy.shouldRetryCredential(
+        browserWasOpen: true,
+        challengeURLPresent: true,
+        callbackPending: true
+    ))
+}
+
 @Test func directAppleTrackerEnrollmentRefreshesHomeProfileAndOpensReauthentication() throws {
     let appleRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -466,6 +492,10 @@ import Testing
     #expect(contentView.contains("notams.refreshNow(location: locationProvider.lastLocation)\n                    configurePeerCoordinator(forceReconnect: true)"))
     #expect(contentView.contains("Reauthentication completed; configuration preserved"))
     #expect(contentView.contains("configurePeerCoordinator(forceReconnect: true)"))
+    #expect(contentView.contains("resumeTrackerAfterBrowserReturnIfNeeded"))
+    #expect(contentView.contains("callbackPending: trackerCallbackPending"))
+    #expect(contentView.contains("trackerReauthenticationURL = nil"))
+    #expect(contentView.contains("without an app callback; retrying Tracker access"))
     #expect(coordinator.contains("guard !unchanged || forceReconnect else { return }"))
     #expect(coordinator.contains("trackerConfigurationChanged || forceReconnect"))
     #expect(coordinator.contains("reauthenticationURL = nil"))

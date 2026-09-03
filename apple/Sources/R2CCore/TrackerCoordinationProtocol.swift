@@ -280,6 +280,16 @@ public enum TrackerReauthenticationChallenge {
     }
 }
 
+public enum TrackerReauthenticationBrowserReturnPolicy {
+    public static func shouldRetryCredential(
+        browserWasOpen: Bool,
+        challengeURLPresent: Bool,
+        callbackPending: Bool
+    ) -> Bool {
+        browserWasOpen && challengeURLPresent && !callbackPending
+    }
+}
+
 public enum TrackerCoordinationWire {
     public static func hello(
         client: TrackerCoordinationClient,

@@ -1,9 +1,11 @@
 Latest changes:
+- Configured organization and CalTopo Teams access now requires device biometrics or passcode before protected maps, settings, and Tracker features are shown.
 - Diagnostic sharing now sends to UAS4SAR support, removes location details from diagnostic log messages, and excludes aircraft track files unless the operator explicitly includes them.
 - Shallow-angle clue snapshots now follow the camera sightline across descending terrain to locate distant terrain intersections instead of placing the clue near the aircraft.
 - Submitted clue descriptions now identify the DEM source and grid resolution used, or clearly identify a flat-ground estimate when no terrain intersection is available.
 
 Platform-specific changes:
+- Apple Tracker sign-in now recovers cleanly when Safari does not return an app callback, without reopening an expired one-time link, and keeps protected navigation hidden until the access check completes.
 - Apple map aircraft labels now remain stable during position updates and no longer display the aircraft-reported operator point.
 - Apple waits for captured video files to finish finalizing before publishing their recording links.
 

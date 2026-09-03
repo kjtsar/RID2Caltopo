@@ -131,6 +131,10 @@ fun ClueSheetContent (
             keyboardController?.show()
             return
         }
+        if (clue.projectionHeightMeters == null) {
+            submissionFeedback = "Clue projection needs fresh AGL or a valid relative altitude."
+            return
+        }
         submissionFeedback = null
         focusManager.clearFocus()
         keyboardController?.hide()
@@ -210,6 +214,24 @@ fun ClueSheetContent (
                 ),
                 style = MaterialTheme.typography.bodySmall
             )
+
+            if (clue.projectionHeightMeters == null) {
+                Text(
+                    text = "Clue projection unavailable: no fresh AGL or relative altitude.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else {
+                Text(
+                    text = String.format(
+                        Locale.US,
+                        "Projection height %.0f ft (%s)",
+                        clue.projectionHeightMeters * 3.28084,
+                        clue.projectionHeightSourceLabel ?: "unspecified",
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
 
             Text(
                 text = String.format(
@@ -368,6 +390,7 @@ fun ClueSheetContent (
             ) {
                 OutlinedButton(
                     modifier = Modifier.fillMaxWidth(),
+                    enabled = clue.projectionHeightMeters != null,
                     onClick = { submitWhenValid(onSubmitLocalMarkerOnly) }
                 ) {
                     Text("Local Marker Only")
@@ -386,6 +409,7 @@ fun ClueSheetContent (
 
                     Button(
                         modifier = Modifier.weight(1f),
+                        enabled = clue.projectionHeightMeters != null,
                         onClick = { submitWhenValid(onSubmit) }
                     ) {
                         Text("Submit")

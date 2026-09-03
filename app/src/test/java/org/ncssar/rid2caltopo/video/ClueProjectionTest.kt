@@ -8,6 +8,36 @@ import org.ncssar.rid2caltopo.video.mapcache.DemElevationSample
 
 class ClueProjectionTest {
     @Test
+    fun projectionHeight_prefersFreshAglThenFallsBackToAtoAndValidatedDji() {
+        val agl = selectClueProjectionHeight(30.0, 25.0, 24.0)!!
+        assertEquals(30.0, agl.meters, 0.0)
+        assertEquals("fresh AGL", agl.sourceLabel)
+
+        val ato = selectClueProjectionHeight(null, 25.0, 24.0)!!
+        assertEquals(25.0, ato.meters, 0.0)
+        assertEquals("ATO flat-ground fallback", ato.sourceLabel)
+        val fieldFallback = projectClueLocation(
+            droneLat = 39.0,
+            droneLng = -121.0,
+            droneAlt = 550.0,
+            headingDeg = 44.0,
+            aglMeters = ato.meters,
+            gimbalAngleDeg = -25.6,
+        )
+        val northMeters = (fieldFallback.lat - 39.0) * 111_320.0
+        val eastMeters = (fieldFallback.lng + 121.0) * 111_320.0 * cos(Math.toRadians(39.0))
+        val fieldDistance = kotlin.math.hypot(northMeters, eastMeters)
+        assertTrue(fieldDistance > 51.0)
+        assertTrue(fieldDistance < 53.0)
+
+        val dji = selectClueProjectionHeight(Double.NaN, -1.0, 24.0)!!
+        assertEquals(24.0, dji.meters, 0.0)
+        assertTrue(dji.sourceLabel.contains("validated DJI"))
+
+        assertEquals(null, selectClueProjectionHeight(null, null, null))
+    }
+
+    @Test
     fun projectClueLocation_keepsPointUnderDroneAtMinusNinetyDegrees() {
         val projection = projectClueLocation(
             droneLat = 37.0,

@@ -54,6 +54,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CaltopoMap.MapStatusListener.mapStatus
 import org.ncssar.rid2caltopo.data.CaltopoNode
@@ -128,6 +129,8 @@ data class PendingClue(
     val headingSourceLabel: String?,
     val aglMeters: Double?,
     val atoMeters: Double?,
+    val projectionHeightMeters: Double? = null,
+    val projectionHeightSourceLabel: String? = null,
     val gimbalAngleDeg: Double,
     val timestamp: Long,
     val bitmap: Bitmap?,
@@ -142,6 +145,31 @@ data class PendingClue(
     val demResolutionMeters: Double? = null,
     val demSampleStale: Boolean = false,
 )
+
+internal data class ClueProjectionHeightSelection(
+    val meters: Double,
+    val sourceLabel: String,
+)
+
+internal fun selectClueProjectionHeight(
+    freshAglMeters: Double?,
+    atoMeters: Double?,
+    validatedDjiRelativeUpMeters: Double? = null,
+): ClueProjectionHeightSelection? {
+    fun validHeight(value: Double?): Double? = value?.takeIf {
+        it.isFinite() && it > 0.0 && it <= 10_000.0
+    }
+    validHeight(freshAglMeters)?.let {
+        return ClueProjectionHeightSelection(it, "fresh AGL")
+    }
+    validHeight(atoMeters)?.let {
+        return ClueProjectionHeightSelection(it, "ATO flat-ground fallback")
+    }
+    validHeight(validatedDjiRelativeUpMeters)?.let {
+        return ClueProjectionHeightSelection(it, "validated DJI relative altitude flat-ground fallback")
+    }
+    return null
+}
 
 internal data class CenterpointElevationSample(
     val latitude: Double,
@@ -448,6 +476,14 @@ internal fun buildClueCaptureSummary(
         String.format(Locale.US, "  AGL: %.0f'", it * METERS_TO_FEET)
     } ?: "  AGL: N/A"
     clue.aglSourceLabel?.let { lines += "  AGL source: $it" }
+    clue.projectionHeightMeters?.let {
+        lines += String.format(
+            Locale.US,
+            "  Projection height: %.0f' (%s)",
+            it * METERS_TO_FEET,
+            clue.projectionHeightSourceLabel ?: "unspecified",
+        )
+    }
     lines += "  Aircraft position source: ${clue.aircraftPositionSourceLabel}"
     lines += formatClueDemSummary(
         terrainProjectionApplied = clue.terrainProjectionApplied,
@@ -2081,6 +2117,12 @@ class StreamsViewModel(
         val clueBearing = headingSelection.headingDeg
         val clueAglMeters = displayState?.aglFt?.div(METERS_TO_FEET)
         val clueAtoMeters = displayState?.atoFt?.div(METERS_TO_FEET)
+        val projectionHeight = selectClueProjectionHeight(
+            freshAglMeters = clueAglMeters?.takeUnless { displayState.aglStale },
+            atoMeters = clueAtoMeters,
+            validatedDjiRelativeUpMeters = freshDjiCamera?.relativeUpMeters
+                ?.takeIf { droneSpec.getImpliedTakeoffAltM()?.isFinite() == true },
+        )
         val clueGimbalAngle = freshDjiCamera?.tiltDeg
             ?: nonDjiTelemetry?.gimbalPitchDeg
                 ?.takeIf { it.isFinite() }
@@ -2092,7 +2134,7 @@ class StreamsViewModel(
             droneLng = clueLng,
             droneAlt = clueAlt,
             headingDeg = clueBearing,
-            aglMeters = clueAglMeters,
+            aglMeters = projectionHeight?.meters,
             gimbalAngleDeg = clueGimbalAngle,
         )
         logSnapshotIfSlow("projection", System.currentTimeMillis() - projectionStartedAtMs)
@@ -2138,6 +2180,8 @@ class StreamsViewModel(
             headingSourceLabel = headingSelection.sourceLabel,
             aglMeters = clueAglMeters,
             atoMeters = clueAtoMeters,
+            projectionHeightMeters = projectionHeight?.meters,
+            projectionHeightSourceLabel = projectionHeight?.sourceLabel,
             gimbalAngleDeg = clueGimbalAngle,
             timestamp = clueTimestamp,
             bitmap = bitmap,
@@ -2274,7 +2318,7 @@ class StreamsViewModel(
                 droneLng = clue.droneLng,
                 droneAlt = clue.droneAlt,
                 headingDeg = clue.headingDeg,
-                aglMeters = clue.aglMeters,
+                aglMeters = clue.projectionHeightMeters,
                 gimbalAngleDeg = gimbalAngleDeg,
             )
             CTDebug(tag, String.format(
@@ -2282,7 +2326,7 @@ class StreamsViewModel(
                 "updateClueGimbalAngle(): designator=%s bearingDeg=%s aglM=%s gimbalDeg=%.1f projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f",
                 clue.designator,
                 clue.headingDeg?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
-                clue.aglMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+                clue.projectionHeightMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
                 gimbalAngleDeg,
                 projection.lat,
                 projection.lng,
@@ -2309,7 +2353,7 @@ class StreamsViewModel(
                 droneLng = clue.droneLng,
                 droneAlt = clue.droneAlt,
                 headingDeg = normalizedHeading,
-                aglMeters = clue.aglMeters,
+                aglMeters = clue.projectionHeightMeters,
                 gimbalAngleDeg = clue.gimbalAngleDeg,
             )
             clue.copy(
@@ -2328,6 +2372,11 @@ class StreamsViewModel(
 
     fun submitClue() {
         val clue = pendingClue ?: return
+        if (clue.projectionHeightMeters == null) {
+            CaltopoClient.ShowToast("Clue projection needs fresh AGL or a valid relative altitude.")
+            CTWarn(tag, "Clue submission blocked: projection height unavailable")
+            return
+        }
         CTDebug(tag, String.format(
             Locale.US,
             "submitting clue: '%s' for '%s' clueLat=%.6f clueLng=%.6f clueAlt=%.1f droneLat=%.6f droneLng=%.6f droneAlt=%.1f headingDeg=%s aglM=%s atoM=%s gimbalDeg=%.1f",
@@ -2366,6 +2415,11 @@ class StreamsViewModel(
 
     fun submitLocalMarkerOnly() {
         val clue = pendingClue ?: return
+        if (clue.projectionHeightMeters == null) {
+            CaltopoClient.ShowToast("Clue projection needs fresh AGL or a valid relative altitude.")
+            CTWarn(tag, "Local clue submission blocked: projection height unavailable")
+            return
+        }
         val markerTitle = clue.title.ifBlank { "Local marker" }
         val markerDescription = appendTelemetrySummary(
             clue.description,
@@ -2428,7 +2482,7 @@ class StreamsViewModel(
         if (clue.designator != designator) return
         clueProjectionJob?.cancel()
         clueProjectionJob = viewModelScope.launch(Dispatchers.Default) {
-            val projectionAglMeters = clue.aglMeters
+            val projectionAglMeters = clue.projectionHeightMeters
             val refined = projectClueLocationWithDem(
                 demElevationService = altitudeCoordinator.demElevationService,
                 droneLat = clue.droneLat,

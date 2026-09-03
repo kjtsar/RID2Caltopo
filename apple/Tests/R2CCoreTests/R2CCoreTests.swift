@@ -2605,6 +2605,55 @@ private func proximityDrone(
     #expect(upward.altitudeMeters == 400)
 }
 
+@Test func operationalClueProjectionHeightPrefersFreshAglThenFallsBackSafely() throws {
+    let agl = try #require(OperationalClueGeometry.selectedProjectionHeight(
+        freshAGLMeters: 30,
+        atoMeters: 25,
+        validatedDJIRelativeUpMeters: 24
+    ))
+    #expect(agl.meters == 30)
+    #expect(agl.sourceLabel == "fresh AGL")
+
+    let ato = try #require(OperationalClueGeometry.selectedProjectionHeight(
+        freshAGLMeters: nil,
+        atoMeters: 25,
+        validatedDJIRelativeUpMeters: 24
+    ))
+    #expect(ato.meters == 25)
+    #expect(ato.sourceLabel == "ATO flat-ground fallback")
+    let fieldFallback = OperationalClueGeometry.project(
+        droneLatitude: 39,
+        droneLongitude: -121,
+        droneAltitudeMeters: 550,
+        headingDegrees: 44,
+        aglMeters: ato.meters,
+        gimbalAngleDegrees: -25.6
+    )
+    let fieldOffset = try #require(RidGeometry.relativePosition(
+        fromLatitude: 39,
+        longitude: -121,
+        toLatitude: fieldFallback.latitude,
+        longitude: fieldFallback.longitude
+    ))
+    #expect(fieldOffset.distanceMeters > 51)
+    #expect(fieldOffset.distanceMeters < 53)
+    #expect(abs(fieldOffset.bearingDegrees - 44) < 0.1)
+
+    let dji = try #require(OperationalClueGeometry.selectedProjectionHeight(
+        freshAGLMeters: .nan,
+        atoMeters: -1,
+        validatedDJIRelativeUpMeters: 24
+    ))
+    #expect(dji.meters == 24)
+    #expect(dji.sourceLabel.contains("validated DJI"))
+
+    #expect(OperationalClueGeometry.selectedProjectionHeight(
+        freshAGLMeters: nil,
+        atoMeters: nil,
+        validatedDJIRelativeUpMeters: nil
+    ) == nil)
+}
+
 @Test func operationalClueProjectionUsesConfirmedCameraBearing() {
     let projected = OperationalClueGeometry.project(
         droneLatitude: 39.15419,

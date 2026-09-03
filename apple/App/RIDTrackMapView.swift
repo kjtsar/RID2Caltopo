@@ -2096,27 +2096,36 @@ private struct ClueSubmissionView: View {
         return display?.aglFeet.map { $0 * 0.3048 }
     }
     private var atoMeters: Double? { display?.atoFeet.map { $0 * 0.3048 } }
+    private var projectionHeight: OperationalClueProjectionHeightSelection? {
+        OperationalClueGeometry.selectedProjectionHeight(
+            freshAGLMeters: display?.aglStale == true ? nil : aglMeters,
+            atoMeters: atoMeters,
+            validatedDJIRelativeUpMeters: usesCaptureTelemetry && atoMeters != nil
+                ? pending.djiCameraTelemetry?.relativeUpMeters
+                : nil
+        )
+    }
     private var flatProjection: OperationalClueProjection? {
-        guard let observation else { return nil }
+        guard let observation, let projectionHeight else { return nil }
         return OperationalClueGeometry.project(
             droneLatitude: observation.latitude,
             droneLongitude: observation.longitude,
             droneAltitudeMeters: observation.altitudeMeters,
             headingDegrees: heading.degrees,
-            aglMeters: aglMeters,
+            aglMeters: projectionHeight.meters,
             gimbalAngleDegrees: gimbalAngle
         )
     }
     private var projection: OperationalClueProjection? { terrainProjection ?? flatProjection }
     private var projectionInput: ClueProjectionInput? {
-        guard let observation else { return nil }
+        guard let observation, let projectionHeight else { return nil }
         return ClueProjectionInput(
             aircraftID: selectedAircraftID,
             latitude: observation.latitude,
             longitude: observation.longitude,
             altitudeMeters: observation.altitudeMeters,
             headingDegrees: heading.degrees,
-            aglMeters: aglMeters,
+            projectionHeightMeters: projectionHeight.meters,
             gimbalAngleDegrees: gimbalAngle
         )
     }
@@ -2184,6 +2193,13 @@ private struct ClueSubmissionView: View {
                         Label("Flat-ground estimate; no DEM intersection", systemImage: "exclamationmark.triangle")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    } else if projectionHeight == nil {
+                        Label(
+                            "Clue projection unavailable: no fresh AGL or relative altitude.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.red)
                     }
                 }
                 Section("Report") {
@@ -2210,6 +2226,7 @@ private struct ClueSubmissionView: View {
                     Button("Local Marker Only", systemImage: "mappin.and.ellipse") {
                         submit(publish: false)
                     }
+                    .disabled(projectionHeight == nil)
                     Button {
                         submit(publish: true)
                     } label: {
@@ -2217,6 +2234,7 @@ private struct ClueSubmissionView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(projectionHeight == nil)
                 } footer: {
                     Text("Submit saves the clue locally before starting its CalTopo upload.")
                 }
@@ -2253,7 +2271,7 @@ private struct ClueSubmissionView: View {
                 let refined = await model.projectClueWithTerrain(
                     observation: observation,
                     headingDegrees: input.headingDegrees,
-                    aglMeters: input.aglMeters,
+                    aglMeters: input.projectionHeightMeters,
                     gimbalAngleDegrees: input.gimbalAngleDegrees
                 )
                 guard !Task.isCancelled, projectionInput == input else { return }
@@ -2267,7 +2285,7 @@ private struct ClueSubmissionView: View {
                         refined.latitude,
                         refined.longitude,
                         input.headingDegrees.map { String(format: "%.1f", $0) } ?? "nil",
-                        input.aglMeters.map { String(format: "%.1f", $0) } ?? "nil",
+                        input.projectionHeightMeters.map { String(format: "%.1f", $0) } ?? "nil",
                         input.gimbalAngleDegrees,
                         refined.terrainProjectionApplied ? "true" : "false",
                         refined.demSource ?? "none",
@@ -2288,6 +2306,14 @@ private struct ClueSubmissionView: View {
             submissionFeedback = "Title required."
             focusedField = .title
             AppleLog.warning("Clue", "Clue form submission needs a title")
+            return
+        }
+        guard let projectionHeight else {
+            submissionFeedback = "Clue projection needs fresh AGL or a valid relative altitude. Wait for altitude telemetry and try again."
+            AppleLog.warning(
+                "Clue",
+                "Clue form submission blocked because projection height is unavailable aircraft=\(selectedAircraftID)"
+            )
             return
         }
         guard let observation, let projection else {
@@ -2317,7 +2343,7 @@ private struct ClueSubmissionView: View {
             "  Heading source: \(heading.sourceLabel ?? "N/A")",
             "  Gimbal angle at capture: \(String(format: "%.1f°", gimbalAngle))",
             "  AGL: \(measurement(aglMeters.map { $0 * 3.28084 }, suffix: display?.aglStale == true ? "? ft" : " ft"))",
-            "  AGL source: RID/barometric",
+            "  Projection height: \(measurement(projectionHeight.meters * 3.28084, suffix: " ft")) (\(projectionHeight.sourceLabel))",
             clueDemSummary(projection),
             "  ATO: \(measurement(display?.atoFeet, suffix: " ft"))",
             "  Distance to clue: \(measurement(clueDistanceFeet, suffix: " ft"))"
@@ -2448,7 +2474,7 @@ private struct ClueProjectionInput: Hashable {
     let longitude: Double
     let altitudeMeters: Double?
     let headingDegrees: Double?
-    let aglMeters: Double?
+    let projectionHeightMeters: Double?
     let gimbalAngleDegrees: Double
 }
 

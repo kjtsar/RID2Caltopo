@@ -30,6 +30,8 @@ class ClueCaptureSummaryTest {
                 headingSourceLabel = "Camera yaw",
                 aglMeters = 25.0,
                 atoMeters = 40.0,
+                projectionHeightMeters = 25.0,
+                projectionHeightSourceLabel = "fresh AGL",
                 gimbalAngleDeg = -45.0,
                 timestamp = 1_000L,
                 bitmap = null,
@@ -48,6 +50,7 @@ class ClueCaptureSummaryTest {
         assertTrue(summary.contains("  Gimbal angle at capture: -45.0°"))
         assertTrue(summary.contains("  AGL: 82'"))
         assertTrue(summary.contains("  ATO: 131'"))
+        assertTrue(summary.contains("  Projection height: 82' (fresh AGL)"))
         assertTrue(summary.contains("  DEM used: local USGS GeoTIFF (1 m grid)"))
         assertTrue(summary.contains("  Distance to clue:"))
     }

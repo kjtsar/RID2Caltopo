@@ -122,6 +122,16 @@ public struct OperationalClueHeadingSelection: Sendable, Equatable {
     }
 }
 
+public struct OperationalClueProjectionHeightSelection: Sendable, Equatable {
+    public let meters: Double
+    public let sourceLabel: String
+
+    public init(meters: Double, sourceLabel: String) {
+        self.meters = meters
+        self.sourceLabel = sourceLabel
+    }
+}
+
 public struct OperationalDJIVideoPosition: Sendable, Equatable {
     public let latitude: Double
     public let longitude: Double
@@ -135,6 +145,36 @@ public struct OperationalDJIVideoPosition: Sendable, Equatable {
 }
 
 public enum OperationalClueGeometry {
+    public static func selectedProjectionHeight(
+        freshAGLMeters: Double?,
+        atoMeters: Double?,
+        validatedDJIRelativeUpMeters: Double? = nil
+    ) -> OperationalClueProjectionHeightSelection? {
+        func validHeight(_ value: Double?) -> Double? {
+            guard let value, value.isFinite, value > 0, value <= 10_000 else { return nil }
+            return value
+        }
+        if let meters = validHeight(freshAGLMeters) {
+            return OperationalClueProjectionHeightSelection(
+                meters: meters,
+                sourceLabel: "fresh AGL"
+            )
+        }
+        if let meters = validHeight(atoMeters) {
+            return OperationalClueProjectionHeightSelection(
+                meters: meters,
+                sourceLabel: "ATO flat-ground fallback"
+            )
+        }
+        if let meters = validHeight(validatedDJIRelativeUpMeters) {
+            return OperationalClueProjectionHeightSelection(
+                meters: meters,
+                sourceLabel: "validated DJI relative altitude flat-ground fallback"
+            )
+        }
+        return nil
+    }
+
     /// Validates a complete DJI SEI position against RID without changing its epoch or coordinate.
     public static func djiValidatedHorizontalPosition(
         latitudeDegrees: Double?,

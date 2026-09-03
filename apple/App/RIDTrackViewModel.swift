@@ -320,7 +320,7 @@ final class RIDTrackViewModel: ObservableObject {
             aglMeters: aglMeters,
             gimbalAngleDegrees: gimbalAngleDegrees,
             sampleElevationMeters: { latitude, longitude in
-                await terrainService.sample(latitude: latitude, longitude: longitude)?.elevationMeters
+                await terrainService.sample(latitude: latitude, longitude: longitude)
             }
         )
     }

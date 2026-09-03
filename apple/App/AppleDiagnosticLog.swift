@@ -99,7 +99,11 @@ actor AppleDiagnosticLogStore {
         }.sorted { $0.name > $1.name }
     }
 
-    func prepareBundle(selectedDays: Set<String>, manifest: String) throws -> URL {
+    func prepareBundle(
+        selectedDays: Set<String>,
+        includeTracks: Bool,
+        manifest: String
+    ) throws -> URL {
         guard let rootURL, !selectedDays.isEmpty else { throw CocoaError(.fileNoSuchFile) }
         try handle?.synchronize()
         let destination = FileManager.default.temporaryDirectory
@@ -118,12 +122,15 @@ actor AppleDiagnosticLogStore {
                 options: [.skipsHiddenFiles]
             ).filter { $0.pathExtension.lowercased() == "txt" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
             for log in logs {
+                let logText = String(decoding: try Data(contentsOf: log), as: UTF8.self)
                 entries.append(.init(
                     path: "\(day)/\(log.lastPathComponent)",
-                    data: try Data(contentsOf: log)
+                    data: Data(
+                        OperationalDiagnosticLogFormat.redactLocations(inLogText: logText).utf8
+                    )
                 ))
             }
-            if let trackRootURL {
+            if includeTracks, let trackRootURL {
                 let trackDirectory = trackRootURL.appendingPathComponent(day, isDirectory: true)
                 let tracks = ((try? FileManager.default.contentsOfDirectory(
                     at: trackDirectory,
@@ -208,6 +215,7 @@ enum AppleSEIHexDiagnostics {
 final class AppleDiagnosticsCenter: ObservableObject {
     @Published private(set) var days: [AppleLogDay] = []
     @Published var selectedDays: Set<String> = []
+    @Published var includeTracks = false
     @Published private(set) var bundleURL: URL?
     @Published private(set) var status = "Preparing diagnostics…"
     @Published private(set) var isPreparing = false
@@ -237,6 +245,7 @@ final class AppleDiagnosticsCenter: ObservableObject {
 
     func beginPackagingSession() async {
         bundleURL = nil
+        includeTracks = false
         status = "Select log days, then package a fresh bundle."
         await refreshDays()
     }
@@ -249,6 +258,7 @@ final class AppleDiagnosticsCenter: ObservableObject {
             AppleLog.info("App", "Packaging log days: \(selectedDays.sorted().joined(separator: ","))")
             bundleURL = try await AppleDiagnosticLogStore.shared.prepareBundle(
                 selectedDays: selectedDays,
+                includeTracks: includeTracks,
                 manifest: diagnosticManifest
             )
             status = bundleURL?.lastPathComponent ?? "Bundle ready"

@@ -39,7 +39,26 @@ public enum OperationalDiagnosticLogFormat {
         at date: Date,
         timeZone: TimeZone = .current
     ) -> String {
-        let cleanMessage = message.replacingOccurrences(of: "\n", with: " ")
+        let cleanMessage = redactLocation(from: message)
+            .replacingOccurrences(of: "\n", with: " ")
         return "\(localTimestamp(date, timeZone: timeZone)) [\(level)][\(processAndThread)] [\(category)] \(cleanMessage)\n"
+    }
+
+    public static func redactLocation(from message: String) -> String {
+        let patterns = [
+            #"(?i)(?:\b(?:lat(?:itude)?|lon(?:gitude)?|lng)\b)\s*(?:=|:|%3d)\s*[-+]?\d{1,3}(?:\.\d+)?"#,
+            #"(?i)(?:[\"]coordinates[\"]\s*:|<coordinates>|\b(?:center|bbox|bounds)\s*=\s*[-+]?\d|[-+]?\d{1,8}\.\d{4,}\s*,\s*[-+]?\d{1,8}\.\d{4,}|\bz=\d+\s+x=\d+\s+y=\d+|/tile/\d+/\d+/\d+|\b[ns]\d{1,2}[ew]\d{1,3}\b)"#,
+            #"(?i)(?:DJI_SEI_(?:HEX|PAYLOAD)[^\n]*\bpayload=)"#,
+        ]
+        if patterns.contains(where: { message.range(of: $0, options: .regularExpression) != nil }) {
+            return "[location details redacted]"
+        }
+        return message
+    }
+
+    public static func redactLocations(inLogText text: String) -> String {
+        text.components(separatedBy: "\n")
+            .map(redactLocation(from:))
+            .joined(separator: "\n")
     }
 }

@@ -394,7 +394,7 @@ fun MainScreen(
     localViewModel: R2CViewModel,
     streamsViewModel: StreamsViewModel,
     availableLogArchiveDaysProvider: suspend () -> List<LogArchiveDayOption>,
-    onEmailLog: suspend (List<String>) -> Unit,
+    onEmailLog: suspend (List<String>, Boolean) -> Unit,
     availableArchiveCleanupDirectoriesProvider: suspend () -> List<ArchiveCleanupDirectoryOption>,
     onDeleteArchiveDirectories: suspend (List<String>) -> ArchiveCleanupDeleteResult,
     externalDisplayConnected: Boolean = false,
@@ -459,6 +459,7 @@ fun MainScreen(
     var sendingLogArchive by remember { mutableStateOf(false) }
     var logArchiveDays by remember { mutableStateOf(emptyList<LogArchiveDayOption>()) }
     var selectedLogArchiveDays by remember { mutableStateOf(emptySet<String>()) }
+    var includeTracksInDiagnostics by remember { mutableStateOf(false) }
     var loadingArchiveCleanupDirs by remember { mutableStateOf(false) }
     var deletingArchiveCleanupDirs by remember { mutableStateOf(false) }
     var archiveCleanupDirs by remember { mutableStateOf(emptyList<ArchiveCleanupDirectoryOption>()) }
@@ -1401,8 +1402,9 @@ fun MainScreen(
                             CaltopoClient.CTEvent(tag,"Stream Service Activated", null)
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Send app log to Ken...") }, onClick = {
+                        DropdownMenuItem(text = { Text("Send diagnostics to developer...") }, onClick = {
                             showLogArchiveDialog = true
+                            includeTracksInDiagnostics = false
                             loadingLogArchiveDays = true
                             logArchiveDays = emptyList()
                             selectedLogArchiveDays = emptySet()
@@ -1560,8 +1562,8 @@ fun MainScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
                     Text("Logs and deletion", style = MaterialTheme.typography.titleMedium)
-                    Text("You choose which log days to package and where to send the bundle. A bundle may contain Remote IDs, aircraft positions, the app-install coordination identifier, app events, device and OS details, local network addresses, and operational status.")
-                    Text("Nothing is transmitted by log sharing until you choose a destination in the Android share panel. Local logs and track archives can be removed in the app. Android or Google Drive configuration backups remain until removed from the corresponding backup service; CalTopo and the configured tracker control retention of data sent to them.")
+                    Text("You choose which log days to package. Diagnostic log messages omit location details. JSON track files contain aircraft positions and are excluded unless you explicitly include them.")
+                    Text("Nothing is transmitted until you choose a destination in the Android share panel. Local logs and track archives can be removed in the app. Android or Google Drive configuration backups remain until removed from the corresponding backup service; CalTopo and the configured tracker control retention of data sent to them.")
 
                     Spacer(modifier = Modifier.height(16.dp))
                     Text("Additional information", style = MaterialTheme.typography.titleMedium)
@@ -1582,14 +1584,14 @@ fun MainScreen(
                         onClick = {
                             try {
                                 context.startActivity(
-                                    Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:kjt@uas4sar.com"))
+                                    Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:help@uas4sar.com"))
                                 )
                             } catch (_: ActivityNotFoundException) {
                                 CaltopoClient.ShowToast("No email app is available.")
                             }
                         }
                     ) {
-                        Text("kjt@uas4sar.com")
+                        Text("help@uas4sar.com")
                     }
                 }
             },
@@ -1614,7 +1616,7 @@ fun MainScreen(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                 ) {
                     Text(
-                        "Each selected day includes its text logs, matching JSON track archives, and any captured Android ANR traces.",
+                        "Each selected day includes its text logs and any captured Android ANR traces. Track files are optional and off by default because they contain aircraft locations.",
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
@@ -1655,6 +1657,24 @@ fun MainScreen(
                                 }
                             }
                         }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = includeTracksInDiagnostics,
+                                onCheckedChange = { includeTracksInDiagnostics = it },
+                            )
+                            Column(modifier = Modifier.padding(start = 8.dp)) {
+                                Text("Include JSON track files")
+                                Text(
+                                    "Off by default. Track files contain aircraft positions.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
                     }
                 }
             },
@@ -1663,7 +1683,10 @@ fun MainScreen(
                     onClick = {
                         sendingLogArchive = true
                         coroutineScope.launch {
-                            onEmailLog(logArchiveDays.filter { selectedLogArchiveDays.contains(it.directoryName) }.map { it.directoryName })
+                            onEmailLog(
+                                logArchiveDays.filter { selectedLogArchiveDays.contains(it.directoryName) }.map { it.directoryName },
+                                includeTracksInDiagnostics,
+                            )
                             CaltopoClient.CTEvent(tag,"LogEmailed", null)
                             sendingLogArchive = false
                             showLogArchiveDialog = false

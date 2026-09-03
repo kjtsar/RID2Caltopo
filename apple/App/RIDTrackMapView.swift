@@ -2176,8 +2176,12 @@ private struct ClueSubmissionView: View {
                         .foregroundStyle(.secondary)
                     if terrainProjectionPending {
                         ProgressView("Intersecting camera sightline with DEM…")
+                    } else if let terrainProjection, terrainProjection.terrainProjectionApplied {
+                        Label(demProjectionLabel(terrainProjection), systemImage: "mountain.2")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     } else if terrainProjection != nil {
-                        Label("DEM terrain projection applied", systemImage: "mountain.2")
+                        Label("Flat-ground estimate; no DEM intersection", systemImage: "exclamationmark.triangle")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2258,13 +2262,16 @@ private struct ClueSubmissionView: View {
                 AppleLog.info(
                     "Clue",
                     String(
-                        format: "DEM projection aircraft=%@ lat=%.6f lng=%.6f heading=%@ aglM=%@ gimbal=%.1f",
+                        format: "DEM projection aircraft=%@ lat=%.6f lng=%.6f heading=%@ aglM=%@ gimbal=%.1f terrainApplied=%@ demSource=%@ demResolutionM=%@",
                         input.aircraftID,
                         refined.latitude,
                         refined.longitude,
                         input.headingDegrees.map { String(format: "%.1f", $0) } ?? "nil",
                         input.aglMeters.map { String(format: "%.1f", $0) } ?? "nil",
-                        input.gimbalAngleDegrees
+                        input.gimbalAngleDegrees,
+                        refined.terrainProjectionApplied ? "true" : "false",
+                        refined.demSource ?? "none",
+                        refined.demResolutionMeters.map { String(format: "%.1f", $0) } ?? "unknown"
                     )
                 )
             }
@@ -2311,6 +2318,7 @@ private struct ClueSubmissionView: View {
             "  Gimbal angle at capture: \(String(format: "%.1f°", gimbalAngle))",
             "  AGL: \(measurement(aglMeters.map { $0 * 3.28084 }, suffix: display?.aglStale == true ? "? ft" : " ft"))",
             "  AGL source: RID/barometric",
+            clueDemSummary(projection),
             "  ATO: \(measurement(display?.atoFeet, suffix: " ft"))",
             "  Distance to clue: \(measurement(clueDistanceFeet, suffix: " ft"))"
         ]
@@ -2376,6 +2384,35 @@ private struct ClueSubmissionView: View {
     private func measurement(_ value: Double?, suffix: String) -> String {
         guard let value, value.isFinite else { return "--" }
         return String(format: "%.0f%@", value, suffix)
+    }
+
+    private func demProjectionLabel(_ projection: OperationalClueProjection) -> String {
+        guard let resolution = projection.demResolutionMeters,
+              resolution.isFinite, resolution > 0
+        else { return "DEM terrain projection applied" }
+        return String(format: "DEM terrain projection applied (%.0f m grid)", resolution)
+    }
+
+    private func clueDemSummary(_ projection: OperationalClueProjection) -> String {
+        guard projection.terrainProjectionApplied else {
+            return "  DEM used: none (flat-ground estimate)"
+        }
+        let sourceLabel: String
+        if projection.demSource?.hasPrefix("usgs-geotiff-local-") == true {
+            sourceLabel = "local USGS GeoTIFF"
+        } else if projection.demSource == "usgs-epqs" || projection.demSource == nil {
+            sourceLabel = "USGS elevation service"
+        } else {
+            sourceLabel = projection.demSource ?? "USGS elevation data"
+        }
+        let resolutionLabel: String
+        if let resolution = projection.demResolutionMeters,
+           resolution.isFinite, resolution > 0 {
+            resolutionLabel = String(format: " (%.0f m grid)", resolution)
+        } else {
+            resolutionLabel = " (resolution not reported)"
+        }
+        return "  DEM used: \(sourceLabel)\(resolutionLabel)\(projection.demSampleStale ? ", cached" : "")"
     }
 
     private func headingMeasurement(_ value: Double?) -> String {
@@ -2671,8 +2708,6 @@ private struct StaticMapRenderState: Equatable {
 private struct AircraftTrackRenderInput: Equatable {
     let aircraftID: String
     let points: [AircraftMapPoint]
-    let operatorLatitude: Double?
-    let operatorLongitude: Double?
 
     init(track: RidAircraftTrack, seiPoints: [AppleSEIMapPoint]) {
         aircraftID = track.aircraftID
@@ -2693,8 +2728,6 @@ private struct AircraftTrackRenderInput: Equatable {
                 receivedAt: $0.receivedAt
             )
         }
-        operatorLatitude = track.lastObservation.operatorLatitude
-        operatorLongitude = track.lastObservation.operatorLongitude
     }
 }
 
@@ -3009,6 +3042,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
         private var tileFingerprint = ""
         private var staticRenderState: StaticMapRenderState?
         private var aircraftRenderState: AircraftMapRenderState?
+        private var aircraftAnnotationsByRemoteID: [String: AircraftAnnotation] = [:]
         private var operatorCoordinate: CLLocationCoordinate2D?
         private var operatorCircle: MKCircle?
         private var operatorAnnotation: OperatorDeviceAnnotation?
@@ -3315,9 +3349,6 @@ private struct OperationalMKMapView: UIViewRepresentable {
                     (overlay as? StyledPolyline)?.layer == .aircraft
                         || (overlay as? StyledPolygon)?.layer == .aircraft
                 })
-                map.removeAnnotations(map.annotations.filter { annotation in
-                    (annotation as? MapLayerAnnotation)?.mapLayer == .aircraft
-                })
             }
 
             if aircraftChanged {
@@ -3381,6 +3412,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
                     viewportHeight: map.bounds.height
                 ).map { ($0.id, $0) })
             }
+            var renderedAircraftIDs = Set<String>()
             for (index, track) in tracks.enumerated() {
                 let display = aircraftDisplay[track.aircraftID]
                     ?? AircraftMapDisplay(title: track.aircraftID, preference: PilotDisplayPreference(), showFullFlightTrack: false)
@@ -3440,8 +3472,10 @@ private struct OperationalMKMapView: UIViewRepresentable {
                             level: .aboveLabels
                         )
                     }
-                    map.addAnnotation(AircraftAnnotation(
-                        remoteID: track.aircraftID,
+                    let anchorPoint = map.convert(aircraftCoordinate, toPointTo: map)
+                    let annotation = aircraftAnnotationsByRemoteID[track.aircraftID]
+                        ?? AircraftAnnotation(remoteID: track.aircraftID)
+                    annotation.update(
                         coordinate: aircraftCoordinate,
                         title: display.title,
                         heading: travelBearingDegrees,
@@ -3451,25 +3485,25 @@ private struct OperationalMKMapView: UIViewRepresentable {
                         labelSide: index.isMultiple(of: 2) ? -1 : 1,
                         statusText: statusLabels[track.aircraftID] ?? "",
                         labelLayout: labelLayouts[track.aircraftID],
-                        anchorScreen: {
-                            let point = map.convert(aircraftCoordinate, toPointTo: map)
-                            return MapScreenPoint(x: point.x, y: point.y)
-                        }(),
+                        anchorScreen: MapScreenPoint(x: anchorPoint.x, y: anchorPoint.y),
                         focused: focusedAircraftID == track.aircraftID
-                    ))
+                    )
+                    if aircraftAnnotationsByRemoteID[track.aircraftID] == nil {
+                        aircraftAnnotationsByRemoteID[track.aircraftID] = annotation
+                        map.addAnnotation(annotation)
+                    } else if let view = map.view(for: annotation) as? AircraftAnnotationView {
+                        view.configure(annotation)
+                    }
+                    renderedAircraftIDs.insert(track.aircraftID)
                 }
-                if let latitude = track.lastObservation.operatorLatitude,
-                   let longitude = track.lastObservation.operatorLongitude,
-                   latitude != 0, longitude != 0 {
-                    map.addAnnotation(ArtifactAnnotation(
-                        coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
-                        title: "Operator \(display.title)",
-                        symbol: "person.wave.2",
-                        color: activeColor,
-                        colorHex: nil,
-                        mapLayer: .aircraft
-                    ))
+            }
+            let retiredAircraftIDs = Set(aircraftAnnotationsByRemoteID.keys)
+                .subtracting(renderedAircraftIDs)
+            for remoteID in retiredAircraftIDs {
+                guard let annotation = aircraftAnnotationsByRemoteID.removeValue(forKey: remoteID) else {
+                    continue
                 }
+                map.removeAnnotation(annotation)
             }
             if followFocusedDrone,
                let focusedAircraftID,
@@ -4539,20 +4573,24 @@ private final class StyledPolygon: MKPolygon {
 private final class AircraftAnnotation: NSObject, MKAnnotation, MapLayerAnnotation {
     let mapLayer = OperationalMapRenderLayer.aircraft
     let remoteID: String
-    dynamic let coordinate: CLLocationCoordinate2D
-    let title: String?
-    let heading: Double?
+    @objc dynamic var coordinate = CLLocationCoordinate2D()
+    var title: String?
+    var heading: Double?
     var cameraFov: CameraFovBoundaryBearings?
-    let color: UIColor
-    let inset: Bool
-    let labelSide: Int
-    let statusText: String
-    let labelLayout: MapAircraftLabelLayout?
-    let anchorScreen: MapScreenPoint
-    let focused: Bool
+    var color = UIColor.systemBlue
+    var inset = false
+    var labelSide = 1
+    var statusText = ""
+    var labelLayout: MapAircraftLabelLayout?
+    var anchorScreen = MapScreenPoint(x: 0, y: 0)
+    var focused = false
 
-    init(
-        remoteID: String,
+    init(remoteID: String) {
+        self.remoteID = remoteID
+        super.init()
+    }
+
+    func update(
         coordinate: CLLocationCoordinate2D,
         title: String,
         heading: Double?,
@@ -4565,7 +4603,6 @@ private final class AircraftAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
         anchorScreen: MapScreenPoint,
         focused: Bool
     ) {
-        self.remoteID = remoteID
         self.coordinate = coordinate
         self.title = title
         self.heading = heading
@@ -4577,7 +4614,6 @@ private final class AircraftAnnotation: NSObject, MKAnnotation, MapLayerAnnotati
         self.labelLayout = labelLayout
         self.anchorScreen = anchorScreen
         self.focused = focused
-        super.init()
     }
 }
 

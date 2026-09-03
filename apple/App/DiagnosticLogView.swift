@@ -1,15 +1,17 @@
 import SwiftUI
+import MessageUI
 
 struct DiagnosticLogView: View {
     @ObservedObject var diagnostics: AppleDiagnosticsCenter
+    @State private var showingMailComposer = false
 
     var body: some View {
         List {
             Section {
-                Text("Select the same way you would on Android. Today is selected automatically; the resulting compressed ZIP includes device and app details, each selected log, and matching JSON track archives.")
+                Text("Today is selected automatically. The compressed ZIP includes device and app details and each selected log. Track files are optional and off by default because they contain aircraft locations.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Text("You choose where to send it. The bundle can contain Remote IDs, aircraft positions, the app-install coordination identifier, local network addresses, and operational status. It never includes the CalTopo credential secret.")
+                Text("Diagnostic log messages omit location details. The bundle can contain Remote IDs, the app-install coordination identifier, local network addresses, and operational status. It never includes the CalTopo credential secret.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -58,6 +60,11 @@ struct DiagnosticLogView: View {
                         .buttonStyle(.plain)
                     }
                 }
+
+                Toggle("Include JSON track files", isOn: $diagnostics.includeTracks)
+                Text("Off by default. Track files contain aircraft positions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -70,12 +77,23 @@ struct DiagnosticLogView: View {
                     ProgressView("Preparing log bundle…")
                 }
                 if let bundleURL = diagnostics.bundleURL {
-                    ShareLink(
-                        item: bundleURL,
-                        subject: Text("RID2Caltopo Logs"),
-                        message: Text("RID2Caltopo field-test diagnostic logs")
-                    ) {
-                        Label("Send Logs via…", systemImage: "square.and.arrow.up")
+                    if MFMailComposeViewController.canSendMail() {
+                        Button {
+                            showingMailComposer = true
+                        } label: {
+                            Label("Email diagnostics to developer", systemImage: "envelope")
+                        }
+                        .sheet(isPresented: $showingMailComposer) {
+                            DiagnosticMailComposer(attachmentURL: bundleURL)
+                        }
+                    } else {
+                        ShareLink(
+                            item: bundleURL,
+                            subject: Text("RID2Caltopo Diagnostics"),
+                            message: Text("Please send these diagnostics to help@uas4sar.com")
+                        ) {
+                            Label("Share diagnostics…", systemImage: "square.and.arrow.up")
+                        }
                     }
                 }
                 Text(diagnostics.status)
@@ -89,7 +107,42 @@ struct DiagnosticLogView: View {
                 }
             }
         }
-        .navigationTitle("Send App Logs")
+        .navigationTitle("Send Diagnostics")
         .task { await diagnostics.beginPackagingSession() }
+    }
+}
+
+private struct DiagnosticMailComposer: UIViewControllerRepresentable {
+    let attachmentURL: URL
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIViewController(context: Context) -> MFMailComposeViewController {
+        let composer = MFMailComposeViewController()
+        composer.mailComposeDelegate = context.coordinator
+        composer.setToRecipients(["help@uas4sar.com"])
+        composer.setSubject("RID2Caltopo Diagnostics")
+        composer.setMessageBody("RID2Caltopo diagnostic bundle attached.", isHTML: false)
+        if let data = try? Data(contentsOf: attachmentURL) {
+            composer.addAttachmentData(
+                data,
+                mimeType: "application/zip",
+                fileName: attachmentURL.lastPathComponent
+            )
+        }
+        return composer
+    }
+
+    func updateUIViewController(_ uiViewController: MFMailComposeViewController, context: Context) {}
+
+    final class Coordinator: NSObject, @MainActor MFMailComposeViewControllerDelegate {
+        @MainActor
+        func mailComposeController(
+            _ controller: MFMailComposeViewController,
+            didFinishWith result: MFMailComposeResult,
+            error: Error?
+        ) {
+            controller.dismiss(animated: true)
+        }
     }
 }

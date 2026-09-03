@@ -54,13 +54,13 @@ struct AboutPrivacyView: View {
             }
 
             Section("Logs and deletion") {
-                Text("You choose which log days to package and where to send the bundle. A bundle may contain Remote IDs, aircraft positions, the app-install coordination identifier, app events, device and OS details, local network addresses, and operational status.")
-                Text("Nothing is transmitted by log sharing until you choose a destination in the iOS share sheet. Local logs and track archives can be removed through the Files app. An iCloud backup remains until you remove it from iCloud Drive; deleting RID2Caltopo removes local data and the local backup passphrase. CalTopo and the configured tracker control retention of data sent to them.")
+                Text("You choose which log days to package. Diagnostic log messages omit location details. JSON track files contain aircraft positions and are excluded unless you explicitly include them.")
+                Text("Nothing is transmitted until you send the prepared email or choose another destination. Local logs and track archives can be removed through the Files app. An iCloud backup remains until you remove it from iCloud Drive; deleting RID2Caltopo removes local data and the local backup passphrase. CalTopo and the configured tracker control retention of data sent to them.")
             }
 
             Section("Contact") {
                 Link("RID2Caltopo website", destination: URL(string: "https://rid2caltopo.com/")!)
-                Link("kjt@uas4sar.com", destination: URL(string: "mailto:kjt@uas4sar.com")!)
+                Link("help@uas4sar.com", destination: URL(string: "mailto:help@uas4sar.com")!)
             }
         }
         .navigationTitle("About & Privacy")

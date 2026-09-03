@@ -73,6 +73,22 @@ class R2CActivityLogArchiveTest {
     }
 
     @Test
+    fun diagnosticBundleRedactsCoordinatesFromHistoricalTextLogs() {
+        val text = """
+            INFO Location Published lat=39.153017 lng=-121.133046 accuracy=7
+            INFO Location authorization changed
+            DEBUG NOTAM geometry={"coordinates":[-121.72,38.21]}
+        """.trimIndent() + "\n"
+
+        assertEquals(
+            "[location details redacted]\n" +
+                "INFO Location authorization changed\n" +
+                "[location details redacted]\n",
+            redactDiagnosticLogText(text),
+        )
+    }
+
+    @Test
     fun trackerReauthenticationOpensOnlyOneBrowserAttemptAtATime() {
         assertTrue(shouldOpenTrackerReauthentication(browserAlreadyOpen = false))
         assertFalse(shouldOpenTrackerReauthentication(browserAlreadyOpen = true))

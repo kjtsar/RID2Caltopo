@@ -127,6 +127,7 @@ private enum AppleManagedVideoRecordingCatalog {
                   ]),
                   values.isRegularFile == true,
                   (values.fileSize ?? 0) > 0,
+                  ManagedVideoRecordingIdentity.isCompletedRecordingPath(url.path),
                   let modified = values.contentModificationDate,
                   modified >= sessionStartedAt,
                   now.timeIntervalSince(modified) >= 3

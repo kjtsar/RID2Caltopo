@@ -67,6 +67,14 @@ public enum ManagedVideoRecordingIdentity {
         return "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20).prefix(12))"
     }
 
+    /// MediaMTX's raw UTC name remains visible while the current segment is
+    /// still being written. Only localized names are safe to advertise as
+    /// completed recordings because finalization renames the file and changes
+    /// the path-derived session identifier.
+    public static func isCompletedRecordingPath(_ path: String) -> Bool {
+        localizedMediaMTXRecordingURL(for: URL(fileURLWithPath: path)) == nil
+    }
+
     public static func recordingStartedAt(forPath path: String) -> Date? {
         let filename = URL(fileURLWithPath: path)
             .deletingPathExtension()

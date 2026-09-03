@@ -53,6 +53,7 @@ import java.io.*;
 import java.util.concurrent.Future;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.regex.Pattern;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -1059,7 +1060,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     DateTimeFormatter formatter = DateTimeFormatter.ofPattern(
                             "ddLLLHHmmss.SSS z XXX", Locale.US);
                     msg = String.format(Locale.US, "%s %s: %s %s\n  ", type,
-                            ZonedDateTime.now().format(formatter), tag, msg);
+                            ZonedDateTime.now().format(formatter), tag,
+                            RedactLocationFromDiagnosticMessage(msg));
                 }
                 byte[] bytes = msg.getBytes();
                 BytesWrittenToDebugOutputStream += bytes.length;
@@ -1072,6 +1074,27 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 Log.e(TAG, "CTError: CTLog(): Sorry.  Maximum debugging output file size reached.  Future bits will be tossed on the floor.");
             }
         }
+    }
+
+    private static final Pattern DIAGNOSTIC_COORDINATE_KEY_VALUE = Pattern.compile(
+            "(?i)(?:\\b(?:lat(?:itude)?|lon(?:gitude)?|lng)\\b)\\s*(?:=|:|%3d)\\s*[-+]?\\d{1,3}(?:\\.\\d+)?");
+    private static final Pattern DIAGNOSTIC_COORDINATE_CONTAINER = Pattern.compile(
+            "(?i)(?:[\\\"]coordinates[\\\"]\\s*:|<coordinates>|\\b(?:center|bbox|bounds)\\s*=\\s*[-+]?\\d"
+                    + "|[-+]?\\d{1,8}\\.\\d{4,}\\s*,\\s*[-+]?\\d{1,8}\\.\\d{4,}"
+                    + "|\\bz=\\d+\\s+x=\\d+\\s+y=\\d+|/tile/\\d+/\\d+/\\d+"
+                    + "|\\b[ns]\\d{1,2}[ew]\\d{1,3}\\b)");
+    private static final Pattern DIAGNOSTIC_LOCATION_PAYLOAD = Pattern.compile(
+            "(?i)(?:DJI_SEI_(?:HEX|PAYLOAD)[^\\n]*\\bpayload=)");
+
+    @NonNull
+    public static String RedactLocationFromDiagnosticMessage(@Nullable String message) {
+        if (message == null) return "";
+        if (DIAGNOSTIC_COORDINATE_KEY_VALUE.matcher(message).find()
+                || DIAGNOSTIC_COORDINATE_CONTAINER.matcher(message).find()
+                || DIAGNOSTIC_LOCATION_PAYLOAD.matcher(message).find()) {
+            return "[location details redacted]";
+        }
+        return message;
     }
 
     public static void CTEvent(@NonNull String tag, @NonNull String eventName, @Nullable Bundle parameters) {

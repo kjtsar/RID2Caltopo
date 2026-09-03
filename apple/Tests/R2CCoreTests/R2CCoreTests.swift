@@ -2604,7 +2604,7 @@ private func proximityDrone(
         gimbalAngleDegrees: -45,
         sampleElevationMeters: { latitude, _ in
             let northMeters = (latitude - 39) * 111_195
-            return max(0, northMeters * 0.5)
+            return OperationalTerrainSample(elevationMeters: max(0, northMeters * 0.5))
         }
     )
     let northMeters = (projected.latitude - 39) * 111_195
@@ -2612,6 +2612,34 @@ private func proximityDrone(
     #expect(northMeters < 68)
     #expect((projected.altitudeMeters ?? 0) > 33)
     #expect((projected.altitudeMeters ?? 0) < 34)
+    #expect(projected.terrainProjectionApplied)
+}
+
+@Test func operationalClueProjectionFollowsShallowSightlineAcrossDescendingTerrain() async {
+    let projected = await OperationalClueGeometry.projectWithTerrain(
+        droneLatitude: 39,
+        droneLongitude: -105,
+        droneAltitudeMeters: 1_030,
+        headingDegrees: 0,
+        aglMeters: 30,
+        gimbalAngleDegrees: -8,
+        sampleElevationMeters: { latitude, _ in
+            let northMeters = max(0, (latitude - 39) * 111_195)
+            let groundMeters = northMeters <= 1_500
+                ? 1_000 - (northMeters * 0.2)
+                : 700 + ((northMeters - 1_500) * 0.1)
+            return OperationalTerrainSample(
+                elevationMeters: groundMeters,
+                source: "usgs-geotiff-local-1m",
+                horizontalResolutionMeters: 1
+            )
+        }
+    )
+    let northMeters = (projected.latitude - 39) * 111_195
+    #expect(northMeters > 1_900)
+    #expect(northMeters < 2_100)
+    #expect(projected.terrainProjectionApplied)
+    #expect(projected.demResolutionMeters == 1)
 }
 
 @Test func centerpointElevationTapRequiresTheConfiguredCenterRadius() {
@@ -4490,6 +4518,15 @@ private func proximityDrone(
         for: source,
         timeZone: pacific
     ) == nil)
+}
+
+@Test func managedVideoRecordingIdentityAdvertisesOnlyFinalizedPath() {
+    #expect(!ManagedVideoRecordingIdentity.isCompletedRecordingPath(
+        "/CapturedStreams/1SAR7/1SAR7_2026-09-02_18-41-08-123456.mp4"
+    ))
+    #expect(ManagedVideoRecordingIdentity.isCompletedRecordingPath(
+        "/CapturedStreams/1SAR7/1SAR7_02Sep2026_114108_PDT.mp4"
+    ))
 }
 
 @Test func caltopoArchiveDescriptionIncludesOnlyCapturedVideo() throws {

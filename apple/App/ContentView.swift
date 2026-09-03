@@ -149,7 +149,7 @@ struct ContentView: View {
                     )
                     Menu {
                         Button("Live View", systemImage: "video") { showTrackMap = true }
-                        Button("Send app log to Ken…", systemImage: "square.and.arrow.up") {
+                        Button("Send diagnostics to developer…", systemImage: "square.and.arrow.up") {
                             showDiagnosticLogs = true
                         }
                         Button("Status", systemImage: "info.circle") { showStatus = true }
@@ -1850,7 +1850,7 @@ struct ContentView: View {
                 }
             } label: { LabeledContent("CalTopo publishing", value: ridTracks.caltopoStatus) }
             NavigationLink { DiagnosticLogView(diagnostics: diagnostics) } label: {
-                Label("Send app log to Ken…", systemImage: "doc.zipper")
+                Label("Send diagnostics to developer…", systemImage: "doc.zipper")
             }
         }
     }

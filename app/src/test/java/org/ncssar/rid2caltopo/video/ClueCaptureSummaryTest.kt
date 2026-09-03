@@ -35,7 +35,10 @@ class ClueCaptureSummaryTest {
                 bitmap = null,
                 preview = null,
                 title = "Clue",
-                description = ""
+                description = "",
+                terrainProjectionApplied = true,
+                demSource = "usgs-geotiff-local-1m",
+                demResolutionMeters = 1.0,
             ),
             CoordinateDisplayFormat.USNG,
         )
@@ -45,7 +48,20 @@ class ClueCaptureSummaryTest {
         assertTrue(summary.contains("  Gimbal angle at capture: -45.0°"))
         assertTrue(summary.contains("  AGL: 82'"))
         assertTrue(summary.contains("  ATO: 131'"))
+        assertTrue(summary.contains("  DEM used: local USGS GeoTIFF (1 m grid)"))
         assertTrue(summary.contains("  Distance to clue:"))
+    }
+
+    @Test
+    fun clueDemSummary_distinguishesFlatFallbackFromUnknownOnlineResolution() {
+        assertEquals(
+            "  DEM used: none (flat-ground estimate)",
+            formatClueDemSummary(false, null, null, false),
+        )
+        assertEquals(
+            "  DEM used: USGS elevation service (resolution not reported), cached",
+            formatClueDemSummary(true, "usgs-epqs", null, true),
+        )
     }
 
     @Test

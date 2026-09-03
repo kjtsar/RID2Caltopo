@@ -169,6 +169,11 @@ internal fun buildDiagnosticArchiveEntryName(relativePath: String, mimeType: Str
     return if (parent.isBlank()) archiveLeaf else "$parent/$archiveLeaf"
 }
 
+internal fun redactDiagnosticLogText(text: String): String =
+    text.lineSequence().joinToString("\n") { line ->
+        CaltopoClient.RedactLocationFromDiagnosticMessage(line)
+    }
+
 internal fun shouldShowBluetoothDisabledPanel(
     adapterPresent: Boolean,
     bluetoothEnabled: Boolean,
@@ -776,7 +781,11 @@ class R2CActivity :
      * Zip text log files from one or more archive subdirectories into a single archive and fire
      * a share intent so the user can email the bundle.
      */
-    suspend fun zipAndEmailSelectedLogs(context: Context, selectedDirectoryNames: List<String>) {
+    suspend fun zipAndEmailSelectedLogs(
+        context: Context,
+        selectedDirectoryNames: List<String>,
+        includeTracks: Boolean = false,
+    ) {
         val zipResult = withContext(Dispatchers.IO) {
             val archiveDir = CaltopoClient.GetArchiveDir() ?: run {
                 CTError(TAG, "zipAndEmailSelectedLogs(): archive dir unavailable")
@@ -812,6 +821,8 @@ class R2CActivity :
             }
             val diagnosticFiles = selectedDirs.flatMap { dir ->
                 collectDiagnosticDocuments(dir, dir.name ?: "tracks")
+            }.filter { diagnostic ->
+                includeTracks || !diagnostic.relativePath.lowercase(Locale.US).endsWith(".json")
             }
             val logFileCount = diagnosticFiles.count {
                 !it.relativePath.lowercase(Locale.US).endsWith(".json")
@@ -839,7 +850,14 @@ class R2CActivity :
                                 entry.time = lastModified
                             }
                             zos.putNextEntry(entry)
-                            inputStream.copyTo(zos)
+                            if (diagnostic.relativePath.lowercase(Locale.US).endsWith(".json")) {
+                                inputStream.copyTo(zos)
+                            } else {
+                                val redacted = redactDiagnosticLogText(
+                                    inputStream.bufferedReader().use { it.readText() }
+                                )
+                                zos.write(redacted.toByteArray(Charsets.UTF_8))
+                            }
                             zos.closeEntry()
                         }
                     }
@@ -871,7 +889,7 @@ class R2CActivity :
 
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/zip"
-            putExtra(Intent.EXTRA_EMAIL, arrayOf("kjt@uas4sar.com"))
+            putExtra(Intent.EXTRA_EMAIL, arrayOf("help@uas4sar.com"))
             putExtra(
                 Intent.EXTRA_SUBJECT,
                 "RID2Caltopo Diagnostics $dateTag (${selectedDirCount} day${if (selectedDirCount == 1) "" else "s"}, ${logFileCount} log${if (logFileCount == 1) "" else "s"}, ${trackFileCount} track${if (trackFileCount == 1) "" else "s"})"
@@ -880,7 +898,7 @@ class R2CActivity :
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        startActivity(Intent.createChooser(intent, "Send Logs via..."))
+        startActivity(Intent.createChooser(intent, "Send diagnostics via..."))
     }
 
     /** Handle organization/configuration and tracker-enrollment links from the OS. */
@@ -1235,8 +1253,12 @@ class R2CActivity :
                             availableLogArchiveDaysProvider = {
                                 listAvailableLogArchiveDays()
                             },
-                            onEmailLog = { selectedDirectoryNames ->
-                                zipAndEmailSelectedLogs(localContext, selectedDirectoryNames)
+                            onEmailLog = { selectedDirectoryNames, includeTracks ->
+                                zipAndEmailSelectedLogs(
+                                    localContext,
+                                    selectedDirectoryNames,
+                                    includeTracks,
+                                )
                             },
                             availableArchiveCleanupDirectoriesProvider = {
                                 listArchiveCleanupDirectories()

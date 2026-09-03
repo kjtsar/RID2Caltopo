@@ -4,6 +4,7 @@ import org.junit.Test
 import kotlinx.coroutines.runBlocking
 import kotlin.math.cos
 import org.ncssar.rid2caltopo.video.ffmpeg.DjiCameraOrientation
+import org.ncssar.rid2caltopo.video.mapcache.DemElevationSample
 
 class ClueProjectionTest {
     @Test
@@ -116,14 +117,42 @@ class ClueProjectionTest {
             gimbalAngleDeg = -31.0,
             sampleElevationMeters = { lat, lng ->
                 if (kotlin.math.abs(lat - 39.153294) < 1e-6 && kotlin.math.abs(lng + 121.132378) < 1e-6) {
-                    1563.3
+                    DemElevationSample(1563.3, false, "usgs-geotiff-local-1m", 1.0)
                 } else {
-                    1545.0
+                    DemElevationSample(1545.0, false, "usgs-geotiff-local-1m", 1.0)
                 }
             },
         )
 
         assertTrue("expected DEM-refined projection to stay ahead of the drone", projection.lng < -121.1325)
         assertTrue("expected downhill terrain to lower projected ground elevation", projection.alt < 529.2)
+    }
+
+    @Test
+    fun projectClueLocationWithDemSamples_followsShallowSightlineAcrossDescendingTerrain() = runBlocking {
+        val droneLat = 39.0
+        val projection = projectClueLocationWithDemSamples(
+            droneLat = droneLat,
+            droneLng = -105.0,
+            droneAlt = 1_030.0,
+            headingDeg = 0.0,
+            aglMeters = 30.0,
+            gimbalAngleDeg = -8.0,
+            sampleElevationMeters = { lat, _ ->
+                val northMeters = ((lat - droneLat) * 111_195.0).coerceAtLeast(0.0)
+                val groundMeters = if (northMeters <= 1_500.0) {
+                    1_000.0 - (northMeters * 0.2)
+                } else {
+                    700.0 + ((northMeters - 1_500.0) * 0.1)
+                }
+                DemElevationSample(groundMeters, false, "usgs-geotiff-local-1m", 1.0)
+            },
+        )
+
+        val northMeters = (projection.lat - droneLat) * 111_195.0
+        assertTrue("expected terrain intersection beyond the old shallow-angle search", northMeters > 1_900.0)
+        assertTrue("expected terrain intersection near the far hillside", northMeters < 2_100.0)
+        assertTrue(projection.terrainProjectionApplied)
+        assertEquals(1.0, projection.demResolutionMeters ?: 0.0, 0.0)
     }
 }

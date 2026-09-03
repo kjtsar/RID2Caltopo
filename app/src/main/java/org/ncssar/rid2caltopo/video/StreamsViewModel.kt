@@ -113,6 +113,7 @@ import org.ncssar.rid2caltopo.video.streamTelemetryPairingControlAction
 import org.ncssar.rid2caltopo.video.streamTelemetryPairingWarning
 import org.ncssar.rid2caltopo.video.toJson
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
+import org.ncssar.rid2caltopo.video.mapcache.DemElevationSample
 
 data class PendingClue(
     val droneSpec: CtDroneSpec,
@@ -136,6 +137,10 @@ data class PendingClue(
     val streamTelemetrySummary: String? = null,
     val aircraftPositionSourceLabel: String = "RID",
     val aglSourceLabel: String? = null,
+    val terrainProjectionApplied: Boolean = false,
+    val demSource: String? = null,
+    val demResolutionMeters: Double? = null,
+    val demSampleStale: Boolean = false,
 )
 
 internal data class CenterpointElevationSample(
@@ -397,6 +402,10 @@ internal data class ClueProjection(
     val lat: Double,
     val lng: Double,
     val alt: Double,
+    val terrainProjectionApplied: Boolean = false,
+    val demSource: String? = null,
+    val demResolutionMeters: Double? = null,
+    val demSampleStale: Boolean = false,
 )
 
 internal fun buildClueDescriptionTemplate(
@@ -440,11 +449,38 @@ internal fun buildClueCaptureSummary(
     } ?: "  AGL: N/A"
     clue.aglSourceLabel?.let { lines += "  AGL source: $it" }
     lines += "  Aircraft position source: ${clue.aircraftPositionSourceLabel}"
+    lines += formatClueDemSummary(
+        terrainProjectionApplied = clue.terrainProjectionApplied,
+        demSource = clue.demSource,
+        demResolutionMeters = clue.demResolutionMeters,
+        demSampleStale = clue.demSampleStale,
+    )
     lines += clue.atoMeters?.let {
         String.format(Locale.US, "  ATO: %.0f'", it * METERS_TO_FEET)
     } ?: "  ATO: N/A"
     lines += String.format(Locale.US, "  Distance to clue: %.0f'", clueDistanceMeters(clue) * METERS_TO_FEET)
     return lines.joinToString("\n")
+}
+
+internal fun formatClueDemSummary(
+    terrainProjectionApplied: Boolean,
+    demSource: String?,
+    demResolutionMeters: Double?,
+    demSampleStale: Boolean,
+): String {
+    if (!terrainProjectionApplied) return "  DEM used: none (flat-ground estimate)"
+    val sourceLabel = when {
+        demSource?.startsWith("usgs-geotiff-local-") == true -> "local USGS GeoTIFF"
+        demSource == "usgs-epqs" -> "USGS elevation service"
+        demSource.isNullOrBlank() -> "USGS elevation data"
+        else -> demSource
+    }
+    val resolutionLabel = demResolutionMeters
+        ?.takeIf { it.isFinite() && it > 0.0 }
+        ?.let { " (${String.format(Locale.US, "%.0f", it)} m grid)" }
+        ?: " (resolution not reported)"
+    val staleLabel = if (demSampleStale) ", cached" else ""
+    return "  DEM used: $sourceLabel$resolutionLabel$staleLabel"
 }
 
 private fun clueDistanceMeters(clue: PendingClue): Double {
@@ -579,7 +615,7 @@ internal suspend fun projectClueLocationWithDem(
         aglMeters = aglMeters,
         gimbalAngleDeg = gimbalAngleDeg,
         sampleElevationMeters = { lat, lng ->
-            demElevationService.sampleElevationMeters(lat, lng)?.elevationMeters
+            demElevationService.sampleElevationMeters(lat, lng)
         },
     )
 }
@@ -591,7 +627,7 @@ internal suspend fun projectClueLocationWithDemSamples(
     headingDeg: Double?,
     aglMeters: Double?,
     gimbalAngleDeg: Double,
-    sampleElevationMeters: suspend (Double, Double) -> Double?,
+    sampleElevationMeters: suspend (Double, Double) -> DemElevationSample?,
 ): ClueProjection {
     val flatProjection = projectClueLocation(
         droneLat = droneLat,
@@ -618,19 +654,20 @@ internal suspend fun projectClueLocationWithDemSamples(
     if (!flatDistanceM.isFinite() || flatDistanceM <= 0.0) return flatProjection
 
     val flatGroundM = droneAlt - validAgl
-    val droneDemRaw = sampleElevationMeters(droneLat, droneLng)?.takeIf { it.isFinite() }
+    val droneDemSample = sampleElevationMeters(droneLat, droneLng)
+    val droneDemRaw = droneDemSample?.elevationMeters?.takeIf { it.isFinite() }
     val demScaleToMeters = inferDemScaleToMeters(
         droneAltMeters = droneAlt,
         knownGroundMeters = flatGroundM,
         droneDemRaw = droneDemRaw,
     )
 
-    val maxDistanceM = (maxOf(flatDistanceM * 3.0, flatDistanceM + 250.0)).coerceIn(60.0, 2_500.0)
-    val stepM = when {
-        maxDistanceM <= 180.0 -> 10.0
-        maxDistanceM <= 600.0 -> 20.0
-        else -> 30.0
-    }
+    // A shallow sightline over falling terrain may stay above the ground for kilometres.
+    // Search far enough to reach the visible terrain instead of sizing the DEM walk from
+    // the flat-ground answer, which is shortest exactly when the terrain drops away.
+    val usingLocalDem = droneDemSample?.source?.startsWith("usgs-geotiff-local-") == true
+    val maxDistanceM = if (usingLocalDem) 10_000.0 else 2_500.0
+    val stepM = if (usingLocalDem) 50.0 else 100.0
 
     var previousDistanceM = 0.0
     var previousPoint = Pair(droneLat, droneLng)
@@ -644,13 +681,27 @@ internal suspend fun projectClueLocationWithDemSamples(
             bearingDeg = validHeading,
             distanceM = distanceM,
         )
-        val candidateDemRaw = sampleElevationMeters(candidate.first, candidate.second)
-        val groundM = normalizeDemGroundMeters(
+        val sampledCandidate = sampleElevationMeters(candidate.first, candidate.second)
+        if (usingLocalDem && sampledCandidate?.source?.startsWith("usgs-geotiff-local-") != true) {
+            break
+        }
+        if (sampledCandidate == null) {
+            distanceM += stepM
+            continue
+        }
+        val candidateDemSample = sampledCandidate
+        val candidateDemRaw = candidateDemSample.elevationMeters
+        val sampledGroundM = normalizeDemGroundMeters(
             candidateDemRaw = candidateDemRaw,
             droneDemRaw = droneDemRaw,
             flatGroundM = flatGroundM,
             demScaleToMeters = demScaleToMeters,
-        ) ?: previousGroundM
+        )
+        if (sampledGroundM == null) {
+            distanceM += stepM
+            continue
+        }
+        val groundM = checkNotNull(sampledGroundM)
         val rayAltitudeM = droneAlt - (slopeDown * distanceM)
         if (rayAltitudeM <= groundM) {
             var lowDistanceM = previousDistanceM
@@ -668,8 +719,9 @@ internal suspend fun projectClueLocationWithDemSamples(
                     bearingDeg = validHeading,
                     distanceM = midDistanceM,
                 )
+                val midDemSample = sampleElevationMeters(midPoint.first, midPoint.second)
                 val midGroundM = normalizeDemGroundMeters(
-                    candidateDemRaw = sampleElevationMeters(midPoint.first, midPoint.second),
+                    candidateDemRaw = midDemSample?.elevationMeters,
                     droneDemRaw = droneDemRaw,
                     flatGroundM = flatGroundM,
                     demScaleToMeters = demScaleToMeters,
@@ -690,6 +742,10 @@ internal suspend fun projectClueLocationWithDemSamples(
                 lat = highPoint.first,
                 lng = highPoint.second,
                 alt = highGroundM,
+                terrainProjectionApplied = true,
+                demSource = candidateDemSample.source,
+                demResolutionMeters = candidateDemSample.horizontalResolutionMeters,
+                demSampleStale = candidateDemSample.stale,
             )
         }
         previousDistanceM = distanceM
@@ -2237,6 +2293,10 @@ class StreamsViewModel(
                 lng = projection.lng,
                 alt = projection.alt,
                 gimbalAngleDeg = gimbalAngleDeg,
+                terrainProjectionApplied = false,
+                demSource = null,
+                demResolutionMeters = null,
+                demSampleStale = false,
             )
         }?.also { requestDemClueProjectionRefresh(it.designator) }
     }
@@ -2258,6 +2318,10 @@ class StreamsViewModel(
                 alt = projection.alt,
                 headingDeg = normalizedHeading,
                 headingSourceLabel = "Operator adjusted",
+                terrainProjectionApplied = false,
+                demSource = null,
+                demResolutionMeters = null,
+                demSampleStale = false,
             )
         }?.also { requestDemClueProjectionRefresh(it.designator) }
     }
@@ -2388,10 +2452,14 @@ class StreamsViewModel(
                     alt = refined.alt,
                     aglMeters = projectionAglMeters,
                     aglSourceLabel = current.aglSourceLabel,
+                    terrainProjectionApplied = refined.terrainProjectionApplied,
+                    demSource = refined.demSource,
+                    demResolutionMeters = refined.demResolutionMeters,
+                    demSampleStale = refined.demSampleStale,
                 )
                 CTDebug(tag, String.format(
                     Locale.US,
-                    "requestDemClueProjectionRefresh(%s): refined projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f headingDeg=%s aglM=%s gimbalDeg=%.1f",
+                    "requestDemClueProjectionRefresh(%s): refined projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f headingDeg=%s aglM=%s gimbalDeg=%.1f terrainApplied=%s demSource=%s demResolutionM=%s",
                     clue.designator,
                     refined.lat,
                     refined.lng,
@@ -2399,6 +2467,9 @@ class StreamsViewModel(
                     clue.headingDeg?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
                     clue.aglMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
                     clue.gimbalAngleDeg,
+                    refined.terrainProjectionApplied,
+                    refined.demSource ?: "none",
+                    refined.demResolutionMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "unknown",
                 ))
             }
         }

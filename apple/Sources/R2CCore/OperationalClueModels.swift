@@ -88,11 +88,27 @@ public struct OperationalClueProjection: Sendable, Equatable {
     public let latitude: Double
     public let longitude: Double
     public let altitudeMeters: Double?
+    public let terrainProjectionApplied: Bool
+    public let demSource: String?
+    public let demResolutionMeters: Double?
+    public let demSampleStale: Bool
 
-    public init(latitude: Double, longitude: Double, altitudeMeters: Double?) {
+    public init(
+        latitude: Double,
+        longitude: Double,
+        altitudeMeters: Double?,
+        terrainProjectionApplied: Bool = false,
+        demSource: String? = nil,
+        demResolutionMeters: Double? = nil,
+        demSampleStale: Bool = false
+    ) {
         self.latitude = latitude
         self.longitude = longitude
         self.altitudeMeters = altitudeMeters
+        self.terrainProjectionApplied = terrainProjectionApplied
+        self.demSource = demSource
+        self.demResolutionMeters = demResolutionMeters
+        self.demSampleStale = demSampleStale
     }
 }
 
@@ -337,7 +353,7 @@ public enum OperationalClueGeometry {
         headingDegrees: Double?,
         aglMeters: Double?,
         gimbalAngleDegrees: Double,
-        sampleElevationMeters: @Sendable (Double, Double) async -> Double?
+        sampleElevationMeters: @Sendable (Double, Double) async -> OperationalTerrainSample?
     ) async -> OperationalClueProjection {
         let flatProjection = project(
             droneLatitude: droneLatitude,
@@ -362,14 +378,18 @@ public enum OperationalClueGeometry {
         guard flatDistance.isFinite, flatDistance > 0 else { return flatProjection }
 
         let flatGround = droneAltitudeMeters - aglMeters
-        let droneDEM = await sampleElevationMeters(droneLatitude, droneLongitude)
+        let droneDEMSample = await sampleElevationMeters(droneLatitude, droneLongitude)
+        let droneDEM = droneDEMSample?.elevationMeters
         let scale = inferDEMScaleToMeters(
             droneAltitudeMeters: droneAltitudeMeters,
             knownGroundMeters: flatGround,
             droneDEM: droneDEM
         )
-        let maximumDistance = min(2_500, max(60, max(flatDistance * 3, flatDistance + 250)))
-        let step = maximumDistance <= 180 ? 10.0 : (maximumDistance <= 600 ? 20.0 : 30.0)
+        // A shallow sightline over falling terrain may stay above the ground for kilometres.
+        // Do not derive the terrain-search limit from the short flat-ground estimate.
+        let usingLocalDEM = droneDEMSample?.source?.hasPrefix("usgs-geotiff-local-") == true
+        let maximumDistance = usingLocalDEM ? 10_000.0 : 2_500.0
+        let step = usingLocalDEM ? 50.0 : 100.0
 
         var previousDistance = 0.0
         var previousGround = flatGround
@@ -381,13 +401,21 @@ public enum OperationalClueGeometry {
                 bearingDegrees: headingDegrees,
                 distanceMeters: distance
             )
-            let candidateDEM = await sampleElevationMeters(candidate.latitude, candidate.longitude)
+            let candidateDEMSample = await sampleElevationMeters(candidate.latitude, candidate.longitude)
+            if usingLocalDEM, candidateDEMSample?.source?.hasPrefix("usgs-geotiff-local-") != true {
+                break
+            }
+            let candidateDEM = candidateDEMSample?.elevationMeters
             let ground = normalizedDEMGroundMeters(
                 candidateDEM: candidateDEM,
                 droneDEM: droneDEM,
                 flatGroundMeters: flatGround,
                 scaleToMeters: scale
-            ) ?? previousGround
+            )
+            guard let ground, let candidateDEMSample else {
+                distance += step
+                continue
+            }
             let rayAltitude = droneAltitudeMeters - slopeDown * distance
             if rayAltitude <= ground {
                 var lowDistance = previousDistance
@@ -403,7 +431,7 @@ public enum OperationalClueGeometry {
                         bearingDegrees: headingDegrees,
                         distanceMeters: midDistance
                     )
-                    let midDEM = await sampleElevationMeters(midPoint.latitude, midPoint.longitude)
+                    let midDEM = await sampleElevationMeters(midPoint.latitude, midPoint.longitude)?.elevationMeters
                     let midGround = normalizedDEMGroundMeters(
                         candidateDEM: midDEM,
                         droneDEM: droneDEM,
@@ -422,7 +450,11 @@ public enum OperationalClueGeometry {
                 return OperationalClueProjection(
                     latitude: highPoint.latitude,
                     longitude: highPoint.longitude,
-                    altitudeMeters: highGround
+                    altitudeMeters: highGround,
+                    terrainProjectionApplied: true,
+                    demSource: candidateDEMSample.source,
+                    demResolutionMeters: candidateDEMSample.horizontalResolutionMeters,
+                    demSampleStale: candidateDEMSample.stale
                 )
             }
             previousDistance = distance

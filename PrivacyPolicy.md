@@ -67,12 +67,14 @@ the iCloud file. The operator can disable automatic backup at any time; the
 existing cloud file remains until the operator removes it from iCloud Drive.
 
 The operator can select log days, create a diagnostic bundle, and choose a
-recipient through the platform share sheet. A shared bundle may contain Remote
-IDs, aircraft and operator positions, the app-install coordination identifier,
-app events, device and operating-system details, local-network addresses, and
-operational status. Credential secrets and configuration tokens are excluded.
-Nothing is transmitted by the log sharing feature until the operator chooses a
-destination.
+recipient through the platform share sheet. Diagnostic log messages are
+filtered to remove location details. JSON track files, which contain aircraft
+positions, are excluded unless the operator explicitly chooses to include
+them. A shared bundle may contain Remote IDs, the app-install coordination
+identifier, app events, device and operating-system details, local-network
+addresses, and operational status. Credential secrets and configuration tokens
+are excluded. Nothing is transmitted by the log sharing feature until the
+operator chooses a destination.
 
 ## Retention and deletion
 
@@ -87,4 +89,4 @@ of data deliberately sent to those services.
 ## Contact
 
 Questions about this policy or deletion of a diagnostic bundle can be sent to
-[kjt@uas4sar.com](mailto:kjt@uas4sar.com).
+[help@uas4sar.com](mailto:help@uas4sar.com).

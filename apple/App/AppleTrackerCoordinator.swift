@@ -437,6 +437,8 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var lastVideoPreflightOfferByRequestID: [String: String] = [:]
     private var approvedVideoStreamRequests: [String: AppleApprovedVideoStream] = [:]
     private var mediaPeersByRequestID: [String: AppleManagedVideoMediaPeer] = [:]
+    private var mediaOfferSDPByRequestID: [String: String] = [:]
+    private var mediaAttemptIDByRequestID: [String: UUID] = [:]
     private var mediaSourcesByRequestID: [String: AppleVideoFrameSource] = [:]
     private var mediaRouteKindByRequestID: [String: String] = [:]
     private var sourceEndGraceTasks: [String: Task<Void, Never>] = [:]
@@ -1937,12 +1939,22 @@ final class AppleTrackerCoordinator: ObservableObject {
     private func handleVideoMediaOffer(_ data: Data) {
         do {
             let offer = try JSONDecoder().decode(AppleVideoMediaOffer.self, from: data)
-            if mediaPeersByRequestID[offer.requestId] != nil {
+            let offerDecision = ManagedVideoMediaOfferPolicy.decision(
+                activeOfferSDP: mediaOfferSDPByRequestID[offer.requestId],
+                incomingOfferSDP: offer.sdp
+            )
+            if offerDecision == .ignoreReplay {
                 AppleLog.info(
                     "TrackerPeer",
                     "Ignoring replayed media offer for active request=\(offer.requestId)"
                 )
                 return
+            }
+            if offerDecision == .replaceActivePeer {
+                AppleLog.info(
+                    "TrackerPeer",
+                    "Replacing media peer after browser reconnect request=\(offer.requestId)"
+                )
             }
             let remoteApproval = remoteControlledVideoRequests[offer.requestId].flatMap {
                 request -> AppleApprovedVideoStream? in
@@ -1998,31 +2010,45 @@ final class AppleTrackerCoordinator: ObservableObject {
                 ?? offer.routeKind
                 ?? "unknown"
             stopLocalMediaSession(requestID: offer.requestId)
+            let mediaAttemptID = UUID()
             let peer = AppleManagedVideoMediaPeer(
                 answerSink: { [weak self] requestID, sdp in
                     Task { @MainActor [weak self] in
-                        self?.sendVideoMediaAnswer(requestID: requestID, sdp: sdp)
+                        guard let self,
+                              self.mediaAttemptIDByRequestID[requestID] == mediaAttemptID
+                        else { return }
+                        self.sendVideoMediaAnswer(requestID: requestID, sdp: sdp)
                     }
                 },
                 metricsSink: { [weak self] requestID, metrics in
                     Task { @MainActor [weak self] in
-                        self?.recordRemoteVideoMetrics(requestID: requestID, metrics: metrics)
+                        guard let self,
+                              self.mediaAttemptIDByRequestID[requestID] == mediaAttemptID
+                        else { return }
+                        self.recordRemoteVideoMetrics(requestID: requestID, metrics: metrics)
                     }
                 },
                 failureSink: { [weak self] requestID, reason in
                     Task { @MainActor [weak self] in
-                        self?.terminateRemoteVideoRequest(requestID: requestID, reason: reason)
+                        guard let self,
+                              self.mediaAttemptIDByRequestID[requestID] == mediaAttemptID
+                        else { return }
+                        self.terminateRemoteVideoRequest(requestID: requestID, reason: reason)
                     }
                 },
                 microphoneStateSink: { [weak self] requestID, enabled, error in
                     Task { @MainActor [weak self] in
-                        guard let self, self.mediaPeersByRequestID[requestID] != nil else { return }
+                        guard let self,
+                              self.mediaAttemptIDByRequestID[requestID] == mediaAttemptID
+                        else { return }
                         self.remoteVideoMicrophoneEnabled = enabled
                         self.remoteVideoMicrophoneError = error
                     }
                 }
             )
             mediaPeersByRequestID[offer.requestId] = peer
+            mediaOfferSDPByRequestID[offer.requestId] = offer.sdp
+            mediaAttemptIDByRequestID[offer.requestId] = mediaAttemptID
             mediaSourcesByRequestID[offer.requestId] = source
             if recording != nil {
                 managedVideoRecordingSourceRequestIDs.insert(offer.requestId)
@@ -2066,6 +2092,8 @@ final class AppleTrackerCoordinator: ObservableObject {
 
     private func stopLocalMediaSession(requestID: String) {
         let peer = mediaPeersByRequestID.removeValue(forKey: requestID)
+        mediaOfferSDPByRequestID.removeValue(forKey: requestID)
+        mediaAttemptIDByRequestID.removeValue(forKey: requestID)
         let source = mediaSourcesByRequestID.removeValue(forKey: requestID)
         source?.setManagedVideoFrameConsumer(nil)
         if managedVideoRecordingSourceRequestIDs.remove(requestID) != nil {

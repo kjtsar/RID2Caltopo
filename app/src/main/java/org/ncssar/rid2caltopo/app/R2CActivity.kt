@@ -248,6 +248,11 @@ internal class OrganizationAccessSession {
     }
 }
 
+internal fun beginTrustedExternalFlowWhenRequired(
+    authenticationRequired: Boolean,
+    beginAuthenticatedFlow: () -> Boolean
+): Boolean = !authenticationRequired || beginAuthenticatedFlow()
+
 private val organizationAccessSession = OrganizationAccessSession()
 
 private fun configuredAccessAuthenticationRequired(): Boolean =
@@ -1866,9 +1871,13 @@ class R2CActivity :
     }
 
     private fun beginArchiveDirectoryPicker(): Boolean {
-        val started = organizationAccessSession.beginTrustedExternalFlow(
-            OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER
-        )
+        val started = beginTrustedExternalFlowWhenRequired(
+            authenticationRequired = configuredAccessAuthenticationRequired()
+        ) {
+            organizationAccessSession.beginTrustedExternalFlow(
+                OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER
+            )
+        }
         if (!started) {
             CTError(TAG, "Archive directory picker could not begin a trusted external flow")
         }
@@ -1882,9 +1891,13 @@ class R2CActivity :
     }
 
     private fun beginConfigQrScanner(): Boolean {
-        val started = organizationAccessSession.beginTrustedExternalFlow(
-            OrganizationExternalFlow.CONFIG_QR_SCANNER
-        )
+        val started = beginTrustedExternalFlowWhenRequired(
+            authenticationRequired = configuredAccessAuthenticationRequired()
+        ) {
+            organizationAccessSession.beginTrustedExternalFlow(
+                OrganizationExternalFlow.CONFIG_QR_SCANNER
+            )
+        }
         if (!started) {
             CTError(TAG, "Config QR scanner could not begin a trusted external flow")
         }

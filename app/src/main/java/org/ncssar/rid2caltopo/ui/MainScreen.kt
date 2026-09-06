@@ -90,6 +90,7 @@ import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
 import org.ncssar.rid2caltopo.data.TrackerEnrollmentResult
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.DriveSyncAction
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
@@ -217,22 +218,33 @@ internal fun shouldLaunchArchiveDirPicker(
     driveRestoreEligibilityLoaded: Boolean,
     showDriveRestoreDialog: Boolean,
     driveSyncInProgress: Boolean,
-    archiveDirPickerOpen: Boolean
+    archiveDirPickerOpen: Boolean,
+    archiveDirPromptSuppressed: Boolean = false
 ): Boolean {
+    if (archiveDirPickerOpen || archiveDirPromptSuppressed) return false
+    if (forceArchiveDirPrompt) return true
     return archiveUriMissing &&
         !sessionArchiveDirAvailable &&
-        !archiveDirPickerOpen &&
-        (
-            forceArchiveDirPrompt ||
-                (driveRestoreEligibilityLoaded && !showDriveRestoreDialog && !driveSyncInProgress)
-            )
+        driveRestoreEligibilityLoaded &&
+        !showDriveRestoreDialog &&
+        !driveSyncInProgress
 }
 
-internal fun archiveDirPromptMessage(permissionMissing: Boolean): String =
+internal fun archiveDirPromptMessage(
+    permissionMissing: Boolean,
+    previousArchivePath: String? = null
+): String =
     if (permissionMissing) {
-        "Android needs permission again to save drone tracks, logs, and map data."
+        buildString {
+            append("Android removed RID2Caltopo's access")
+            previousArchivePath?.let { append(" to $it") }
+            append(" when the app was uninstalled. Your existing files are still there. ")
+            append("Reauthorize the folder to save drone tracks, logs, and map data.")
+        }
     } else {
-        "Select an archive folder for drone tracks, logs, and map data."
+        previousArchivePath?.let {
+            "Archive files are currently saved in $it. You can choose a different folder for drone tracks, logs, and map data."
+        } ?: "Select an archive folder for drone tracks, logs, and map data."
     }
 
 internal fun archiveDirDisplayPath(uriString: String?): String? {
@@ -261,14 +273,46 @@ internal fun archiveDirPromptActions(
     permissionMissing: Boolean,
     previousArchivePath: String?
 ): ArchiveDirPromptActions = ArchiveDirPromptActions(
-    continueLabel = previousArchivePath?.let { "Continue using $it" }
-        ?: "Select archive folder",
-    chooseDifferentLabel = if (permissionMissing && previousArchivePath != null) {
-        "Choose a different archive folder"
-    } else {
-        null
+    continueLabel = when {
+        permissionMissing && previousArchivePath != null -> "Reauthorize existing folder"
+        previousArchivePath != null -> "Choose another folder"
+        else -> "Choose archive folder"
+    },
+    chooseDifferentLabel = when {
+        permissionMissing && previousArchivePath != null -> "Choose another folder"
+        previousArchivePath != null -> "Keep current folder"
+        else -> "Set up later"
     }
 )
+
+internal sealed interface ArchiveDirSelectionResult {
+    data object Selected : ArchiveDirSelectionResult
+    data object Cancelled : ArchiveDirSelectionResult
+    data class Failed(val detail: String) : ArchiveDirSelectionResult
+}
+
+internal fun <T> persistArchiveDirSelection(
+    selection: T?,
+    persistPermission: (T) -> Unit,
+    activateSelection: (T) -> Unit,
+    selectionIsUsable: (T) -> Boolean
+): ArchiveDirSelectionResult {
+    if (selection == null) return ArchiveDirSelectionResult.Cancelled
+    return try {
+        persistPermission(selection)
+        activateSelection(selection)
+        if (selectionIsUsable(selection)) {
+            ArchiveDirSelectionResult.Selected
+        } else {
+            ArchiveDirSelectionResult.Failed("Android did not retain access to the selected folder.")
+        }
+    } catch (error: Exception) {
+        ArchiveDirSelectionResult.Failed(
+            error.message?.takeIf { it.isNotBlank() }
+                ?: "Android did not grant access to the selected folder."
+        )
+    }
+}
 
 internal suspend fun <T> readMutualAidPackagePreviewOffMain(
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -856,14 +900,18 @@ fun MainScreen(
     if (appUpdateAdvisory.updateRequired) {
         AlertDialog(
             onDismissRequest = { },
+            title = { Text("Update available") },
             text = {
-                Text("Update required. Continue with limited functionality.")
+                Text(
+                    "Check Google Play for Update. If Play only offers Open or Uninstall, " +
+                        "return here and continue. Do not uninstall RID2Caltopo."
+                )
             },
             confirmButton = {
                 TextButton(onClick = {
                     openAppUpgradeLocation(context, appUpdateAdvisory.updateUrl)
                 }) {
-                    Text("Upgrade")
+                    Text("Check Play")
                 }
             },
             dismissButton = {
@@ -1288,19 +1336,47 @@ fun MainScreen(
     var pendingArchiveDirPromptMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingArchiveDirInitialUri by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingArchiveDirPermissionMissing by rememberSaveable { mutableStateOf(false) }
+    var archiveDirPromptSuppressed by rememberSaveable { mutableStateOf(false) }
+    var archiveDirSelectionFailure by rememberSaveable { mutableStateOf<String?>(null) }
     val queryArchiveDirLauncher = rememberLauncherForActivityResult(
         contract = OpenArchiveDir(),
         onResult = { uri ->
-            onArchiveDirPickerFinished()
-            archiveDirPickerOpen = false
-            if (null != uri) {
-                CTDebug(tag, "queryArchiveDirLauncher() returned: '${uri}'")
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-                CaltopoClient.SetArchiveUri(uri)
+            val result = persistArchiveDirSelection(
+                selection = uri,
+                persistPermission = { selectedUri ->
+                    CTDebug(tag, "queryArchiveDirLauncher() returned: '$selectedUri'")
+                    context.contentResolver.takePersistableUriPermission(
+                        selectedUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                },
+                activateSelection = CaltopoClient::SetArchiveUri,
+                selectionIsUsable = { selectedUri ->
+                    CaltopoClient.GetArchiveUri()?.toString() == selectedUri.toString() &&
+                        CaltopoClient.HasArchiveDirForCurrentSession()
+                }
+            )
+            when (result) {
+                ArchiveDirSelectionResult.Selected -> {
+                    archiveDirPromptSuppressed = false
+                    archiveDirSelectionFailure = null
+                }
+                ArchiveDirSelectionResult.Cancelled -> {
+                    archiveDirPromptSuppressed = true
+                    archiveDirSelectionFailure =
+                        "No folder was selected. You can try again or start RID2Caltopo now using temporary storage."
+                    CTWarn(tag, "Archive directory picker was cancelled; automatic relaunch suppressed.")
+                }
+                is ArchiveDirSelectionResult.Failed -> {
+                    archiveDirPromptSuppressed = true
+                    archiveDirSelectionFailure =
+                        "RID2Caltopo could not keep access to that folder. ${result.detail}"
+                    CTError(tag, "Archive directory selection failed: ${result.detail}")
+                }
             }
+            // Keep the picker trusted and marked open until its result is fully processed.
+            archiveDirPickerOpen = false
+            onArchiveDirPickerFinished()
         }
     )
     LaunchedEffect(
@@ -1308,7 +1384,8 @@ fun MainScreen(
         driveSyncInProgress,
         forceArchiveDirPrompt,
         driveRestoreEligibilityLoaded,
-        archiveDirPickerOpen
+        archiveDirPickerOpen,
+        archiveDirPromptSuppressed
     ) {
         val archiveUriMissing = withContext(Dispatchers.IO) {
             null == CaltopoClient.GetArchiveUri()
@@ -1323,7 +1400,8 @@ fun MainScreen(
             driveRestoreEligibilityLoaded = driveRestoreEligibilityLoaded,
             showDriveRestoreDialog = showDriveRestoreDialog,
             driveSyncInProgress = driveSyncInProgress,
-            archiveDirPickerOpen = archiveDirPickerOpen
+            archiveDirPickerOpen = archiveDirPickerOpen,
+            archiveDirPromptSuppressed = archiveDirPromptSuppressed
         )
         if (shouldPromptArchiveDir) {
             val initialUri = withContext(Dispatchers.IO) {
@@ -1333,7 +1411,10 @@ fun MainScreen(
             forceArchiveDirPrompt = false
             pendingArchiveDirInitialUri = initialUri?.toString()
             pendingArchiveDirPermissionMissing = permissionMissing
-            pendingArchiveDirPromptMessage = archiveDirPromptMessage(permissionMissing)
+            pendingArchiveDirPromptMessage = archiveDirPromptMessage(
+                permissionMissing,
+                archiveDirDisplayPath(initialUri?.toString())
+            )
             CTDebug(tag, "LaunchedEffect() prepared archiveDir prompt initialUri='${initialUri ?: "<none>"}'")
         }
     }
@@ -1349,7 +1430,7 @@ fun MainScreen(
             title = {
                 Text(
                     if (pendingArchiveDirPermissionMissing) {
-                        "Archive folder access expired"
+                        "Archive access required again"
                     } else {
                         "Archive folder"
                     }
@@ -1371,12 +1452,16 @@ fun MainScreen(
                             } catch (error: Exception) {
                                 onArchiveDirPickerFinished()
                                 archiveDirPickerOpen = false
+                                archiveDirPromptSuppressed = true
+                                archiveDirSelectionFailure =
+                                    "RID2Caltopo could not open Android's folder picker. Try again or continue using temporary storage."
                                 CTError(tag, "Unable to open archive directory picker:", error)
-                                CaltopoClient.ShowToast("Unable to open the archive folder picker.")
                             }
                         } else {
                             archiveDirPickerOpen = false
-                            CaltopoClient.ShowToast("Unlock protected access before choosing an archive folder.")
+                            archiveDirPromptSuppressed = true
+                            archiveDirSelectionFailure =
+                                "Unlock protected access, then try again. You can also continue using temporary storage."
                         }
                     }
                 ) {
@@ -1387,6 +1472,26 @@ fun MainScreen(
                 promptActions.chooseDifferentLabel?.let { chooseDifferentLabel ->
                     TextButton(
                         onClick = {
+                            if (!pendingArchiveDirPermissionMissing) {
+                                pendingArchiveDirPromptMessage = null
+                                pendingArchiveDirInitialUri = null
+                                pendingArchiveDirPermissionMissing = false
+                                if (previousArchivePath != null) {
+                                    archiveDirPromptSuppressed = false
+                                    return@TextButton
+                                }
+                                archiveDirPromptSuppressed = true
+                                if (CaltopoClient.UseTemporaryArchiveDirForSession()) {
+                                    CaltopoClient.ShowToast(
+                                        "Using temporary storage. Choose Archive Storage from the menu when ready."
+                                    )
+                                } else {
+                                    CaltopoClient.ShowToast(
+                                        "Archive storage is unavailable. RID2Caltopo will continue with limited file storage."
+                                    )
+                                }
+                                return@TextButton
+                            }
                             pendingArchiveDirPromptMessage = null
                             pendingArchiveDirInitialUri = null
                             pendingArchiveDirPermissionMissing = false
@@ -1398,18 +1503,55 @@ fun MainScreen(
                                 } catch (error: Exception) {
                                     onArchiveDirPickerFinished()
                                     archiveDirPickerOpen = false
+                                    archiveDirPromptSuppressed = true
+                                    archiveDirSelectionFailure =
+                                        "RID2Caltopo could not open Android's folder picker. Try again or continue using temporary storage."
                                     CTError(tag, "Unable to open archive directory picker:", error)
-                                    CaltopoClient.ShowToast("Unable to open the archive folder picker.")
                                 }
                             } else {
                                 archiveDirPickerOpen = false
-                                CaltopoClient.ShowToast("Unlock protected access before choosing an archive folder.")
+                                archiveDirPromptSuppressed = true
+                                archiveDirSelectionFailure =
+                                    "Unlock protected access, then try again. You can also continue using temporary storage."
                             }
                         }
                     ) {
                         Text(chooseDifferentLabel)
                     }
                 }
+            }
+        )
+    }
+    archiveDirSelectionFailure?.let { failureMessage ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Archive setup not completed") },
+            text = { Text(failureMessage) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        archiveDirSelectionFailure = null
+                        archiveDirPromptSuppressed = false
+                        forceArchiveDirPrompt = true
+                    }
+                ) { Text("Try again") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        archiveDirSelectionFailure = null
+                        archiveDirPromptSuppressed = true
+                        if (CaltopoClient.UseTemporaryArchiveDirForSession()) {
+                            CaltopoClient.ShowToast(
+                                "Using temporary storage. Choose Archive Storage from the menu when ready."
+                            )
+                        } else {
+                            CaltopoClient.ShowToast(
+                                "Archive storage is unavailable. RID2Caltopo will continue with limited file storage."
+                            )
+                        }
+                    }
+                ) { Text("Continue temporarily") }
             }
         )
     }
@@ -1579,6 +1721,12 @@ fun MainScreen(
                                 archiveCleanupDirs = availableArchiveCleanupDirectoriesProvider()
                                 loadingArchiveCleanupDirs = false
                             }
+                        })
+                        DropdownMenuItem(text = { Text("Archive Storage...") }, onClick = {
+                            archiveDirPromptSuppressed = false
+                            archiveDirSelectionFailure = null
+                            forceArchiveDirPrompt = true
+                            menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Settings") }, onClick = {
                             localViewModel.showSettings()

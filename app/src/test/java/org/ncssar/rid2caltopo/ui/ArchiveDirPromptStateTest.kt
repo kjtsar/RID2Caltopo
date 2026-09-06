@@ -68,13 +68,44 @@ class ArchiveDirPromptStateTest {
     fun missingArchiveUriDoesNotPromptWhenSessionArchiveDirIsAvailable() {
         assertFalse(
             shouldLaunchArchiveDirPicker(
-                archiveUriMissing = true,
+                archiveUriMissing = false,
                 sessionArchiveDirAvailable = true,
                 forceArchiveDirPrompt = false,
                 driveRestoreEligibilityLoaded = true,
                 showDriveRestoreDialog = false,
                 driveSyncInProgress = false,
                 archiveDirPickerOpen = false
+            )
+        )
+    }
+
+    @Test
+    fun explicitArchiveStorageRequestOverridesTemporarySessionStorage() {
+        assertTrue(
+            shouldLaunchArchiveDirPicker(
+                archiveUriMissing = true,
+                sessionArchiveDirAvailable = true,
+                forceArchiveDirPrompt = true,
+                driveRestoreEligibilityLoaded = true,
+                showDriveRestoreDialog = false,
+                driveSyncInProgress = false,
+                archiveDirPickerOpen = false
+            )
+        )
+    }
+
+    @Test
+    fun cancelledOrFailedPickerDoesNotAutomaticallyTrapUserInAnotherPrompt() {
+        assertFalse(
+            shouldLaunchArchiveDirPicker(
+                archiveUriMissing = true,
+                sessionArchiveDirAvailable = false,
+                forceArchiveDirPrompt = false,
+                driveRestoreEligibilityLoaded = true,
+                showDriveRestoreDialog = false,
+                driveSyncInProgress = false,
+                archiveDirPickerOpen = false,
+                archiveDirPromptSuppressed = true
             )
         )
     }
@@ -87,8 +118,14 @@ class ArchiveDirPromptStateTest {
         assertTrue(initial.contains("logs", ignoreCase = true))
         assertTrue(initial.contains("map data", ignoreCase = true))
 
-        val expired = archiveDirPromptMessage(permissionMissing = true)
-        assertTrue(expired.contains("permission again", ignoreCase = true))
+        val expired = archiveDirPromptMessage(
+            permissionMissing = true,
+            previousArchivePath = "sdcard:/Documents/DroneTrax"
+        )
+        assertTrue(expired.contains("uninstalled", ignoreCase = true))
+        assertTrue(expired.contains("existing files are still there", ignoreCase = true))
+        assertTrue(expired.contains("reauthorize", ignoreCase = true))
+        assertTrue(expired.contains("sdcard:/Documents/DroneTrax", ignoreCase = true))
         assertTrue(expired.contains("drone tracks", ignoreCase = true))
         assertTrue(expired.contains("logs", ignoreCase = true))
         assertTrue(expired.contains("map data", ignoreCase = true))
@@ -117,14 +154,80 @@ class ArchiveDirPromptStateTest {
             permissionMissing = true,
             previousArchivePath = "sdcard:/Drone Trax"
         )
-        assertEquals("Continue using sdcard:/Drone Trax", expired.continueLabel)
-        assertEquals("Choose a different archive folder", expired.chooseDifferentLabel)
+        assertEquals("Reauthorize existing folder", expired.continueLabel)
+        assertEquals("Choose another folder", expired.chooseDifferentLabel)
 
         val initialSetup = archiveDirPromptActions(
             permissionMissing = false,
             previousArchivePath = null
         )
-        assertEquals("Select archive folder", initialSetup.continueLabel)
-        assertNull(initialSetup.chooseDifferentLabel)
+        assertEquals("Choose archive folder", initialSetup.continueLabel)
+        assertEquals("Set up later", initialSetup.chooseDifferentLabel)
+
+        val configured = archiveDirPromptActions(
+            permissionMissing = false,
+            previousArchivePath = "sdcard:/Documents/DroneTrax"
+        )
+        assertEquals("Choose another folder", configured.continueLabel)
+        assertEquals("Keep current folder", configured.chooseDifferentLabel)
+
+        val configuredMessage = archiveDirPromptMessage(
+            permissionMissing = false,
+            previousArchivePath = "sdcard:/Documents/DroneTrax"
+        )
+        assertTrue(configuredMessage.contains("currently saved", ignoreCase = true))
+        assertTrue(configuredMessage.contains("sdcard:/Documents/DroneTrax"))
+    }
+
+    @Test
+    fun archiveSelectionIsAcceptedOnlyAfterPermissionActivationAndVerification() {
+        val calls = mutableListOf<String>()
+
+        val result = persistArchiveDirSelection(
+            selection = "archive",
+            persistPermission = { calls += "persist:$it" },
+            activateSelection = { calls += "activate:$it" },
+            selectionIsUsable = {
+                calls += "verify:$it"
+                true
+            }
+        )
+
+        assertEquals(ArchiveDirSelectionResult.Selected, result)
+        assertEquals(listOf("persist:archive", "activate:archive", "verify:archive"), calls)
+    }
+
+    @Test
+    fun cancelledArchiveSelectionHasAnExplicitNonLoopingOutcome() {
+        val result = persistArchiveDirSelection<String>(
+            selection = null,
+            persistPermission = { throw AssertionError("must not persist") },
+            activateSelection = { throw AssertionError("must not activate") },
+            selectionIsUsable = { throw AssertionError("must not verify") }
+        )
+
+        assertEquals(ArchiveDirSelectionResult.Cancelled, result)
+    }
+
+    @Test
+    fun rejectedArchiveGrantBecomesARecoverableFailure() {
+        val rejected = persistArchiveDirSelection(
+            selection = "archive",
+            persistPermission = {},
+            activateSelection = {},
+            selectionIsUsable = { false }
+        )
+        assertTrue(rejected is ArchiveDirSelectionResult.Failed)
+
+        val exception = persistArchiveDirSelection(
+            selection = "archive",
+            persistPermission = { throw SecurityException("grant rejected") },
+            activateSelection = {},
+            selectionIsUsable = { true }
+        )
+        assertEquals(
+            ArchiveDirSelectionResult.Failed("grant rejected"),
+            exception
+        )
     }
 }

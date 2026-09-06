@@ -5,11 +5,13 @@ Latest changes:
 - Active Tracker playback and recording-transfer requests keep a standalone tablet connected until the request finishes.
 - Clue snapshots use validated, current video telemetry for aircraft position and will not silently fall back to older Remote ID coordinates after that source is established.
 - Diagnostic sharing sends to UAS4SAR support, removes location details from log messages, and excludes aircraft tracks unless the operator explicitly includes them.
+- Update notices on both platforms now tell operators to continue safely when a store has not made the update available, instead of creating pressure to uninstall the app.
 
 Platform-specific changes:
 - These are implementation-specific repairs that bring the affected platform into parity; they are not intended differences in operator behavior.
 - Some controllers deliver telemetry as separate H.264 access units. Android's archive path now repairs those recordings as Apple's path already did, so both platforms provide playable downloads with concise filenames.
 - Android's standby timer now stays suspended for the complete remote-video request, matching the request-lifecycle behavior already provided on Apple.
+- Android removes external-folder permissions when an app is uninstalled. Reinstall recovery now explains that behavior, verifies a renewed archive grant before accepting it, and always provides a non-blocking temporary-storage path instead of repeating the folder prompt.
 - Apple's WebRTC path now waits for the complete offer and ICE-candidate sequence required by its media framework, matching the reliable remote-playback result already provided on Android.
 
 Known platform differences:

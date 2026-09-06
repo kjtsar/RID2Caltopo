@@ -270,15 +270,15 @@ struct ContentView: View {
             } message: {
                 Text("You are currently synced with: \(caltopoSettings.mapTitle)")
             }
-            .alert("Update required", isPresented: updateAdvisoryPresented) {
+            .alert("Update available", isPresented: updateAdvisoryPresented) {
                 if let updateURL = peerCoordinator.recommendedUpdateURL {
-                    Button("Upgrade") { openURL(updateURL) }
+                    Button("Check App Store") { openURL(updateURL) }
                 }
                 Button("Continue", role: .cancel) {
                     dismissedUpdateVersionCode = peerCoordinator.recommendedAppVersionCode
                 }
             } message: {
-                Text("Continue with limited functionality until RID2Caltopo is upgraded.")
+                Text("Check the App Store for Update. If no update is offered, return here and continue. Do not delete RID2Caltopo.")
             }
             .modifier(TrackerReauthenticationPromptModifier(
                 isPresented: $showTrackerReauthenticationPrompt,

@@ -6,6 +6,29 @@ import org.junit.Test
 
 class OrganizationAccessPolicyTest {
     @Test
+    fun freshInstallCanOpenSetupFlowsBeforeAnOrganizationAccountExists() {
+        var authenticatedFlowAttempted = false
+
+        assertTrue(
+            beginTrustedExternalFlowWhenRequired(authenticationRequired = false) {
+                authenticatedFlowAttempted = true
+                false
+            }
+        )
+        assertFalse(authenticatedFlowAttempted)
+    }
+
+    @Test
+    fun configuredInstallStillRequiresAnAuthenticatedExternalFlow() {
+        assertFalse(
+            beginTrustedExternalFlowWhenRequired(authenticationRequired = true) { false }
+        )
+        assertTrue(
+            beginTrustedExternalFlowWhenRequired(authenticationRequired = true) { true }
+        )
+    }
+
+    @Test
     fun organizationOrCaltopoTeamsConfigurationRequiresDeviceOwnerAuthentication() {
         assertFalse(organizationAccessAuthenticationRequired(null, false, false))
         assertFalse(organizationAccessAuthenticationRequired("", false, false))

@@ -177,6 +177,11 @@ final class AppleStreamRegistry: ObservableObject {
         }
     }
 
+    /** Once true, operational consumers must not silently downgrade this stream to RID. */
+    func isSEIPositionAuthorityEstablished(streamID: String) -> Bool {
+        seiPositionContinuationByStreamID[streamID]?.positionValidated == true
+    }
+
     func freshValidatedDJIPositionByAircraftID(
         tracks: [RidAircraftTrack],
         at date: Date = Date(),

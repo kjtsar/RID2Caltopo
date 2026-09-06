@@ -5,6 +5,7 @@ import Foundation
 import Network
 import NetworkExtension
 import R2CCore
+import Security
 import UIKit
 
 enum AppleNetworkAddress {
@@ -183,14 +184,56 @@ enum AppleDeviceIdentity {
     static let storedNameKey = "device.stableDisplayName"
     static let managedNameKey = "device.managedDisplayName"
     static let installationIDKey = "tracker.zoneID"
+    private static let installationIDKeychainService = "org.ncssar.rid2caltopo.device-identity"
+    private static let installationIDKeychainAccount = "tracker.installation-id"
 
     static func installationID(defaults: UserDefaults = .standard) -> String {
+        if let existing = keychainInstallationID(), !existing.isEmpty {
+            if defaults.string(forKey: installationIDKey) != existing {
+                defaults.set(existing, forKey: installationIDKey)
+            }
+            return existing
+        }
         if let existing = defaults.string(forKey: installationIDKey), !existing.isEmpty {
+            storeKeychainInstallationID(existing)
             return existing
         }
         let value = UUID().uuidString.lowercased()
         defaults.set(value, forKey: installationIDKey)
+        storeKeychainInstallationID(value)
         return value
+    }
+
+    private static func keychainInstallationID() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: installationIDKeychainService,
+            kSecAttrAccount as String: installationIDKeychainAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data
+        else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func storeKeychainInstallationID(_ value: String) {
+        let key: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: installationIDKeychainService,
+            kSecAttrAccount as String: installationIDKeychainAccount,
+        ]
+        let data = Data(value.utf8)
+        if SecItemUpdate(
+            key as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        ) == errSecSuccess { return }
+        var insert = key
+        insert[kSecValueData as String] = data
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        SecItemAdd(insert as CFDictionary, nil)
     }
 
     @MainActor

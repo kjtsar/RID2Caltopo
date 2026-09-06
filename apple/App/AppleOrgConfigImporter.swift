@@ -1120,6 +1120,32 @@ final class AppleOrgConfigImporter: ObservableObject {
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         do {
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            if Self.isQRCodeImageFile(url) {
+                guard let payload = try await Self.decodeQRCodePayload(from: data) else {
+                    state = .failed("No readable QR code was found in that image.")
+                    AppleLog.error("OrgConfig", "Selected image did not contain a readable QR code")
+                    return
+                }
+                if let enrollmentURL = AppleTrackerEnrollmentClient.normalizedEnrollmentURL(payload) {
+                    await importTrackerEnrollment(
+                        enrollmentURL,
+                        caltopoSettings: caltopoSettings,
+                        orgSettings: orgSettings,
+                        identityStore: identityStore
+                    )
+                } else if AndroidConfigTokenCodec.decode(payload) != nil {
+                    await importToken(
+                        payload,
+                        caltopoSettings: caltopoSettings,
+                        orgSettings: orgSettings,
+                        identityStore: identityStore
+                    )
+                } else {
+                    state = .failed("The QR code does not contain a supported configuration.")
+                    AppleLog.error("OrgConfig", "Selected QR image contained an unsupported payload")
+                }
+                return
+            }
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw OrgConfigInteropError.invalidBundle
             }
@@ -1174,6 +1200,24 @@ final class AppleOrgConfigImporter: ObservableObject {
             state = .failed("Config file import failed: \(error.localizedDescription)")
             AppleLog.error("OrgConfig", "Local config import failed: \(error.localizedDescription)")
         }
+    }
+
+    private nonisolated static func isQRCodeImageFile(_ url: URL) -> Bool {
+        if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) {
+            return true
+        }
+        return (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)?
+            .conforms(to: .image) == true
+    }
+
+    private nonisolated static func decodeQRCodePayload(from data: Data) async throws -> String? {
+        try await Task.detached(priority: .userInitiated) {
+            let request = VNDetectBarcodesRequest()
+            request.symbologies = [.qr]
+            let handler = VNImageRequestHandler(data: data, options: [:])
+            try handler.perform([request])
+            return request.results?.compactMap(\.payloadStringValue).first { !$0.isEmpty }
+        }.value
     }
 
     @discardableResult
@@ -1280,7 +1324,7 @@ struct ConfigImportView: View {
     var body: some View {
         Form {
             Section {
-                Text("Scan an R2C2 organization QR or a direct r2c-tracker enrollment QR. R2C1 organization tokens are no longer accepted.")
+                Text("Scan or choose an image of an R2C2 organization QR or a direct r2c-tracker enrollment QR. R2C1 organization tokens are no longer accepted.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 HStack(alignment: .top, spacing: 10) {
@@ -1344,7 +1388,7 @@ struct ConfigImportView: View {
         }
         .fileImporter(
             isPresented: $showFileImporter,
-            allowedContentTypes: [.json, .plainText, .data]
+            allowedContentTypes: [.image, .json, .plainText, .data]
         ) { result in
             guard case let .success(url) = result else { return }
             submitFile(url)
@@ -1352,8 +1396,11 @@ struct ConfigImportView: View {
     }
 
     private var decodedToken: AndroidConfigJoinToken? { AndroidConfigTokenCodec.decode(tokenText) }
+    private var trackerEnrollmentURL: String? {
+        AppleTrackerEnrollmentClient.normalizedEnrollmentURL(tokenText)
+    }
     private var isTrackerEnrollment: Bool {
-        AppleTrackerEnrollmentClient.isEnrollmentURL(tokenText)
+        trackerEnrollmentURL != nil
     }
 
     private var canImport: Bool {
@@ -1364,7 +1411,7 @@ struct ConfigImportView: View {
 
     private var recognitionText: String {
         if tokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Scan QR, paste token, or choose a JSON config file"
+            return "Scan QR, paste token, or choose a QR image/JSON config file"
         }
         if isTrackerEnrollment { return "Managed r2c-tracker enrollment identified"
         }
@@ -1388,11 +1435,11 @@ struct ConfigImportView: View {
         guard canImport else { return }
         submitting = true
         let value = tokenText
-        let trackerEnrollment = isTrackerEnrollment
+        let normalizedTrackerEnrollment = trackerEnrollmentURL
         Task { @MainActor in
-            if trackerEnrollment {
+            if let normalizedTrackerEnrollment {
                 await importer.importTrackerEnrollment(
-                    value,
+                    normalizedTrackerEnrollment,
                     caltopoSettings: caltopoSettings,
                     orgSettings: orgSettings,
                     identityStore: identityStore

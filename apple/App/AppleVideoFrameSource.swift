@@ -301,43 +301,6 @@ struct AppleDJICameraTelemetry: Equatable {
     let sourceTimestampMicroseconds: Int64?
     let receivedAt: Date
 
-    func anchoredToRID(
-        latitude ridLatitude: Double,
-        longitude ridLongitude: Double,
-        altitudeMeters ridAltitude: Double?,
-        takeoffMslMeters: Double?
-    ) -> AppleDJICameraTelemetry {
-        let horizontal = OperationalClueGeometry.djiValidatedHorizontalPosition(
-            latitudeDegrees: latitudeDegrees,
-            longitudeDegrees: longitudeDegrees,
-            ridLatitudeDegrees: ridLatitude,
-            ridLongitudeDegrees: ridLongitude
-        )
-        return AppleDJICameraTelemetry(
-            rawAzimuthCandidateDegrees: rawAzimuthCandidateDegrees,
-            cameraAzimuthDegrees: cameraAzimuthDegrees,
-            courseDegrees: courseDegrees,
-            rawTiltDegrees: rawTiltDegrees,
-            tiltDegrees: tiltDegrees,
-            horizontalFovDegrees: horizontalFovDegrees,
-            verticalFovDegrees: verticalFovDegrees,
-            attitudeAnglesDegrees: attitudeAnglesDegrees,
-            latitudeDegrees: horizontal?.latitudeDegrees,
-            longitudeDegrees: horizontal?.longitudeDegrees,
-            altitudeMeters: nil,
-            relativeUpMeters: OperationalClueGeometry.djiValidatedRelativeUpMeters(
-                observedRelativeUpMeters: relativeUpMeters,
-                ridAltitudeMeters: ridAltitude,
-                takeoffMslMeters: takeoffMslMeters
-            ),
-            referenceLatitudeDegrees: referenceLatitudeDegrees,
-            referenceLongitudeDegrees: referenceLongitudeDegrees,
-            referenceAltitudeMeters: referenceAltitudeMeters,
-            sourceTimestampMicroseconds: sourceTimestampMicroseconds,
-            receivedAt: receivedAt
-        )
-    }
-
     func replacingRelativeUpMeters(_ value: Double?) -> AppleDJICameraTelemetry {
         AppleDJICameraTelemetry(
             rawAzimuthCandidateDegrees: rawAzimuthCandidateDegrees,

@@ -83,7 +83,10 @@ object TrackerEnrollmentClient {
             .put("device_name", AndroidDeviceIdentity.localDisplayName(context))
             .put("device_model", AndroidDeviceIdentity.modelName())
             .put("platform", "android")
-            .put("installation_id", AndroidDeviceIdentity.installationId(context))
+            // Use the same persistent device GUID that identifies this tablet to
+            // CalTopo and peer coordination. Enrollment must not invent a second
+            // identity or duplicate the GUID derivation algorithm.
+            .put("installation_id", CaltopoMap.GetMyUUID())
             .put("functionality_release", BuildConfig.TRACKER_FUNCTIONALITY_RELEASE)
             .toString()
         val request = Request.Builder()

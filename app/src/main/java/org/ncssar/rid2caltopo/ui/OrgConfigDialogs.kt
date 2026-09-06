@@ -597,34 +597,40 @@ fun MutualAidExportDialog(
 /**
  * Single-step dialog shown for importing shared configuration.
  *
- * The user scans or pastes an org, FAA, or MA token, or chooses a JSON config
- * or packaged MA config file. Tokens are validated in real time and routed to
- * the matching config manager when confirmed.
+ * The user scans or pastes an org, FAA, or MA token, or chooses a QR image,
+ * JSON config, or packaged MA config file. Tokens are validated in real time
+ * and routed to the matching config manager when confirmed.
  *
  * [onDismiss] is called when the dialog should close.
  * [onJoin] is called with the normalized org token when confirmed.
  * [onFaaJoin] is called with the normalized FAA token when confirmed.
  * [onMutualAidJoin] is called with the normalized MA token when confirmed.
- * [onPickFile] is called when the user chooses a JSON config or MA package file.
+ * [onScannerStarted] begins the protected external scanner flow.
+ * [onScannerFinished] completes that flow when the scanner returns or cannot open.
+ * [onPickFile] is called when the user chooses a QR image, JSON config, or MA package file.
  */
 @Composable
 fun ImportConfigDialog(
+    initialToken: String = "",
     onDismiss: () -> Unit,
     onJoin: (token: String) -> Unit,
     onFaaJoin: (token: String) -> Unit,
     onMutualAidJoin: (token: String) -> Unit,
     onTrackerJoin: (url: String) -> Unit,
+    onScannerStarted: () -> Boolean,
+    onScannerFinished: () -> Unit,
     onPickFile: () -> Unit
 ) {
     val context = LocalContext.current
-    var tokenText by remember { mutableStateOf("") }
+    var tokenText by remember(initialToken) { mutableStateOf(initialToken) }
     val normalizedToken = remember(tokenText) { normalizeImportToken(tokenText.trim()) }
     val orgDecoded = remember(normalizedToken) { OrgConfigToken.decode(normalizedToken) }
     val faaDecoded = remember(normalizedToken) { FaaConfigToken.decode(normalizedToken) }
     val mutualAidDecoded = remember(normalizedToken) { MutualAidToken.decode(normalizedToken) }
-    val trackerEnrollment = remember(normalizedToken) {
-        TrackerEnrollmentClient.isEnrollmentUrl(normalizedToken)
+    val trackerEnrollmentUrl = remember(normalizedToken) {
+        normalizedTrackerEnrollmentImport(normalizedToken)
     }
+    val trackerEnrollment = trackerEnrollmentUrl != null
     val isValid = orgDecoded != null || faaDecoded != null || mutualAidDecoded != null || trackerEnrollment
 
     var scannerOpening by remember { mutableStateOf(false) }
@@ -637,6 +643,7 @@ fun ImportConfigDialog(
             .setOrientationLocked(false)
     }
     val scannerLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        onScannerFinished()
         scannerOpening = false
         val raw = result.contents
         if (raw.isNullOrBlank()) {
@@ -668,6 +675,16 @@ fun ImportConfigDialog(
                         IconButton(
                             enabled = !scannerOpening,
                             onClick = {
+                                if (!onScannerStarted()) {
+                                    CaltopoClient.CTWarn(
+                                        "ImportConfig",
+                                        "Bundled QR scanner could not start because organization access is locked."
+                                    )
+                                    CaltopoClient.ShowToast(
+                                        "Unlock organization access before opening the QR scanner."
+                                    )
+                                    return@IconButton
+                                }
                                 CaltopoClient.CTDebug(
                                     "ImportConfig",
                                     "Bundled QR scanner requested from Import Config dialog."
@@ -676,6 +693,7 @@ fun ImportConfigDialog(
                                 try {
                                     scannerLauncher.launch(scannerOptions)
                                 } catch (error: Exception) {
+                                    onScannerFinished()
                                     scannerOpening = false
                                     CaltopoClient.CTWarn(
                                         "ImportConfig",
@@ -703,7 +721,7 @@ fun ImportConfigDialog(
                     },
                     supportingText = {
                         when {
-                            tokenText.isBlank() -> Text("Scan QR, paste token, or choose a JSON/MA package file")
+                            tokenText.isBlank() -> Text("Scan QR, paste token, or choose a QR image/config file")
                             orgDecoded != null -> Text(
                                 "Organization Teams config: ${orgDecoded.orgName} (tracker access verified after import)"
                             )
@@ -727,7 +745,7 @@ fun ImportConfigDialog(
                 enabled = isValid,
                 onClick = {
                     when {
-                        trackerEnrollment -> onTrackerJoin(normalizedToken)
+                        trackerEnrollmentUrl != null -> onTrackerJoin(trackerEnrollmentUrl)
                         faaDecoded != null -> onFaaJoin(normalizedToken)
                         mutualAidDecoded != null -> onMutualAidJoin(normalizedToken)
                         else -> onJoin(normalizedToken)
@@ -745,6 +763,9 @@ fun ImportConfigDialog(
         }
     )
 }
+
+internal fun normalizedTrackerEnrollmentImport(raw: String): String? =
+    TrackerEnrollmentClient.normalizedEnrollmentUrl(normalizeImportToken(raw.trim()))
 
 private fun normalizeImportToken(raw: String): String {
     val trimmed = raw.trim()

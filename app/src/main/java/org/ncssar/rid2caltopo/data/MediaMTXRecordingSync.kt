@@ -190,7 +190,7 @@ object MediaMTXRecordingSync {
                 val muxerTrackIndex = muxerTrackMap.getValue(trackIndex)
                 val cadence = h264Cadences[trackIndex]
                 val requestedPresentationTimeUs = if (
-                    cadence != null && sample.data.hasVclAvccNalUnit()
+                    cadence != null && sample.data.hasVclH264NalUnit()
                 ) {
                     cadence.nextPresentationTimeUs(segmentOffsetUs)
                 } else {

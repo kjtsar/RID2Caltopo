@@ -287,6 +287,9 @@ enum AppleManagedOrganizationConfig {
 
 @MainActor
 final class AppleTrackerCoordinator: ObservableObject {
+    static let reenrollmentRequiredStatusDetail =
+        "Tracker authorization rejected; re-enrollment required"
+
     nonisolated let events: AsyncStream<TrackerCoordinationEvent>
     private nonisolated let eventContinuation: AsyncStream<TrackerCoordinationEvent>.Continuation
 
@@ -790,7 +793,12 @@ final class AppleTrackerCoordinator: ObservableObject {
     }
 
     private var canEnterStandaloneStandby: Bool {
-        TrackerStandbyPolicy.isEligible(
+        let activeTrackerInteractions = (pendingVideoStreamRequest == nil ? 0 : 1)
+            + (pendingRecordingDownloadRequest == nil ? 0 : 1)
+            + remoteControlledVideoRequests.count
+            + approvedVideoStreamRequests.count
+            + approvedRecordingUploadsByRequestID.count
+        return TrackerStandbyPolicy.isEligible(
             standalone: standaloneStandbyEligible,
             connected: connected,
             helloAcknowledged: helloAcknowledged,
@@ -798,7 +806,8 @@ final class AppleTrackerCoordinator: ObservableObject {
             activeSightings: observedSightings.count,
             pendingConfirmations: pendingConfirmations.count,
             hasLiveVideo: hasLiveManagedVideoStream,
-            activeMediaConnections: mediaPeersByRequestID.count
+            activeMediaConnections: mediaPeersByRequestID.count,
+            activeTrackerInteractions: activeTrackerInteractions
         )
     }
 
@@ -1758,6 +1767,23 @@ final class AppleTrackerCoordinator: ObservableObject {
         else {
             return false
         }
+        let resetsStandaloneTimer = [
+            "video_preflight_offer",
+            "video_media_offer",
+            "recording_download_request",
+            "recording_download_decision_ack",
+            "video_stream_request_cancelled",
+            "video_stream_request",
+        ].contains(type)
+        if resetsStandaloneTimer {
+            standbyTask?.cancel()
+            standbyTask = nil
+        }
+        defer {
+            if resetsStandaloneTimer {
+                scheduleStandbyIfEligible()
+            }
+        }
         if type == "video_preflight_offer" {
             handleVideoPreflightOffer(data)
             return true
@@ -1989,13 +2015,10 @@ final class AppleTrackerCoordinator: ObservableObject {
                 return
             }
             let recording = managedVideoRecordingsBySessionID[offer.streamSessionId]
-            let source = managedVideoSourcesBySessionID[offer.streamSessionId]
-                ?? recording.map { item in
-                    let playback = AppleVideoFrameSource()
-                    playback.startPlayback(url: item.url)
-                    return playback
-                }
-            guard let source else {
+            let liveSource = recording == nil
+                ? managedVideoSourcesBySessionID[offer.streamSessionId]
+                : nil
+            guard recording != nil || liveSource != nil else {
                 AppleLog.warning(
                     "TrackerPeer",
                     "Approved media source disappeared request=\(offer.requestId)"
@@ -2010,6 +2033,20 @@ final class AppleTrackerCoordinator: ObservableObject {
                 ?? offer.routeKind
                 ?? "unknown"
             stopLocalMediaSession(requestID: offer.requestId)
+            // A recording source is owned by one media attempt and is stopped
+            // when that attempt is replaced. Always open a fresh decoder for
+            // browser reconnects instead of reusing the just-stopped source
+            // retained briefly by the presence snapshot.
+            let source: AppleVideoFrameSource
+            if let recording {
+                let playback = AppleVideoFrameSource()
+                playback.startPlayback(url: recording.url)
+                source = playback
+            } else if let liveSource {
+                source = liveSource
+            } else {
+                return
+            }
             let mediaAttemptID = UUID()
             let peer = AppleManagedVideoMediaPeer(
                 answerSink: { [weak self] requestID, sdp in
@@ -2404,7 +2441,7 @@ final class AppleTrackerCoordinator: ObservableObject {
             trackerKnownUnavailable = true
             stopSocketOnly()
             status = .unavailable
-            statusDetail = "Tracker unavailable (\(detail))"
+            statusDetail = Self.reenrollmentRequiredStatusDetail
             AppleLog.error("TrackerPeer", statusDetail)
             recoverReauthenticationChallenge()
             return

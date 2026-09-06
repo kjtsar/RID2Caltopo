@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Locale;
 import java.time.ZoneId;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -131,6 +132,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private final ConcurrentHashMap<String, Long> lastTrafficShadowLogByKey = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, RecordingDownloadRequest>
             approvedRecordingUploads = new ConcurrentHashMap<>();
+    @NonNull private final Set<String> activeTrackerInteractionRequestIds =
+            ConcurrentHashMap.newKeySet();
     @NonNull private final ManagedVideoPreflightPeer videoPreflightPeer;
     @Nullable private volatile String lastOutboundJsonForTesting;
     @Nullable private volatile String lastWaypointRemoteIdForTesting;
@@ -381,6 +384,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         lastTrafficShadowLogByKey.clear();
         PeerTrafficMapRegistry.clear();
         approvedRecordingUploads.clear();
+        activeTrackerInteractionRequestIds.clear();
         notifyPeerListChanged();
         TrackerCoordinationTransport activeTransport = transport;
         transport = null;
@@ -860,7 +864,20 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 pendingDrones.isEmpty() &&
                 ownerByRemoteId.isEmpty() &&
                 pendingConfirmationsByRemoteId.isEmpty() &&
+                activeTrackerInteractionRequestIds.isEmpty() &&
                 !hasLiveManagedVideoStream();
+    }
+
+    private void beginTrackerInteraction(@NonNull String requestId) {
+        if (requestId.isEmpty()) return;
+        activeTrackerInteractionRequestIds.add(requestId);
+        idleParkTimer.stop();
+    }
+
+    private void endTrackerInteraction(@NonNull String requestId) {
+        if (requestId.isEmpty()) return;
+        activeTrackerInteractionRequestIds.remove(requestId);
+        scheduleIdleParkIfEligible();
     }
 
     private boolean hasLiveManagedVideoStream() {
@@ -1628,6 +1645,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             CTWarn(TAG, "Video stream request arrived without an active UI listener.");
             return;
         }
+        beginTrackerInteraction(requestId);
         listener.onVideoStreamRequest(
                 new VideoStreamViewRequest(
                         requestId,
@@ -1659,7 +1677,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             return;
         }
         VideoStreamRequestListener listener = videoStreamRequestListener;
-        if (listener != null) listener.onRecordingDownloadRequest(request);
+        if (listener != null) {
+            beginTrackerInteraction(request.requestId);
+            listener.onRecordingDownloadRequest(request);
+        }
     }
 
     private void onRecordingDownloadDecisionAck(@NonNull JSONObject jo) {
@@ -1667,6 +1688,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         RecordingDownloadRequest request = approvedRecordingUploads.remove(requestId);
         if (request == null) return;
         if (!jo.optBoolean("accepted", false)) {
+            endTrackerInteraction(requestId);
             CTWarn(TAG, "Tracker rejected recording transfer request=" + requestId
                     + " error=" + jo.optString("error"));
             return;
@@ -1698,6 +1720,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             CTWarn(TAG, "Ignoring incomplete managed video preflight offer.");
             return;
         }
+        beginTrackerInteraction(requestId);
         videoPreflightPeer.start(
                 R2CApplication.getAppCtxt(),
                 requestId,
@@ -1714,6 +1737,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         // A request cancellation retires only this probe. Keep the peer's
         // executor available for the next independently authorized request.
         videoPreflightPeer.cancel();
+        endTrackerInteraction(requestId);
         VideoStreamRequestListener listener = videoStreamRequestListener;
         if (listener != null) {
             listener.onVideoStreamRequestCancelled(requestId);
@@ -1729,6 +1753,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             CTWarn(TAG, "Ignoring incomplete managed-video media offer.");
             return;
         }
+        beginTrackerInteraction(requestId);
         VideoStreamRequestListener listener = videoStreamRequestListener;
         if (listener != null) {
             listener.onVideoMediaOffer(new VideoMediaOffer(
@@ -1801,6 +1826,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             if (!sendJson(message)) {
                 CTWarn(TAG, "Unable to send managed video decision.");
             }
+            if (approved) {
+                beginTrackerInteraction(requestId);
+            } else {
+                endTrackerInteraction(requestId);
+            }
         } catch (Exception exception) {
             CTError(TAG, "Unable to encode managed video decision.", exception);
         }
@@ -1808,12 +1838,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void sendVideoMediaAnswer(@NonNull String requestId, @NonNull String sdp) {
+        beginTrackerInteraction(requestId);
         sendManagedVideoMessage("video_media_answer", requestId, sdp, "");
     }
 
     @Override
     public void sendVideoStreamTerminated(@NonNull String requestId, @NonNull String reason) {
         sendManagedVideoMessage("video_stream_terminated", requestId, "", reason);
+        endTrackerInteraction(requestId);
     }
 
     @Override
@@ -1831,6 +1863,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 CTWarn(TAG, "Recording transfer decision could not be sent request=" + requestId
                         + " approved=" + approved);
             }
+            if (approved) {
+                beginTrackerInteraction(requestId);
+            } else {
+                endTrackerInteraction(requestId);
+            }
         } catch (Exception exception) {
             CTError(TAG, "Unable to encode recording download decision.", exception);
         }
@@ -1838,6 +1875,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void uploadRecordingDownload(@NonNull RecordingDownloadRequest request) {
+        beginTrackerInteraction(request.requestId);
         if (request.consentRequired) {
             approvedRecordingUploads.put(request.requestId, request);
             CTInfo(TAG, "Starting operator-approved recording transfer request="
@@ -1897,7 +1935,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                             .header("X-SAR-Token", token)
                             .header("X-R2C-Functionality-Release",
                                     Integer.toString(BuildConfig.TRACKER_FUNCTIONALITY_RELEASE))
-                            .header("X-R2C-Filename", recording.getFile().getName())
+                            .header(
+                                    "X-R2C-Filename",
+                                    ManagedVideoSessionRecordingCatalog.INSTANCE
+                                            .downloadFileName(recording))
                             .header("Content-Range", "bytes " + start + "-"
                                     + (start + length - 1) + "/" + total)
                             .put(body)
@@ -1914,6 +1955,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 CTError(TAG, "Recording transfer failed request=" + request.requestId, error);
             } finally {
                 approvedRecordingUploads.remove(request.requestId);
+                endTrackerInteraction(request.requestId);
             }
         });
     }

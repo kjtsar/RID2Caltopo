@@ -87,6 +87,10 @@ import Testing
         contentsOf: appleRoot.appendingPathComponent("App/RidMappingAdminView.swift"),
         encoding: .utf8
     )
+    let deviceIdentity = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleNetworkAddress.swift"),
+        encoding: .utf8
+    )
     let importer = try String(
         contentsOf: appleRoot.appendingPathComponent("App/AppleOrgConfigImporter.swift"),
         encoding: .utf8
@@ -117,7 +121,16 @@ import Testing
     #expect(enrollmentClient.contains("static let appLinkScheme = \"r2cenroll\""))
     #expect(enrollmentClient.contains("fetchManagedOrganizationConfig"))
     #expect(enrollmentClient.contains("\"installation_id\": AppleDeviceIdentity.installationID()"))
+    #expect(deviceIdentity.contains("keychainInstallationID()"))
+    #expect(deviceIdentity.contains("storeKeychainInstallationID"))
     #expect(importer.contains("AppleManagedOrganizationConfig.apply"))
+    #expect(importer.contains("AppleTrackerEnrollmentClient.normalizedEnrollmentURL(tokenText)"))
+    #expect(importer.contains("importTrackerEnrollment(\n                    normalizedTrackerEnrollment,"))
+    #expect(importer.contains("allowedContentTypes: [.image, .json, .plainText, .data]"))
+    #expect(importer.contains("VNDetectBarcodesRequest()"))
+    #expect(importer.contains("request.symbologies = [.qr]"))
+    #expect(importer.contains("AppleTrackerEnrollmentClient.normalizedEnrollmentURL(payload)"))
+    #expect(importer.contains("AndroidConfigTokenCodec.decode(payload)"))
     #expect(infoPlist.contains("<string>r2cenroll</string>"))
     #expect(entitlements.contains("<string>applinks:r2c-tracker.com</string>"))
 }
@@ -352,6 +365,17 @@ import Testing
         hasLiveVideo: false,
         activeMediaConnections: 0
     ))
+    #expect(!TrackerStandbyPolicy.isEligible(
+        standalone: true,
+        connected: true,
+        helloAcknowledged: true,
+        configurationSyncInProgress: false,
+        activeSightings: 0,
+        pendingConfirmations: 0,
+        hasLiveVideo: false,
+        activeMediaConnections: 0,
+        activeTrackerInteractions: 1
+    ))
 }
 
 @Test func archiveFolderAgeUsesLargestRequestedWholeUnit() {
@@ -483,6 +507,26 @@ import Testing
     )
     #expect(TrackerReauthenticationChallenge.url(fromHTTPError: data, statusCode: 500) == nil)
     #expect(TrackerReauthenticationChallenge.url(fromHTTPError: Data(), statusCode: 403) == nil)
+}
+
+@Test func rejectedTrackerAuthorizationProvidesReenrollmentGuidance() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let coordinator = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/AppleTrackerCoordinator.swift"),
+        encoding: .utf8
+    )
+    let contentView = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/ContentView.swift"),
+        encoding: .utf8
+    )
+    #expect(coordinator.contains("Tracker authorization rejected; re-enrollment required"))
+    #expect(contentView.contains("Tracker re-enrollment required"))
+    #expect(contentView.contains("scan a current"))
+    #expect(contentView.contains("organization enrollment QR"))
+    #expect(contentView.contains("lastTrackerReenrollmentNoticeCredential != credential"))
 }
 
 @Test func trackerEnrollmentResponseCarriesImmediateReauthenticationChallenge() throws {
@@ -618,16 +662,16 @@ import Testing
     #expect(terrainService.contains("guard scheduledPrefetchCells.insert(cell).inserted else { return }"))
 }
 
-@Test func managedVideoProbeQueueUsesShallowBackpressureBound() {
+@Test func managedVideoProbeQueueKeepsEnoughDataInFlightForRoutedLinks() {
     #expect(ManagedVideoProbeQueuePolicy.maySend(chunksSentInBurst: 0, bufferedBytes: 0))
     #expect(ManagedVideoProbeQueuePolicy.maySend(
-        chunksSentInBurst: 3,
-        bufferedBytes: 255 * 1024
+        chunksSentInBurst: 15,
+        bufferedBytes: 1023 * 1024
     ))
-    #expect(!ManagedVideoProbeQueuePolicy.maySend(chunksSentInBurst: 4, bufferedBytes: 0))
+    #expect(!ManagedVideoProbeQueuePolicy.maySend(chunksSentInBurst: 16, bufferedBytes: 0))
     #expect(!ManagedVideoProbeQueuePolicy.maySend(
         chunksSentInBurst: 0,
-        bufferedBytes: 256 * 1024
+        bufferedBytes: 1024 * 1024
     ))
 }
 
@@ -656,6 +700,16 @@ import Testing
     #expect(completed.range(of: "a=candidate:")!.lowerBound
         < completed.range(of: "a=end-of-candidates")!.lowerBound)
     #expect(ManagedVideoSDP.hasRoutableICECandidate(completed))
+    #expect(!ManagedVideoSDP.hasRelayICECandidate(completed))
+
+    let relayed = ManagedVideoSDP.withICECandidates(
+        answer,
+        candidates: [ManagedVideoICECandidate(
+            sdp: "candidate:2 1 udp 1 192.0.2.10 6000 typ relay raddr 0.0.0.0 rport 0",
+            mediaLineIndex: 0
+        )]
+    )
+    #expect(ManagedVideoSDP.hasRelayICECandidate(relayed))
 }
 
 @Test func managedVideoPresenceRequiresRecentDecodedFrames() {
@@ -5767,4 +5821,39 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
     try await relaunchedProcess.remove(liveTrackID: "live-recovery")
     let afterSuccessfulRecovery = CaltopoInterruptedPublicationJournal(fileURL: fileURL)
     #expect(await afterSuccessfulRecovery.entries(mapID: "map-a").isEmpty)
+}
+@Test func appleClueCaptureUsesValidatedSEIContinuationInsteadOfPerReadRIDAnchoring() throws {
+    let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let source = try String(
+        contentsOf: appleRoot.appendingPathComponent("App/RIDTrackMapView.swift"),
+        encoding: .utf8
+    )
+    #expect(source.contains("freshValidatedDJIPositionByAircraftID(tracks: model.tracks)"))
+    #expect(!source.contains(".anchoredToRID("))
+}
+
+@Test func cluePositionSourcePolicyBlocksSilentRIDFallbackForPositionalSEIStreams() {
+    #expect(!OperationalCluePositionSourcePolicy.shouldBlockRIDFallback(
+        seiPositionAuthorityEstablished: false,
+        freshRawSEIPositionAvailable: false,
+        validatedSEIPositionAvailable: false
+    ))
+    #expect(OperationalCluePositionSourcePolicy.shouldBlockRIDFallback(
+        seiPositionAuthorityEstablished: false,
+        freshRawSEIPositionAvailable: true,
+        validatedSEIPositionAvailable: false
+    ))
+    #expect(OperationalCluePositionSourcePolicy.shouldBlockRIDFallback(
+        seiPositionAuthorityEstablished: true,
+        freshRawSEIPositionAvailable: false,
+        validatedSEIPositionAvailable: false
+    ))
+    #expect(!OperationalCluePositionSourcePolicy.shouldBlockRIDFallback(
+        seiPositionAuthorityEstablished: true,
+        freshRawSEIPositionAvailable: true,
+        validatedSEIPositionAvailable: true
+    ))
 }

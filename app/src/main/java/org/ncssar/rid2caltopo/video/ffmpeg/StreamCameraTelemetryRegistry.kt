@@ -33,6 +33,13 @@ data class StreamCameraTelemetrySample(
     val fovAzimuthDeg: Double? = null,
 )
 
+internal fun shouldBlockRidClueFallback(
+    seiPositionAuthorityEstablished: Boolean,
+    freshRawSeiPositionAvailable: Boolean,
+    validatedSeiPositionAvailable: Boolean,
+): Boolean = !validatedSeiPositionAvailable &&
+    (seiPositionAuthorityEstablished || freshRawSeiPositionAvailable)
+
 object StreamCameraTelemetryRegistry {
     const val DEFAULT_MAX_AGE_MS = 3_000L
     private const val EARTH_RADIUS_METERS = 6_378_137.0
@@ -150,53 +157,9 @@ object StreamCameraTelemetryRegistry {
         samples[designator.trim().uppercase()]?.receivedAtMs ?: 0L
     }
 
-    /**
-     * Validates the independently decoded full-width DJI position against a current RID fix.
-     * Position is withheld when the two sources disagree beyond the operational gate, while
-     * camera orientation remains usable and RID remains the caller's position fallback.
-     */
-    fun freshAnchored(
-        designator: String,
-        anchorLatitudeDeg: Double,
-        anchorLongitudeDeg: Double,
-        anchorAltitudeMeters: Double? = null,
-        takeoffMslMeters: Double? = null,
-        nowMs: Long = System.currentTimeMillis(),
-        maxAgeMs: Long = DEFAULT_MAX_AGE_MS,
-    ): StreamCameraTelemetrySample? {
-        val sample = fresh(designator, nowMs, maxAgeMs) ?: return null
-        val anchoredHorizontal = if (
-            anchorLatitudeDeg.isFinite() && anchorLatitudeDeg in -90.0..90.0 &&
-            anchorLongitudeDeg.isFinite() && anchorLongitudeDeg in -180.0..180.0 &&
-            sample.latitudeDeg != null && sample.longitudeDeg != null
-        ) {
-            val latitudeRadians = Math.toRadians(sample.latitudeDeg)
-            val residualNorth = Math.toRadians(anchorLatitudeDeg - sample.latitudeDeg) * EARTH_RADIUS_METERS
-            val residualEast = Math.toRadians(anchorLongitudeDeg - sample.longitudeDeg) *
-                EARTH_RADIUS_METERS * cos(latitudeRadians)
-            hypot(residualNorth, residualEast).takeIf { it <= MAX_RID_ANCHOR_RESIDUAL_METERS }
-        } else null
-        val validatedRelativeUp = if (
-            sample.relativeUpMeters != null && anchorAltitudeMeters?.isFinite() == true &&
-            takeoffMslMeters?.isFinite() == true
-        ) {
-            val targetUp = anchorAltitudeMeters - takeoffMslMeters
-            sample.relativeUpMeters.takeIf {
-                kotlin.math.abs(it - targetUp) <= MAX_RID_VERTICAL_RESIDUAL_METERS
-            }
-        } else sample.relativeUpMeters
-        if (anchoredHorizontal != null) {
-            synchronized(lock) {
-                positionValidated.add(designator.trim().uppercase())
-            }
-        }
-        return sample.copy(
-            latitudeDeg = sample.latitudeDeg.takeIf { anchoredHorizontal != null },
-            longitudeDeg = sample.longitudeDeg.takeIf { anchoredHorizontal != null },
-            northMeters = sample.northMeters.takeIf { anchoredHorizontal != null },
-            eastMeters = sample.eastMeters.takeIf { anchoredHorizontal != null },
-            relativeUpMeters = validatedRelativeUp,
-        )
+    /** Once true, operational consumers must not silently downgrade this stream to RID. */
+    fun isPositionAuthorityEstablished(designator: String): Boolean = synchronized(lock) {
+        positionValidated.contains(designator.trim().uppercase())
     }
 
     /**

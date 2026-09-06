@@ -5,8 +5,20 @@ import org.junit.Assert.assertSame
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
+import java.io.File
 
 class ClueCaptureSummaryTest {
+    @Test
+    fun clueCaptureUsesValidatedSeiContinuationInsteadOfPerReadRidAnchoring() {
+        val source = sequenceOf(
+            File("src/main/java/org/ncssar/rid2caltopo/video/StreamsViewModel.kt"),
+            File("app/src/main/java/org/ncssar/rid2caltopo/video/StreamsViewModel.kt"),
+        ).first(File::isFile).readText()
+
+        assertTrue(source.contains("StreamCameraTelemetryRegistry.freshPositionAfterRidValidation("))
+        assertTrue(!source.contains("StreamCameraTelemetryRegistry.freshAnchored("))
+    }
+
     @Test
     fun videoMslAgl_prefersPlausibleAltitudeDifference() {
         assertEquals(64.595, videoMslAglMeters(574.595, 510.0) ?: 0.0, 0.000001)

@@ -672,6 +672,62 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun recordedVideoTrackerInteractionPreventsIdleParkUntilRequestEnds() {
+        coordinator.setVideoStreamRequestListener { }
+        coordinator.setStandaloneStandbyEligible(true)
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
+        coordinator.updateManagedVideoStreams(
+            "Training",
+            listOf(
+                ManagedVideoStreamAdvertisement(
+                    "recording-1",
+                    "NCS1m3",
+                    1280,
+                    720,
+                    30.0,
+                    2_000_000,
+                    "h264",
+                    "recording",
+                    "2026-09-05T12:00:00Z",
+                    30_000L,
+                    "revision-1",
+                    null,
+                )
+            ),
+        )
+        TrackerPeerCoordinator.setIdleParkDelayMsForTesting(200L)
+        coordinator.setStandaloneStandbyEligible(false)
+        coordinator.setStandaloneStandbyEligible(true)
+
+        Thread.sleep(120L)
+        transport.receive(
+            JSONObject()
+                .put("type", "video_stream_request")
+                .put("requestId", "playback-1")
+                .put("requesterEmail", "command@uas4sar.com")
+                .put("streamSessionId", "recording-1")
+                .put("incidentName", "Training")
+                .put("droneDesignator", "NCS1m3")
+                .toString()
+        )
+        Thread.sleep(120L)
+
+        assertTrue(transport.connected)
+
+        transport.receive(
+            JSONObject()
+                .put("type", "video_stream_request_cancelled")
+                .put("requestId", "playback-1")
+                .toString()
+        )
+        Thread.sleep(240L)
+
+        assertFalse(transport.connected)
+        assertEquals(PeerCoordinator.CoordinationIndicatorState.IDLE, coordinator.coordinationIndicatorState)
+    }
+
+    @Test
     fun activeMapSession_doesNotEnterStandaloneStandby() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         coordinator.handleHelloAckForTesting()

@@ -26,7 +26,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.os.CancellationSignal
-import android.os.SystemClock
 import android.provider.Settings
 import android.view.Display
 import android.view.View
@@ -195,48 +194,61 @@ internal fun organizationAccessAuthenticationRequired(
     trackerOrganizationConfigured ||
     caltopoTeamsAccountConfigured
 
-internal const val ORGANIZATION_ACCESS_BACKGROUND_GRACE_MSEC = 15_000L
-
-internal fun organizationAccessSessionRemainsValid(
-    authenticated: Boolean,
-    backgroundedAtMsec: Long?,
-    resumedAtMsec: Long,
-): Boolean {
-    if (!authenticated) return false
-    val backgroundedAt = backgroundedAtMsec ?: return true
-    return (resumedAtMsec - backgroundedAt).coerceAtLeast(0L) <
-        ORGANIZATION_ACCESS_BACKGROUND_GRACE_MSEC
+internal enum class OrganizationExternalFlow {
+    ARCHIVE_DIRECTORY_PICKER,
+    CONFIG_QR_SCANNER,
+    TRACKER_REAUTHENTICATION_BROWSER,
 }
 
-private object OrganizationAccessSession {
+internal class OrganizationAccessSession {
     private var authenticated = false
-    private var backgroundedAtMsec: Long? = null
+    private var trustedExternalFlow: OrganizationExternalFlow? = null
 
+    @Synchronized
     fun markAuthenticated() {
         authenticated = true
-        backgroundedAtMsec = null
     }
 
-    fun markBackgrounded(nowMsec: Long) {
-        if (authenticated) backgroundedAtMsec = nowMsec
+    @Synchronized
+    fun beginTrustedExternalFlow(flow: OrganizationExternalFlow): Boolean {
+        if (!authenticated || trustedExternalFlow != null) return false
+        trustedExternalFlow = flow
+        return true
     }
 
-    fun resume(nowMsec: Long): Boolean {
-        val valid = organizationAccessSessionRemainsValid(
-            authenticated,
-            backgroundedAtMsec,
-            nowMsec,
-        )
-        authenticated = valid
-        backgroundedAtMsec = null
-        return valid
+    @Synchronized
+    fun completeTrustedExternalFlow(flow: OrganizationExternalFlow) {
+        if (trustedExternalFlow == flow) trustedExternalFlow = null
     }
 
+    @Synchronized
+    fun activityStopped(isChangingConfigurations: Boolean): Boolean {
+        if (authenticated && (isChangingConfigurations || trustedExternalFlow != null)) {
+            return true
+        }
+        authenticated = false
+        trustedExternalFlow = null
+        return false
+    }
+
+    @Synchronized
+    fun invalidateForScreenLock() {
+        // Retain the flow marker so its eventual result can still be consumed, but
+        // require authentication before protected app content is shown again.
+        authenticated = false
+    }
+
+    @Synchronized
+    fun isAuthenticated(): Boolean = authenticated
+
+    @Synchronized
     fun invalidate() {
         authenticated = false
-        backgroundedAtMsec = null
+        trustedExternalFlow = null
     }
 }
+
+private val organizationAccessSession = OrganizationAccessSession()
 
 private fun configuredAccessAuthenticationRequired(): Boolean =
     CaltopoClient.GetCaltopoCredentials().let { credentials ->
@@ -418,6 +430,27 @@ private fun TrackerReauthenticationDialog(
         dismissButton = {
             TextButton(onClick = onContinueOffline) {
                 Text("Continue offline")
+            }
+        },
+    )
+}
+
+@Composable
+private fun TrackerReenrollmentRequiredDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Tracker re-enrollment required") },
+        text = {
+            Text(
+                "Tracker rejected this tablet's organization authorization. It may have " +
+                    "been retired, expired, or replaced. In Import Config, scan a current " +
+                    "organization enrollment QR to re-enroll this tablet. Offline RID and " +
+                    "the incident map remain available."
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("OK")
             }
         },
     )
@@ -677,6 +710,7 @@ class R2CActivity :
     private var pendingOrganizationAccessIntent: Intent? = null
     private var trackerReauthenticationBrowserOpen = false
     private var pendingTrackerReauthenticationUrl by mutableStateOf<String?>(null)
+    private var trackerReenrollmentRequired by mutableStateOf(false)
     private var pendingVideoStreamRequest by mutableStateOf<VideoStreamViewRequest?>(null)
     private var pendingRecordingDownloadRequest by mutableStateOf<RecordingDownloadRequest?>(null)
     private var pendingVideoPreflightRouteKind by mutableStateOf<String?>(null)
@@ -699,6 +733,16 @@ class R2CActivity :
     private var managedVideoSourceRecoveryJob: Job? = null
     private var pendingManagedVideoMicrophoneEnable = false
     private var bluetoothStateReceiverRegistered = false
+    private var screenLockReceiverRegistered = false
+    private val screenLockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_SCREEN_OFF) return
+            organizationAccessSession.invalidateForScreenLock()
+            organizationAuthenticationCancellation?.cancel()
+            organizationAuthenticationCancellation = null
+            CTDebug(TAG, "Organization access locked because the screen turned off")
+        }
+    }
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
@@ -953,6 +997,9 @@ class R2CActivity :
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
         if (uri.scheme == "r2creauth") {
+            organizationAccessSession.completeTrustedExternalFlow(
+                OrganizationExternalFlow.TRACKER_REAUTHENTICATION_BROWSER
+            )
             trackerReauthenticationBrowserOpen = false
             pendingTrackerReauthenticationUrl = null
             // Consume the callback before acting on it. Keeping the VIEW intent attached to
@@ -1061,13 +1108,18 @@ class R2CActivity :
 
     override fun onResume() {
         super.onResume()
+        val returnedFromTrackerReauthentication = trackerReauthenticationBrowserOpen
+        if (returnedFromTrackerReauthentication) {
+            trackerReauthenticationBrowserOpen = false
+            organizationAccessSession.completeTrustedExternalFlow(
+                OrganizationExternalFlow.TRACKER_REAUTHENTICATION_BROWSER
+            )
+        }
         if (launchDisclaimerAccepted) {
             if (configuredAccessAuthenticationRequired() &&
                 organizationAccessState != OrganizationAccessState.AUTHENTICATING
             ) {
-                organizationAccessState = if (
-                    OrganizationAccessSession.resume(SystemClock.elapsedRealtime())
-                ) {
+                organizationAccessState = if (organizationAccessSession.isAuthenticated()) {
                     organizationAccessError = null
                     OrganizationAccessState.UNLOCKED
                 } else {
@@ -1078,10 +1130,9 @@ class R2CActivity :
         }
         ScanningService.setDisplayActive(applicationContext, true, externalDisplayConnected)
         val retryTrackerReauthentication = shouldRetryTrackerReauthenticationAfterBrowserReturn(
-            browserWasOpen = trackerReauthenticationBrowserOpen,
+            browserWasOpen = returnedFromTrackerReauthentication,
             pendingUrl = pendingTrackerReauthenticationUrl,
         )
-        trackerReauthenticationBrowserOpen = false
         if (retryTrackerReauthentication) {
             pendingTrackerReauthenticationUrl = null
             CTDebug(
@@ -1099,15 +1150,12 @@ class R2CActivity :
     override fun onStop() {
         ScanningService.setDisplayActive(applicationContext, false, externalDisplayConnected)
         if (configuredAccessAuthenticationRequired() &&
-            organizationAccessState != OrganizationAccessState.AUTHENTICATING &&
-            !isChangingConfigurations
+            organizationAccessState != OrganizationAccessState.AUTHENTICATING
         ) {
-            if (organizationAccessState == OrganizationAccessState.UNLOCKED) {
-                OrganizationAccessSession.markBackgrounded(SystemClock.elapsedRealtime())
-            } else {
-                OrganizationAccessSession.invalidate()
-            }
-            organizationAccessState = OrganizationAccessState.LOCKED
+            val remainsAuthenticated = organizationAccessSession.activityStopped(
+                isChangingConfigurations = isChangingConfigurations,
+            )
+            if (!remainsAuthenticated) organizationAccessState = OrganizationAccessState.LOCKED
         }
         super.onStop()
     }
@@ -1150,6 +1198,7 @@ class R2CActivity :
         displayManager?.registerDisplayListener(displayListener, null)
         reloadExternalDisplayConfig()
         registerBluetoothStateReceiver()
+        registerScreenLockReceiver()
         refreshBluetoothDisabledState("startup")
 
         setContent {
@@ -1287,9 +1336,17 @@ class R2CActivity :
                         val thumbnailRefreshDesignators =
                             (previewDesignators + caltopoDesignators).take(4).toSet()
                         streamsViewModel.setManagedVideoPreviewSources(thumbnailRefreshDesignators)
-                        val recordings = ManagedVideoSessionRecordingCatalog.snapshot(
+                        var recordings = ManagedVideoSessionRecordingCatalog.snapshot(
                             applicationContext
                         )
+                        if (recordings.isEmpty()) {
+                            ManagedVideoSessionRecordingCatalog.recoverCurrentIncidentFromArchive(
+                                applicationContext
+                            )
+                            recordings = ManagedVideoSessionRecordingCatalog.snapshot(
+                                applicationContext
+                            )
+                        }
                         var advertisements = ManagedVideoStreamPresence.snapshot(
                             streams = streams,
                             sourceInfoProvider = streamsViewModel::managedVideoSourceInfo,
@@ -1349,6 +1406,10 @@ class R2CActivity :
                             onDeveloperToolsOpened = {
                                 openDeveloperToolsWhenMainOpens = false
                             },
+                            onArchiveDirPickerStarted = ::beginArchiveDirectoryPicker,
+                            onArchiveDirPickerFinished = ::finishArchiveDirectoryPicker,
+                            onConfigQrScannerStarted = ::beginConfigQrScanner,
+                            onConfigQrScannerFinished = ::finishConfigQrScanner,
                             onRequestExit = {
                                 requestAppExit(AppExitRequestSource.QUIT_MENU)
                             },
@@ -1559,6 +1620,11 @@ class R2CActivity :
                         },
                     )
                 }
+                if (trackerReenrollmentRequired) {
+                    TrackerReenrollmentRequiredDialog(
+                        onDismiss = { trackerReenrollmentRequired = false },
+                    )
+                }
                 if (pendingAppExitSource != null) {
                     ConfirmAppExitDialog(
                         onCancel = cancelAppExit,
@@ -1571,7 +1637,7 @@ class R2CActivity :
 
     fun lockOrganizationAccessAndAuthenticate() {
         if (!configuredAccessAuthenticationRequired()) return
-        OrganizationAccessSession.invalidate()
+        organizationAccessSession.invalidate()
         organizationAccessState = OrganizationAccessState.LOCKED
         organizationAccessError = null
         requestOrganizationAccessAuthentication()
@@ -1579,7 +1645,7 @@ class R2CActivity :
 
     private fun requestOrganizationAccessAuthentication() {
         if (!configuredAccessAuthenticationRequired()) {
-            OrganizationAccessSession.invalidate()
+            organizationAccessSession.invalidate()
             organizationAuthenticationCancellation?.cancel()
             organizationAuthenticationCancellation = null
             organizationAccessState = OrganizationAccessState.UNLOCKED
@@ -1619,7 +1685,7 @@ class R2CActivity :
                     result: BiometricPrompt.AuthenticationResult
                 ) {
                     organizationAuthenticationCancellation = null
-                    OrganizationAccessSession.markAuthenticated()
+                    organizationAccessSession.markAuthenticated()
                     organizationAccessState = OrganizationAccessState.UNLOCKED
                     organizationAccessError = null
                     CTDebug(TAG, "Device owner authenticated for organization access")
@@ -1635,7 +1701,7 @@ class R2CActivity :
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     organizationAuthenticationCancellation = null
-                    OrganizationAccessSession.invalidate()
+                    organizationAccessSession.invalidate()
                     organizationAccessState = OrganizationAccessState.LOCKED
                     organizationAccessError =
                         "Authentication was not completed. Organization maps remain locked."
@@ -1774,6 +1840,61 @@ class R2CActivity :
         } finally {
             bluetoothStateReceiverRegistered = false
         }
+    }
+
+    private fun registerScreenLockReceiver() {
+        if (screenLockReceiverRegistered) return
+        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenLockReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(screenLockReceiver, filter)
+        }
+        screenLockReceiverRegistered = true
+    }
+
+    private fun unregisterScreenLockReceiver() {
+        if (!screenLockReceiverRegistered) return
+        try {
+            unregisterReceiver(screenLockReceiver)
+        } catch (e: Exception) {
+            CTError(TAG, "unregisterScreenLockReceiver() raised:", e)
+        } finally {
+            screenLockReceiverRegistered = false
+        }
+    }
+
+    private fun beginArchiveDirectoryPicker(): Boolean {
+        val started = organizationAccessSession.beginTrustedExternalFlow(
+            OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER
+        )
+        if (!started) {
+            CTError(TAG, "Archive directory picker could not begin a trusted external flow")
+        }
+        return started
+    }
+
+    private fun finishArchiveDirectoryPicker() {
+        organizationAccessSession.completeTrustedExternalFlow(
+            OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER
+        )
+    }
+
+    private fun beginConfigQrScanner(): Boolean {
+        val started = organizationAccessSession.beginTrustedExternalFlow(
+            OrganizationExternalFlow.CONFIG_QR_SCANNER
+        )
+        if (!started) {
+            CTError(TAG, "Config QR scanner could not begin a trusted external flow")
+        }
+        return started
+    }
+
+    private fun finishConfigQrScanner() {
+        organizationAccessSession.completeTrustedExternalFlow(
+            OrganizationExternalFlow.CONFIG_QR_SCANNER
+        )
     }
 
     private fun refreshBluetoothDisabledState(reason: String) {
@@ -2091,17 +2212,29 @@ class R2CActivity :
         }
     }
 
+    fun showTrackerReenrollmentRequired() {
+        runOnUiThread {
+            trackerReenrollmentRequired = true
+        }
+    }
+
     private fun openPendingTrackerReauthentication() {
         val url = pendingTrackerReauthenticationUrl ?: return
         if (!shouldOpenTrackerReauthentication(trackerReauthenticationBrowserOpen)) {
             CTDebug(TAG, "Tracker reauthentication browser is already open")
             return
         }
+        organizationAccessSession.beginTrustedExternalFlow(
+            OrganizationExternalFlow.TRACKER_REAUTHENTICATION_BROWSER
+        )
         trackerReauthenticationBrowserOpen = true
         runCatching {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
         }.onFailure {
             trackerReauthenticationBrowserOpen = false
+            organizationAccessSession.completeTrustedExternalFlow(
+                OrganizationExternalFlow.TRACKER_REAUTHENTICATION_BROWSER
+            )
             showToast("Unable to open Tracker sign-in. Tap Sign in to try again.")
         }
     }
@@ -2111,6 +2244,7 @@ class R2CActivity :
         managedVideoMediaPeer = null
         setVolumeControlStream(AudioManager.STREAM_ALARM)
         unregisterBluetoothStateReceiver()
+        unregisterScreenLockReceiver()
         displayManager?.unregisterDisplayListener(displayListener)
         dismissExternalDisplay(returnPhoneToMain = false)
         val exitRequested = CaltopoClient.IsExitRequested()
@@ -2124,7 +2258,7 @@ class R2CActivity :
         )
 
         if (shouldShutdown) {
-            OrganizationAccessSession.invalidate()
+            organizationAccessSession.invalidate()
             try {
                 stopLocationUpdates()
                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.setPeerListChangedListener(null)

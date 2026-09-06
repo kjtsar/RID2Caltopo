@@ -11,6 +11,8 @@ import StreamsViewModel
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
 import android.location.Location
 import android.os.Build
@@ -58,6 +60,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.HybridBinarizer
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -272,6 +280,7 @@ internal suspend fun <T> readMutualAidPackagePreviewOffMain(
 internal enum class ImportConfigFileKind {
     JSON_CONFIG,
     MUTUAL_AID_PACKAGE,
+    QR_IMAGE,
     UNSUPPORTED
 }
 
@@ -282,11 +291,67 @@ internal fun classifyImportConfigFile(
     val normalizedName = displayName?.trim()?.lowercase().orEmpty()
     if (normalizedName.endsWith(".json")) return ImportConfigFileKind.JSON_CONFIG
     if (normalizedName.endsWith(".zip")) return ImportConfigFileKind.MUTUAL_AID_PACKAGE
+    if (
+        listOf(".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif")
+            .any(normalizedName::endsWith)
+    ) return ImportConfigFileKind.QR_IMAGE
 
-    return when (mimeType?.substringBefore(';')?.trim()?.lowercase()) {
-        "application/json", "text/json", "text/plain" -> ImportConfigFileKind.JSON_CONFIG
-        "application/zip", "application/x-zip-compressed" -> ImportConfigFileKind.MUTUAL_AID_PACKAGE
+    val normalizedMimeType = mimeType?.substringBefore(';')?.trim()?.lowercase()
+    return when {
+        normalizedMimeType in setOf("application/json", "text/json", "text/plain") ->
+            ImportConfigFileKind.JSON_CONFIG
+        normalizedMimeType in setOf("application/zip", "application/x-zip-compressed") ->
+            ImportConfigFileKind.MUTUAL_AID_PACKAGE
+        normalizedMimeType?.startsWith("image/") == true -> ImportConfigFileKind.QR_IMAGE
         else -> ImportConfigFileKind.UNSUPPORTED
+    }
+}
+
+internal fun decodeQrCodePixels(width: Int, height: Int, pixels: IntArray): String? {
+    if (width <= 0 || height <= 0 || pixels.size != width * height) return null
+    val reader = MultiFormatReader().apply {
+        setHints(
+            mapOf(
+                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                DecodeHintType.TRY_HARDER to true
+            )
+        )
+    }
+    return runCatching {
+        reader.decodeWithState(
+            BinaryBitmap(HybridBinarizer(RGBLuminanceSource(width, height, pixels)))
+        ).text
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+}
+
+internal suspend fun decodeQrCodeImage(
+    context: Context,
+    uri: Uri,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO
+): String? = withContext(dispatcher) {
+    val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) {
+                decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            val longestEdge = maxOf(info.size.width, info.size.height)
+            if (longestEdge > 4096) {
+                val scale = 4096.0 / longestEdge.toDouble()
+                decoder.setTargetSize(
+                    (info.size.width * scale).toInt().coerceAtLeast(1),
+                    (info.size.height * scale).toInt().coerceAtLeast(1)
+                )
+            }
+        }
+    } else {
+        context.contentResolver.openInputStream(uri)?.use(BitmapFactory::decodeStream)
+    } ?: return@withContext null
+
+    try {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        decodeQrCodePixels(bitmap.width, bitmap.height, pixels)
+    } finally {
+        bitmap.recycle()
     }
 }
 
@@ -402,6 +467,10 @@ fun MainScreen(
     onSetExternalDisplayContent: ((ExternalDisplayContentMode) -> Unit)? = null,
     openDeveloperToolsOnStart: Boolean = false,
     onDeveloperToolsOpened: () -> Unit = {},
+    onArchiveDirPickerStarted: () -> Boolean,
+    onArchiveDirPickerFinished: () -> Unit,
+    onConfigQrScannerStarted: () -> Boolean,
+    onConfigQrScannerFinished: () -> Unit,
     onRequestExit: () -> Unit,
 ) {
     val tag = "MainScreen"
@@ -435,6 +504,7 @@ fun MainScreen(
     var showOrgExportDialog by remember { mutableStateOf(false) }
     var showFaaExportDialog by remember { mutableStateOf(false) }
     var showImportConfigDialog by remember { mutableStateOf(false) }
+    var pendingImportToken by rememberSaveable { mutableStateOf("") }
     var showReleaseNotesDialog by remember { mutableStateOf(false) }
     var releaseNoteEntries by remember { mutableStateOf(parseReleaseNotes(null)) }
     var pendingMutualAidImportUri by remember { mutableStateOf<Uri?>(null) }
@@ -678,9 +748,30 @@ fun MainScreen(
                 ImportConfigFileKind.MUTUAL_AID_PACKAGE -> {
                     CTDebug(tag, "importConfigFileLauncher(): routing '$displayName' ($mimeType) to MA package importer")
                 }
+                ImportConfigFileKind.QR_IMAGE -> {
+                    CTDebug(tag, "importConfigFileLauncher(): routing '$displayName' ($mimeType) to QR decoder")
+                    coroutineScope.launch {
+                        val payload = runCatching { decodeQrCodeImage(context, uri) }
+                            .onFailure { error ->
+                                CTError(
+                                    tag,
+                                    "importConfigFileLauncher(): QR image decode failed: ",
+                                    error as? Exception ?: Exception(error)
+                                )
+                            }
+                            .getOrNull()
+                        if (payload.isNullOrBlank()) {
+                            CaltopoClient.ShowToast("No readable QR code was found in that image.")
+                        } else {
+                            pendingImportToken = payload
+                            showImportConfigDialog = true
+                        }
+                    }
+                    return@rememberLauncherForActivityResult
+                }
                 ImportConfigFileKind.UNSUPPORTED -> {
                     CTError(tag, "importConfigFileLauncher(): unsupported file '$displayName' ($mimeType)")
-                    CaltopoClient.ShowToast("Choose a .json config or .zip MA package.")
+                    CaltopoClient.ShowToast("Choose a QR image, .json config, or .zip MA package.")
                     return@rememberLauncherForActivityResult
                 }
             }
@@ -846,6 +937,7 @@ fun MainScreen(
 
     if (showImportConfigDialog) {
         ImportConfigDialog(
+            initialToken = pendingImportToken,
             onDismiss = { showImportConfigDialog = false },
             onJoin = { token ->
                 showImportConfigDialog = false
@@ -895,6 +987,8 @@ fun MainScreen(
                     }
                 }
             },
+            onScannerStarted = onConfigQrScannerStarted,
+            onScannerFinished = onConfigQrScannerFinished,
             onPickFile = {
                 showImportConfigDialog = false
                 importConfigFileLauncher.launch(
@@ -902,7 +996,8 @@ fun MainScreen(
                         "application/json",
                         "text/plain",
                         "application/zip",
-                        "application/octet-stream"
+                        "application/octet-stream",
+                        "image/*"
                     )
                 )
             }
@@ -1196,6 +1291,7 @@ fun MainScreen(
     val queryArchiveDirLauncher = rememberLauncherForActivityResult(
         contract = OpenArchiveDir(),
         onResult = { uri ->
+            onArchiveDirPickerFinished()
             archiveDirPickerOpen = false
             if (null != uri) {
                 CTDebug(tag, "queryArchiveDirLauncher() returned: '${uri}'")
@@ -1269,7 +1365,19 @@ fun MainScreen(
                         pendingArchiveDirPermissionMissing = false
                         archiveDirPickerOpen = true
                         CTDebug(tag, "Archive directory prompt confirmed initialUri='${initialUri ?: "<none>"}'")
-                        queryArchiveDirLauncher.launch(initialUri)
+                        if (onArchiveDirPickerStarted()) {
+                            try {
+                                queryArchiveDirLauncher.launch(initialUri)
+                            } catch (error: Exception) {
+                                onArchiveDirPickerFinished()
+                                archiveDirPickerOpen = false
+                                CTError(tag, "Unable to open archive directory picker:", error)
+                                CaltopoClient.ShowToast("Unable to open the archive folder picker.")
+                            }
+                        } else {
+                            archiveDirPickerOpen = false
+                            CaltopoClient.ShowToast("Unlock protected access before choosing an archive folder.")
+                        }
                     }
                 ) {
                     Text(promptActions.continueLabel)
@@ -1284,7 +1392,19 @@ fun MainScreen(
                             pendingArchiveDirPermissionMissing = false
                             archiveDirPickerOpen = true
                             CTDebug(tag, "Archive directory prompt requested a different folder")
-                            queryArchiveDirLauncher.launch(null)
+                            if (onArchiveDirPickerStarted()) {
+                                try {
+                                    queryArchiveDirLauncher.launch(null)
+                                } catch (error: Exception) {
+                                    onArchiveDirPickerFinished()
+                                    archiveDirPickerOpen = false
+                                    CTError(tag, "Unable to open archive directory picker:", error)
+                                    CaltopoClient.ShowToast("Unable to open the archive folder picker.")
+                                }
+                            } else {
+                                archiveDirPickerOpen = false
+                                CaltopoClient.ShowToast("Unlock protected access before choosing an archive folder.")
+                            }
                         }
                     ) {
                         Text(chooseDifferentLabel)
@@ -1443,6 +1563,7 @@ fun MainScreen(
                             text = { Text("Import Config") },
                             onClick = {
                                 menuExpanded = false
+                                pendingImportToken = ""
                                 showImportConfigDialog = true
                             }
                         )

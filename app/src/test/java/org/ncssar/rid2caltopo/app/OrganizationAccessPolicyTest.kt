@@ -17,11 +17,88 @@ class OrganizationAccessPolicyTest {
     }
 
     @Test
-    fun authenticatedSessionSurvivesOnlyBriefBackgroundInactivity() {
-        assertTrue(organizationAccessSessionRemainsValid(true, null, 50_000L))
-        assertTrue(organizationAccessSessionRemainsValid(true, 10_000L, 24_999L))
-        assertFalse(organizationAccessSessionRemainsValid(true, 10_000L, 25_000L))
-        assertFalse(organizationAccessSessionRemainsValid(false, 10_000L, 10_001L))
-        assertTrue(organizationAccessSessionRemainsValid(true, 20_000L, 19_000L))
+    fun authenticatedSessionSurvivesTrustedArchivePickerUntilItsResult() {
+        val session = OrganizationAccessSession()
+        session.markAuthenticated()
+
+        assertTrue(session.beginTrustedExternalFlow(OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER))
+        assertTrue(session.activityStopped(isChangingConfigurations = false))
+        assertTrue(session.isAuthenticated())
+
+        session.completeTrustedExternalFlow(OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER)
+        assertTrue(session.isAuthenticated())
+    }
+
+    @Test
+    fun authenticatedSessionSurvivesConfigQrScannerUntilItsResult() {
+        val session = OrganizationAccessSession()
+        session.markAuthenticated()
+
+        assertTrue(session.beginTrustedExternalFlow(OrganizationExternalFlow.CONFIG_QR_SCANNER))
+        assertTrue(session.activityStopped(isChangingConfigurations = false))
+        assertTrue(session.isAuthenticated())
+
+        session.completeTrustedExternalFlow(OrganizationExternalFlow.CONFIG_QR_SCANNER)
+        assertTrue(session.isAuthenticated())
+    }
+
+    @Test
+    fun authenticatedSessionSurvivesTrackerReauthenticationBrowserUntilReturn() {
+        val session = OrganizationAccessSession()
+        session.markAuthenticated()
+
+        assertTrue(
+            session.beginTrustedExternalFlow(
+                OrganizationExternalFlow.TRACKER_REAUTHENTICATION_BROWSER
+            )
+        )
+        assertTrue(session.activityStopped(isChangingConfigurations = false))
+        assertTrue(session.isAuthenticated())
+
+        session.completeTrustedExternalFlow(
+            OrganizationExternalFlow.TRACKER_REAUTHENTICATION_BROWSER
+        )
+        assertTrue(session.isAuthenticated())
+    }
+
+    @Test
+    fun ordinaryBackgroundingInvalidatesAuthenticatedSession() {
+        val session = OrganizationAccessSession()
+        session.markAuthenticated()
+
+        assertFalse(session.activityStopped(isChangingConfigurations = false))
+        assertFalse(session.isAuthenticated())
+    }
+
+    @Test
+    fun screenLockInvalidatesAuthenticationWhileRetainingPickerCompletion() {
+        val session = OrganizationAccessSession()
+        session.markAuthenticated()
+        assertTrue(session.beginTrustedExternalFlow(OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER))
+
+        session.invalidateForScreenLock()
+        assertFalse(session.isAuthenticated())
+
+        session.completeTrustedExternalFlow(OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER)
+        assertFalse(session.isAuthenticated())
+    }
+
+    @Test
+    fun configurationChangePreservesAuthenticatedSession() {
+        val session = OrganizationAccessSession()
+        session.markAuthenticated()
+
+        assertTrue(session.activityStopped(isChangingConfigurations = true))
+        assertTrue(session.isAuthenticated())
+    }
+
+    @Test
+    fun processSessionCannotStartOverlappingTrustedFlows() {
+        val session = OrganizationAccessSession()
+        assertFalse(session.beginTrustedExternalFlow(OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER))
+
+        session.markAuthenticated()
+        assertTrue(session.beginTrustedExternalFlow(OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER))
+        assertFalse(session.beginTrustedExternalFlow(OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER))
     }
 }

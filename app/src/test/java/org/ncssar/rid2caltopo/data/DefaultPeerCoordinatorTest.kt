@@ -9,6 +9,14 @@ import org.junit.Test
 import org.json.JSONObject
 
 class DefaultPeerCoordinatorTest {
+
+    @Test
+    fun reenrollmentNoticeIsShownOncePerRejectedCredential() {
+        assertTrue(DefaultPeerCoordinator.shouldShowReenrollmentNotice(null, "token-a"))
+        assertFalse(DefaultPeerCoordinator.shouldShowReenrollmentNotice("token-a", "token-a"))
+        assertTrue(DefaultPeerCoordinator.shouldShowReenrollmentNotice("token-a", "token-b"))
+    }
+
     private class FakeTransport : TrackerCoordinationTransport {
         var connected = false
         var connectCount = 0
@@ -172,7 +180,10 @@ class DefaultPeerCoordinatorTest {
             PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED,
             coordinator.coordinationIndicatorState
         )
-        assertEquals("Coordinator unavailable", coordinator.coordinationStatusText)
+        assertEquals(
+            DefaultPeerCoordinator.TRACKER_REENROLLMENT_REQUIRED_STATUS,
+            coordinator.coordinationStatusText
+        )
         assertTrue(
             coordinator.coordinationDiagnosticLines.toString(),
             coordinator.coordinationDiagnosticLines.any {

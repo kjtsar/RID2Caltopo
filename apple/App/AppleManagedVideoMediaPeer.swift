@@ -42,6 +42,7 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
     private var audioSource: RTCAudioSource?
     private var audioTrack: RTCAudioTrack?
     private var videoSource: RTCVideoSource?
+    private var videoTrack: RTCVideoTrack?
     private var capturer: RTCVideoCapturer?
     private var statsTimer: DispatchSourceTimer?
     private var answerSent = false
@@ -54,6 +55,9 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
     private var lastFramesSent: Int64 = 0
     private var lastDiagnosticAt: CFTimeInterval = 0
     private var localICECandidates: [RTCIceCandidate] = []
+    private var decodedFramesReceived: Int64 = 0
+    private var framesSubmittedToWebRTC: Int64 = 0
+    private var framesDroppedBeforeReady: Int64 = 0
 
     init(
         answerSink: @escaping AnswerSink,
@@ -160,9 +164,11 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
 
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
-        // The browser is already relay-only. Allow the tablet to contribute
-        // host or server-reflexive candidates and avoid double TURN allocation.
-        configuration.iceTransportPolicy = .all
+        // The browser is relay-only and signaling carries one complete answer
+        // rather than trickled candidates. Require the tablet's answer to use
+        // TURN as well so a prematurely sent server-reflexive candidate cannot
+        // strand the peer while later relay candidates remain undisclosed.
+        configuration.iceTransportPolicy = .relay
         configuration.continualGatheringPolicy = .gatherContinually
         configuration.iceServers = iceServers.map {
             RTCIceServer(
@@ -191,43 +197,14 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         self.videoSource = videoSource
         capturer = RTCVideoCapturer(delegate: videoSource)
         let track = factory.videoTrack(with: videoSource, trackId: "r2c-video-\(requestID)")
+        track.isEnabled = true
+        videoTrack = track
         guard let sender = peer.add(track, streamIds: ["r2c-\(requestID)"]) else {
             failOnQueue("Unable to attach the authorized video track.")
             return
         }
         self.sender = sender
-        let parameters = sender.parameters
-        let bitratePolicy = ManagedVideoQualityPolicy.senderBitrates(
-            targetBps: selectedBitrateBps
-        )
-        let minimumBitrateBps = bitratePolicy.minimumBps
-        let startupBitrateBps = bitratePolicy.startupBps
-        let encodings = parameters.encodings.isEmpty
-            ? [RTCRtpEncodingParameters()]
-            : parameters.encodings
-        for encoding in encodings {
-            encoding.isActive = true
-            encoding.minBitrateBps = NSNumber(value: minimumBitrateBps)
-            encoding.maxBitrateBps = NSNumber(value: bitratePolicy.maximumBps)
-            encoding.maxFramerate = NSNumber(value: selectedFPS)
-            encoding.scaleResolutionDownBy = NSNumber(value: 1.0)
-        }
-        parameters.encodings = encodings
-        parameters.degradationPreference = NSNumber(
-            value: RTCDegradationPreference.maintainResolution.rawValue
-        )
-        sender.parameters = parameters
-        let bweApplied = peer.setBweMinBitrateBps(
-            NSNumber(value: minimumBitrateBps),
-            currentBitrateBps: NSNumber(value: startupBitrateBps),
-            maxBitrateBps: NSNumber(value: bitratePolicy.maximumBps)
-        )
-        AppleLog.info(
-            "VideoMedia",
-            "request=\(requestID) sender target=\(selectedWidth)x\(selectedHeight)@\(selectedFPS) "
-                + "bitrate min/current/max=\(minimumBitrateBps)/\(startupBitrateBps)/\(selectedBitrateBps) "
-                + "degradation=maintain-resolution scale=1.0 bweApplied=\(bweApplied)"
-        )
+        applySenderLimitsOnQueue(stage: "before-negotiation")
 
         let offer = RTCSessionDescription(type: .offer, sdp: offerSDP)
         peer.setRemoteDescription(offer) { [weak self] error in
@@ -284,6 +261,7 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
                                 if let error {
                                     self.failOnQueue("Unable to apply the media answer: \(Self.describe(error))")
                                 } else {
+                                    self.applySenderLimitsOnQueue(stage: "after-negotiation")
                                     self.maybeSendAnswerOnQueue()
                                 }
                             }
@@ -348,15 +326,79 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
     ) {
         let transfer = AppleManagedVideoPixelBuffer(value: pixelBuffer)
         queue.async { [weak self, transfer] in
-            guard let self, let capturer, let videoSource else { return }
-            let buffer = RTCCVPixelBuffer(pixelBuffer: transfer.value)
+            guard let self else { return }
+            self.decodedFramesReceived += 1
+            guard let capturer, let videoSource, self.videoTrack?.isEnabled == true else {
+                self.framesDroppedBeforeReady += 1
+                if self.framesDroppedBeforeReady == 1 {
+                    AppleLog.warning(
+                        "VideoMedia",
+                        "request=\(self.requestID) decoded frame arrived before sender was ready"
+                    )
+                }
+                return
+            }
+            // Canonical I420 avoids relying on the hardware encoder accepting a
+            // decoder-owned NV12/420v surface. That path connected successfully
+            // on iPadOS but produced no encoded frames or RTP packets.
+            let pixelFormat = CVPixelBufferGetPixelFormatType(transfer.value)
+            let buffer = RTCCVPixelBuffer(pixelBuffer: transfer.value).toI420()
             let frame = RTCVideoFrame(
                 buffer: buffer,
                 rotation: ._0,
                 timeStampNs: timestampNanoseconds
             )
             videoSource.capturer(capturer, didCapture: frame)
+            self.framesSubmittedToWebRTC += 1
+            if self.framesSubmittedToWebRTC == 1 {
+                AppleLog.info(
+                    "VideoMedia",
+                    "request=\(self.requestID) first frame submitted to WebRTC "
+                        + "source=\(CVPixelBufferGetWidth(transfer.value))x"
+                        + "\(CVPixelBufferGetHeight(transfer.value)) "
+                        + "pixelFormat=\(Self.fourCC(pixelFormat))"
+                )
+            }
         }
+    }
+
+    private func applySenderLimitsOnQueue(stage: String) {
+        guard let sender, let peer else { return }
+        let parameters = sender.parameters
+        let bitratePolicy = ManagedVideoQualityPolicy.senderBitrates(
+            targetBps: selectedBitrateBps
+        )
+        // WebRTC does not allow changing the number of RTP encodings. Before
+        // negotiation the array can legitimately be empty; manufacturing an
+        // encoding here can leave the iOS sender with no usable negotiated
+        // layer. Reapply the limits after setLocalDescription, when WebRTC has
+        // populated the negotiated encodings.
+        for encoding in parameters.encodings {
+            encoding.isActive = true
+            encoding.minBitrateBps = NSNumber(value: bitratePolicy.minimumBps)
+            encoding.maxBitrateBps = NSNumber(value: bitratePolicy.maximumBps)
+            encoding.maxFramerate = NSNumber(value: selectedFPS)
+            encoding.scaleResolutionDownBy = NSNumber(value: 1.0)
+        }
+        parameters.degradationPreference = NSNumber(
+            value: RTCDegradationPreference.maintainResolution.rawValue
+        )
+        if !parameters.encodings.isEmpty {
+            sender.parameters = parameters
+        }
+        let bweApplied = peer.setBweMinBitrateBps(
+            NSNumber(value: bitratePolicy.minimumBps),
+            currentBitrateBps: NSNumber(value: bitratePolicy.startupBps),
+            maxBitrateBps: NSNumber(value: bitratePolicy.maximumBps)
+        )
+        AppleLog.info(
+            "VideoMedia",
+            "request=\(requestID) sender stage=\(stage) "
+                + "target=\(selectedWidth)x\(selectedHeight)@\(selectedFPS) "
+                + "bitrate min/current/max=\(bitratePolicy.minimumBps)/"
+                + "\(bitratePolicy.startupBps)/\(bitratePolicy.maximumBps) "
+                + "encodings=\(parameters.encodings.count) bweApplied=\(bweApplied)"
+        )
     }
 
     private func maybeSendAnswerOnQueue(allowPartialGathering: Bool = false) {
@@ -375,10 +417,10 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
                 )
             }
         )
-        guard ManagedVideoSDP.hasRoutableICECandidate(completeAnswer) else {
+        guard ManagedVideoSDP.hasRelayICECandidate(completeAnswer) else {
             AppleLog.debug(
                 "VideoMedia",
-                "request=\(requestID) answer awaiting routed ICE candidate "
+                "request=\(requestID) answer awaiting relay ICE candidate "
                     + "gathering=\(String(describing: peer.iceGatheringState)) "
                     + "gathered=\(localICECandidates.count)"
             )
@@ -484,6 +526,9 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
                         + "actual=\(width)x\(height)@\(String(format: "%.1f", effectiveFPS)) "
                         + "bitrate=\(effectiveBitrate) target=\(self.selectedBitrateBps) "
                         + "bytes=\(bytesSent) frames=\(framesSent) "
+                        + "decoded=\(self.decodedFramesReceived) "
+                        + "submitted=\(self.framesSubmittedToWebRTC) "
+                        + "notReady=\(self.framesDroppedBeforeReady) "
                         + "audioSent=\(audioBytesSent) audioReceived=\(audioBytesReceived) "
                         + "qualityLimit=\(qualityLimitationReason) "
                         + "rttMs=\(roundTripTimeSeconds.map { Int(($0 * 1_000).rounded()) } ?? -1) "
@@ -529,6 +574,8 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         closingPeer?.delegate = nil
         closingPeer?.close()
         sender = nil
+        videoTrack?.isEnabled = false
+        videoTrack = nil
         audioTrack?.isEnabled = false
         audioSender?.track = nil
         audioTrack = nil
@@ -543,6 +590,17 @@ final class AppleManagedVideoMediaPeer: NSObject, @unchecked Sendable {
         lastDiagnosticAt = 0
         answerSent = false
         localICECandidates.removeAll(keepingCapacity: false)
+        decodedFramesReceived = 0
+        framesSubmittedToWebRTC = 0
+        framesDroppedBeforeReady = 0
+    }
+
+    private static func fourCC(_ value: OSType) -> String {
+        let characters = [24, 16, 8, 0].map { shift -> Character in
+            let byte = UInt8((value >> OSType(shift)) & 0xff)
+            return byte >= 32 && byte <= 126 ? Character(UnicodeScalar(byte)) : "?"
+        }
+        return String(characters)
     }
 
     private static func errorSuffix(_ error: Error?) -> String {
@@ -607,7 +665,10 @@ extension AppleManagedVideoMediaPeer: RTCPeerConnectionDelegate {
             guard ManagedVideoSDP.hasRoutableICECandidate(candidate.sdp) else {
                 return
             }
-            self.queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+            // Signaling sends one non-trickle answer. Allow the usual UDP/TCP/
+            // TLS TURN candidates to arrive together instead of committing to
+            // whichever relay callback happened to win the first race.
+            self.queue.asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in
                 self?.maybeSendAnswerOnQueue(allowPartialGathering: true)
             }
         }

@@ -77,6 +77,7 @@ import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.DjiCameraOrientation
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetryRegistry
+import org.ncssar.rid2caltopo.video.ffmpeg.shouldBlockRidClueFallback
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamCameraTelemetrySample
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
@@ -2145,14 +2146,39 @@ class StreamsViewModel(
         val telemetryStartedAtMs = System.currentTimeMillis()
         val telemetry = ffmpegProbeService?.telemetrySnapshot(designator)
         logSnapshotIfSlow("telemetrySnapshot", System.currentTimeMillis() - telemetryStartedAtMs)
-        val freshDjiCamera = StreamCameraTelemetryRegistry.freshAnchored(
+        val freshRawDjiCamera = StreamCameraTelemetryRegistry.fresh(designator)
+        val freshDjiCamera = StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
             designator = designator,
             anchorLatitudeDeg = droneSpec.lastLat,
             anchorLongitudeDeg = droneSpec.lastLng,
             anchorAltitudeMeters = droneSpec.lastAlt,
-            takeoffMslMeters = droneSpec.getImpliedTakeoffAltM(),
+            takeoffReportedAltitudeMeters = droneSpec.getImpliedTakeoffAltM(),
             nowMs = System.currentTimeMillis(),
         )
+        val validatedSeiPositionAvailable = freshDjiCamera?.latitudeDeg != null &&
+            freshDjiCamera.longitudeDeg != null
+        val freshRawSeiPositionAvailable = freshRawDjiCamera?.latitudeDeg != null &&
+            freshRawDjiCamera.longitudeDeg != null
+        val seiPositionAuthorityEstablished = StreamCameraTelemetryRegistry
+            .isPositionAuthorityEstablished(designator)
+        if (shouldBlockRidClueFallback(
+                seiPositionAuthorityEstablished = seiPositionAuthorityEstablished,
+                freshRawSeiPositionAvailable = freshRawSeiPositionAvailable,
+                validatedSeiPositionAvailable = validatedSeiPositionAvailable,
+            )
+        ) {
+            CaltopoClient.CTWarn(
+                tag,
+                "onSnapshotCaptured($designator): clue blocked instead of falling back to RID " +
+                    "seiAuthority=$seiPositionAuthorityEstablished " +
+                    "freshRawSeiPosition=$freshRawSeiPositionAvailable",
+            )
+            CaltopoClient.ShowToast(
+                "Clue unavailable: current video aircraft position is unavailable. " +
+                    "Wait for SEI telemetry and try again.",
+            )
+            return
+        }
         val nonDjiTelemetry = telemetry?.takeUnless { it.sourceTag == "dji-sei-245" }
         val clueLat = freshDjiCamera?.latitudeDeg ?: nonDjiTelemetry?.latitude ?: droneSpec.lastLat
         val clueLng = freshDjiCamera?.longitudeDeg ?: nonDjiTelemetry?.longitude ?: droneSpec.lastLng
@@ -2162,7 +2188,10 @@ class StreamsViewModel(
             droneSpec.getImpliedTakeoffAltM()?.plus(relativeUp)
         }
         val clueAlt = seiBarometricAltitude ?: nonDjiTelemetry?.altitudeMeters ?: droneSpec.lastAlt
-        val clueTimestamp = nonDjiTelemetry?.sourceTimestampUs?.div(1000L)
+        val clueTimestamp = freshDjiCamera
+            ?.takeIf { it.latitudeDeg != null && it.longitudeDeg != null }
+            ?.receivedAtMs
+            ?: nonDjiTelemetry?.sourceTimestampUs?.div(1000L)
             ?: droneSpec.mostRecentMsecTimestamp
         val displayState = streamTelemetryDisplayState(
             streamDesignator = designator,
@@ -2251,7 +2280,11 @@ class StreamsViewModel(
             title = "",
             description = buildClueDescriptionTemplate(clueTimestamp),
             streamTelemetrySummary = summary,
-            aircraftPositionSourceLabel = if (nonDjiTelemetry?.latitude != null) "stream" else "RID",
+            aircraftPositionSourceLabel = when {
+                freshDjiCamera?.latitudeDeg != null -> "DJI SEI local displacement"
+                nonDjiTelemetry?.latitude != null -> "stream"
+                else -> "RID"
+            },
         )
 
         requestDemClueProjectionRefresh(designator)

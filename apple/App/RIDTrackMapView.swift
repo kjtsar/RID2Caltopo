@@ -1556,26 +1556,37 @@ struct RIDTrackMapView: View {
         }
         let ridCaptureObservation = captureTrack.lastObservation
         let captureAltitudeDisplay = model.altitudeDisplayByAircraftID[defaultAircraftID]
-        let takeoffMsl = ridCaptureObservation.altitudeMeters.flatMap { ridMsl in
-            captureAltitudeDisplay?.atoFeet.map { ridMsl - $0 * 0.3048 }
+        let takeoffMsl = captureTrack.points.first?.altitudeMeters
+        let freshDjiCameraTelemetry = session.model.freshDJICameraTelemetry()
+        let validatedDjiPositionTelemetry = streamRegistry
+            .freshValidatedDJIPositionByAircraftID(tracks: model.tracks)[defaultAircraftID]
+        let freshRawSEIPositionAvailable = freshDjiCameraTelemetry?.latitudeDegrees != nil &&
+            freshDjiCameraTelemetry?.longitudeDegrees != nil
+        let validatedSEIPositionAvailable = validatedDjiPositionTelemetry?.latitudeDegrees != nil &&
+            validatedDjiPositionTelemetry?.longitudeDegrees != nil
+        if OperationalCluePositionSourcePolicy.shouldBlockRIDFallback(
+            seiPositionAuthorityEstablished: streamRegistry.isSEIPositionAuthorityEstablished(
+                streamID: streamID
+            ),
+            freshRawSEIPositionAvailable: freshRawSEIPositionAvailable,
+            validatedSEIPositionAvailable: validatedSEIPositionAvailable
+        ) {
+            AppleLog.warning(
+                "Clues",
+                "Clue blocked instead of falling back to RID for stream \(streamID)"
+            )
+            clueError = "Current video aircraft position is unavailable. Wait for SEI telemetry and try again."
+            return
         }
-        let djiCameraTelemetry = session.model.freshDJICameraTelemetry()?.anchoredToRID(
-            latitude: ridCaptureObservation.latitude,
-            longitude: ridCaptureObservation.longitude,
-            altitudeMeters: ridCaptureObservation.altitudeMeters,
-            takeoffMslMeters: takeoffMsl
-        )
-        let seiMslAltitude: Double? = djiCameraTelemetry?.relativeUpMeters.flatMap { relativeUp -> Double? in
-            guard let ridMsl = ridCaptureObservation.altitudeMeters,
-                  let atoFeet = captureAltitudeDisplay?.atoFeet else { return nil }
-            return ridMsl - atoFeet * 0.3048 + relativeUp
+        let seiMslAltitude: Double? = validatedDjiPositionTelemetry?.relativeUpMeters.flatMap { relativeUp -> Double? in
+            takeoffMsl.map { $0 + relativeUp }
         }
         let captureObservation = RidObservation(
             source: ridCaptureObservation.source,
             aircraftId: ridCaptureObservation.aircraftId,
             receivedAt: ridCaptureObservation.receivedAt,
-            latitude: djiCameraTelemetry?.latitudeDegrees ?? ridCaptureObservation.latitude,
-            longitude: djiCameraTelemetry?.longitudeDegrees ?? ridCaptureObservation.longitude,
+            latitude: validatedDjiPositionTelemetry?.latitudeDegrees ?? ridCaptureObservation.latitude,
+            longitude: validatedDjiPositionTelemetry?.longitudeDegrees ?? ridCaptureObservation.longitude,
             altitudeMeters: seiMslAltitude ?? ridCaptureObservation.altitudeMeters,
             heightMeters: ridCaptureObservation.heightMeters,
             heightReference: ridCaptureObservation.heightReference,
@@ -1587,12 +1598,12 @@ struct RIDTrackMapView: View {
             signalStrengthDbm: ridCaptureObservation.signalStrengthDbm,
             droneScoutRelay: ridCaptureObservation.droneScoutRelay
         )
-        let captureGimbalPitch = djiCameraTelemetry?.tiltDegrees
+        let captureGimbalPitch = freshDjiCameraTelemetry?.tiltDegrees
             ?? session.model.latestGimbalPitchDegrees
         let captureHeading = OperationalClueGeometry.selectedHeading(
-            cameraAzimuthDegrees: djiCameraTelemetry?.cameraAzimuthDegrees,
-            videoCourseDegrees: djiCameraTelemetry?.courseDegrees,
-            cameraYawDegrees: djiCameraTelemetry == nil
+            cameraAzimuthDegrees: freshDjiCameraTelemetry?.cameraAzimuthDegrees,
+            videoCourseDegrees: freshDjiCameraTelemetry?.courseDegrees,
+            cameraYawDegrees: freshDjiCameraTelemetry == nil
                 ? session.model.latestCameraYawDegrees
                 : nil,
             streamHeadingDegrees: session.model.latestStreamHeadingDegrees,
@@ -1618,7 +1629,7 @@ struct RIDTrackMapView: View {
                     observation: captureObservation,
                     altitudeDisplay: captureAltitudeDisplay,
                     heading: captureHeading,
-                    djiCameraTelemetry: djiCameraTelemetry
+                    djiCameraTelemetry: validatedDjiPositionTelemetry ?? freshDjiCameraTelemetry
                 )
             } catch {
                 clueError = error.localizedDescription

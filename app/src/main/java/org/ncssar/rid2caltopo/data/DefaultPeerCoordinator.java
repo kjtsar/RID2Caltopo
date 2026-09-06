@@ -3,6 +3,8 @@ package org.ncssar.rid2caltopo.data;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.ncssar.rid2caltopo.app.R2CActivity;
+
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,6 +18,8 @@ import java.util.List;
  * app continues to route through the existing static {@link R2CMqttManager}.
  */
 public final class DefaultPeerCoordinator implements PeerCoordinator {
+    public static final String TRACKER_REENROLLMENT_REQUIRED_STATUS =
+            "Tracker authorization rejected; re-enrollment required";
     private static final DefaultPeerCoordinator INSTANCE = new DefaultPeerCoordinator();
     @Nullable private static volatile PeerCoordinator mqttCoordinatorOverrideForTesting;
 
@@ -52,6 +56,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     private volatile boolean trackerSelected;
     private volatile boolean trackerFallbackActive;
     @NonNull private volatile String trackerUnavailableDetail = "";
+    @Nullable private String lastReenrollmentNoticeTrackerApiKey;
     private volatile double myLat;
     private volatile double myLon;
     private volatile long myCaltopoRttMs = 2_000L;
@@ -475,6 +480,9 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     @Override
     public String getCoordinationStatusText() {
         if (isCoordinatorUnavailable()) {
+            if (trackerFallbackActive) {
+                return TRACKER_REENROLLMENT_REQUIRED_STATUS;
+            }
             return "Coordinator unavailable";
         }
         if (isStandaloneTrackerCoordinationDisabled()) {
@@ -579,6 +587,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     private void handleTrackerHardFailure(int responseCode, @Nullable String responseMessage) {
         if (!trackerSelected) return;
+        boolean showReenrollmentNotice = markReenrollmentNoticeForCurrentCredential();
         trackerFallbackActive = true;
         trackerUnavailableDetail = "Tracker unavailable: HTTP " + responseCode +
                 (responseMessage == null || responseMessage.isEmpty() ? "" : " " + responseMessage);
@@ -587,7 +596,29 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                 String.format("Tracker coordination hard-failed with code=%d message='%s'; falling back to MQTT.",
                         responseCode, responseMessage == null ? "" : responseMessage)
         );
+        if (showReenrollmentNotice) {
+            R2CActivity activity = R2CActivity.getR2CActivity();
+            if (activity != null) {
+                activity.showTrackerReenrollmentRequired();
+            }
+        }
         switchToCoordinator(getMqttCoordinator(), false);
+    }
+
+    private synchronized boolean markReenrollmentNoticeForCurrentCredential() {
+        String trackerApiKey = CaltopoClient.GetTrackerCoordinationApiKey().trim();
+        if (!shouldShowReenrollmentNotice(lastReenrollmentNoticeTrackerApiKey, trackerApiKey)) {
+            return false;
+        }
+        lastReenrollmentNoticeTrackerApiKey = trackerApiKey;
+        return true;
+    }
+
+    static boolean shouldShowReenrollmentNotice(
+            @Nullable String lastRejectedTrackerApiKey,
+            @NonNull String currentTrackerApiKey) {
+        return lastRejectedTrackerApiKey == null ||
+                !lastRejectedTrackerApiKey.equals(currentTrackerApiKey);
     }
 
     private synchronized void switchToCoordinator(@NonNull PeerCoordinator coordinator, boolean tracker) {

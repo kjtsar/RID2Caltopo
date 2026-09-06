@@ -11,7 +11,8 @@ public enum TrackerStandbyPolicy {
         activeSightings: Int,
         pendingConfirmations: Int,
         hasLiveVideo: Bool,
-        activeMediaConnections: Int
+        activeMediaConnections: Int,
+        activeTrackerInteractions: Int = 0
     ) -> Bool {
         standalone
             && connected
@@ -21,5 +22,6 @@ public enum TrackerStandbyPolicy {
             && pendingConfirmations == 0
             && !hasLiveVideo
             && activeMediaConnections == 0
+            && activeTrackerInteractions == 0
     }
 }

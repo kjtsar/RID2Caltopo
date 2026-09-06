@@ -28,7 +28,7 @@ internal class H264ArchiveAccessUnitAssembler {
         private set
 
     fun offer(sample: Sample): List<Sample> {
-        if (sample.data.isSeiOnlyAvccAccessUnit()) {
+        if (sample.data.isSeiOnlyH264AccessUnit()) {
             val pending = pendingSei
             pendingSei = if (pending == null) sample else pending.combinedWith(sample)
             pendingSeiCount += 1L
@@ -36,7 +36,7 @@ internal class H264ArchiveAccessUnitAssembler {
         }
 
         val pending = pendingSei ?: return listOf(sample)
-        if (!sample.data.hasVclAvccNalUnit()) return listOf(sample)
+        if (!sample.data.hasVclH264NalUnit()) return listOf(sample)
         pendingSei = null
         mergedSeiCount += pendingSeiCount
         pendingSeiCount = 0L
@@ -98,14 +98,44 @@ internal fun ByteArray.avccNalUnitTypes(): List<Int>? {
     return types
 }
 
-private fun ByteArray.isSeiOnlyAvccAccessUnit(): Boolean {
-    val types = avccNalUnitTypes() ?: return false
+internal fun ByteArray.annexBNalUnitTypes(): List<Int>? {
+    val types = mutableListOf<Int>()
+    var offset = 0
+    while (offset <= size - 3) {
+        val startCodeLength = when {
+            offset <= size - 4 &&
+                this[offset] == 0.toByte() &&
+                this[offset + 1] == 0.toByte() &&
+                this[offset + 2] == 0.toByte() &&
+                this[offset + 3] == 1.toByte() -> 4
+            this[offset] == 0.toByte() &&
+                this[offset + 1] == 0.toByte() &&
+                this[offset + 2] == 1.toByte() -> 3
+            else -> 0
+        }
+        if (startCodeLength == 0) {
+            offset += 1
+            continue
+        }
+        val nalOffset = offset + startCodeLength
+        if (nalOffset >= size) return null
+        types += this[nalOffset].toInt() and H264_NAL_TYPE_MASK
+        offset = nalOffset + 1
+    }
+    return types.takeIf { it.isNotEmpty() }
+}
+
+private fun ByteArray.h264NalUnitTypes(): List<Int>? =
+    avccNalUnitTypes() ?: annexBNalUnitTypes()
+
+private fun ByteArray.isSeiOnlyH264AccessUnit(): Boolean {
+    val types = h264NalUnitTypes() ?: return false
     return H264_NAL_TYPE_SEI in types &&
         types.none { it in H264_NAL_TYPE_NON_IDR..H264_NAL_TYPE_IDR }
 }
 
-internal fun ByteArray.hasVclAvccNalUnit(): Boolean =
-    avccNalUnitTypes()?.any { it in H264_NAL_TYPE_NON_IDR..H264_NAL_TYPE_IDR } == true
+internal fun ByteArray.hasVclH264NalUnit(): Boolean =
+    h264NalUnitTypes()?.any { it in H264_NAL_TYPE_NON_IDR..H264_NAL_TYPE_IDR } == true
 
 private const val AVCC_LENGTH_BYTES = 4
 private const val H264_NAL_TYPE_MASK = 0x1f

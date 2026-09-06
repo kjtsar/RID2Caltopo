@@ -1,5 +1,16 @@
 import Foundation
 
+public enum OperationalCluePositionSourcePolicy {
+    public static func shouldBlockRIDFallback(
+        seiPositionAuthorityEstablished: Bool,
+        freshRawSEIPositionAvailable: Bool,
+        validatedSEIPositionAvailable: Bool
+    ) -> Bool {
+        !validatedSEIPositionAvailable &&
+            (seiPositionAuthorityEstablished || freshRawSEIPositionAvailable)
+    }
+}
+
 public struct OperationalSEIPositionContinuation: Sendable, Equatable {
     public private(set) var positionValidated = false
     public private(set) var relativeUpValidated = false

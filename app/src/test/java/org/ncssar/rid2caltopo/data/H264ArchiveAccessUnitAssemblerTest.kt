@@ -55,6 +55,22 @@ class H264ArchiveAccessUnitAssemblerTest {
     }
 
     @Test
+    fun annexBExtractorSamplesJoinSeiToFollowingPicture() {
+        val assembler = H264ArchiveAccessUnitAssembler()
+        val sei = annexBNal(type = 6, payload = byteArrayOf(0xf5.toByte(), 0x62, 0x09))
+        val picture = annexBNal(type = 1, payload = byteArrayOf(0x18, 0x22, 0x33))
+
+        assertTrue(assembler.offer(sample(sei, ptsUs = 16_000L, flags = 0)).isEmpty())
+        val output = assembler.offer(sample(picture, ptsUs = 16_000L, flags = 1)).single()
+
+        assertEquals(16_000L, output.presentationTimeUs)
+        assertEquals(1, output.flags)
+        assertArrayEquals(sei + picture, output.data)
+        assertEquals(listOf(6, 1), output.data.annexBNalUnitTypes())
+        assertEquals(1L, assembler.mergedSeiCount)
+    }
+
+    @Test
     fun trailingSeiIsDiscardedInsteadOfBecomingTimedMp4Sample() {
         val assembler = H264ArchiveAccessUnitAssembler()
         val sei = avccNal(type = 6, payload = byteArrayOf(1))
@@ -101,4 +117,7 @@ class H264ArchiveAccessUnitAssemblerTest {
             type.toByte(),
         ) + payload
     }
+
+    private fun annexBNal(type: Int, payload: ByteArray): ByteArray =
+        byteArrayOf(0, 0, 0, 1, type.toByte()) + payload
 }

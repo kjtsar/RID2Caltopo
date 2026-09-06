@@ -19,6 +19,10 @@ class R2CViewCoordinatorStatusTest {
         assertEquals("MQTT OK", coordinatorStatusDisplayText("MQTT link healthy"))
         assertEquals("MQTT degraded", coordinatorStatusDisplayText("MQTT link degraded"))
         assertEquals("Unavailable", coordinatorStatusDisplayText("Coordinator unavailable"))
+        assertEquals(
+            "Re-enroll required",
+            coordinatorStatusDisplayText("Tracker authorization rejected; re-enrollment required")
+        )
     }
 
     @Test

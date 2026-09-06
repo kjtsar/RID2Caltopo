@@ -134,6 +134,24 @@ class R2CActivityLogArchiveTest {
         assertTrue(activitySource.contains("onSignIn = ::openPendingTrackerReauthentication"))
     }
 
+    @Test
+    fun archivePickerUsesTrustedTransitionAndScreenLockRevokesAuthentication() {
+        val activitySource = projectSource(
+            "app/src/main/java/org/ncssar/rid2caltopo/app/R2CActivity.kt"
+        )
+        val mainScreenSource = projectSource(
+            "app/src/main/java/org/ncssar/rid2caltopo/ui/MainScreen.kt"
+        )
+
+        assertTrue(activitySource.contains("Intent.ACTION_SCREEN_OFF"))
+        assertTrue(activitySource.contains("organizationAccessSession.invalidateForScreenLock()"))
+        assertTrue(activitySource.contains("onArchiveDirPickerStarted = ::beginArchiveDirectoryPicker"))
+        assertTrue(activitySource.contains("onArchiveDirPickerFinished = ::finishArchiveDirectoryPicker"))
+        assertTrue(mainScreenSource.contains("onArchiveDirPickerStarted()"))
+        assertTrue(mainScreenSource.contains("onArchiveDirPickerFinished()"))
+        assertFalse(activitySource.contains("ORGANIZATION_ACCESS_BACKGROUND_GRACE_MSEC"))
+    }
+
     private fun projectSource(relativePath: String): String {
         val workingDirectory = File(requireNotNull(System.getProperty("user.dir")))
         val candidates = listOf(

@@ -39,8 +39,8 @@ final class AppleManagedVideoPreflightPeer: NSObject, @unchecked Sendable {
     typealias FailureSink = @Sendable (String, String) -> Void
 
     private static let chunkBytes = 16 * 1024
-    private static let probeDuration: TimeInterval = 4.0
-    private static let probeWarmupDuration: TimeInterval = 0.5
+    private static let probeDuration: TimeInterval = 7.0
+    private static let probeWarmupDuration: TimeInterval = 1.5
     private static let connectionTimeout: TimeInterval = 12.0
     private static let safetyMargin = 0.75
     private static let sslInitialized = RTCInitializeSSL()

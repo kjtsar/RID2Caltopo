@@ -180,6 +180,7 @@ internal fun coordinatorStatusDisplayText(statusText: String): String = when (st
     "Tracker link standby" -> "Tracker standby"
     "Tracker link degraded" -> "Tracker degraded"
     "Tracker link disabled" -> "Disabled"
+    "Tracker authorization rejected; re-enrollment required" -> "Re-enroll required"
     "Tracker link not configured",
     "R2C link not configured" -> "Not configured"
     "MQTT link healthy" -> "MQTT OK"

@@ -3,10 +3,15 @@ package org.ncssar.rid2caltopo.video
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.util.Base64
+import androidx.documentfile.provider.DocumentFile
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.ManagedVideoStreamAdvertisement
+import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.time.Instant
@@ -34,8 +39,22 @@ data class ManagedVideoSessionRecording(
 object ManagedVideoSessionRecordingCatalog {
     private const val TAG = "ManagedVideoRecordingCatalog"
     private const val ROOT_NAME = "managed-video-session-recordings"
+    private const val MAX_ARCHIVE_RECOVERY_RECORDINGS = 4
+    private const val MIN_FREE_SPACE_AFTER_RECOVERY_BYTES = 256L * 1024L * 1024L
     internal const val TRACK_ASSOCIATION_GRACE_MS = 30_000L
     private var initializedIncidentKey = ""
+    private var recoveredArchiveKey = ""
+    private val recordingMetadataCache = mutableMapOf<String, CachedRecordingMetadata>()
+
+    private data class CachedRecordingMetadata(
+        val fingerprint: RecordingFingerprint,
+        val recording: ManagedVideoSessionRecording?,
+    )
+
+    internal data class RecordingFingerprint(
+        val length: Long,
+        val lastModified: Long,
+    )
 
     @Synchronized
     fun initialize(context: Context) {
@@ -84,10 +103,15 @@ object ManagedVideoSessionRecordingCatalog {
     @Synchronized
     fun snapshot(context: Context): List<ManagedVideoSessionRecording> {
         initialize(context)
-        return activeRoot(context)
+        val files = activeRoot(context)
             .walkTopDown()
             .filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) }
-            .mapNotNull(::readRecording)
+            .toList()
+        val currentPaths = files.mapTo(mutableSetOf()) { it.absolutePath }
+        recordingMetadataCache.keys.retainAll(currentPaths)
+        return files
+            .asSequence()
+            .mapNotNull(::readRecordingCached)
             .sortedByDescending { it.recordedAt }
             .take(20)
             .toList()
@@ -96,6 +120,136 @@ object ManagedVideoSessionRecordingCatalog {
     @Synchronized
     fun find(context: Context, sessionId: String): ManagedVideoSessionRecording? =
         snapshot(context).firstOrNull { it.sessionId == sessionId }
+
+    /**
+     * Return the operator-facing archive name without the catalog's private
+     * designator/session identity prefix or the remux staging marker.
+     */
+    fun downloadFileName(recording: ManagedVideoSessionRecording): String =
+        downloadFileName(recording.file.name)
+
+    internal fun downloadFileName(catalogFileName: String): String {
+        val parts = catalogFileName.split("__", limit = 3)
+        val embeddedName = parts.getOrNull(2)
+            ?.takeIf {
+                parts.getOrNull(1)?.let { sessionId ->
+                    runCatching { UUID.fromString(sessionId) }.isSuccess
+                } == true
+            }
+            ?: catalogFileName
+        return embeddedName.replace(Regex("(?i)\\.tmp(?=\\.mp4$)"), "")
+    }
+
+    suspend fun recoverCurrentIncidentFromArchive(context: Context) = withContext(Dispatchers.IO) {
+        val mapId = CaltopoMap.GetMapId().trim()
+        val archiveUri = CaltopoClient.GetArchiveUri()?.toString().orEmpty()
+        if (mapId.isEmpty() || archiveUri.isEmpty()) return@withContext
+        val recoveryKey = "$archiveUri|$mapId"
+        synchronized(this@ManagedVideoSessionRecordingCatalog) {
+            if (recoveredArchiveKey == recoveryKey) return@withContext
+        }
+        val archiveRoot = CaltopoClient.GetArchiveDir()
+            ?.takeIf { it.isDirectory }
+            ?: return@withContext
+        val matchingDesignatorsByDirectory = archiveRoot.listFiles()
+            .asSequence()
+            .filter { it.isDirectory && it.name.orEmpty().startsWith("tracks-") }
+            .mapNotNull { dayDirectory ->
+                val designators = matchingArchiveDesignators(
+                    dayDirectory.listFiles()
+                        .asSequence()
+                        .filter { it.isFile && it.name.orEmpty().endsWith(".json", true) }
+                        .mapNotNull { metadata ->
+                            runCatching {
+                                context.contentResolver.openInputStream(metadata.uri)
+                                    ?.bufferedReader()
+                                    ?.use { it.readText() }
+                            }.getOrNull()
+                        }
+                        .toList(),
+                    mapId,
+                )
+                designators.takeIf { it.isNotEmpty() }?.let { dayDirectory to it }
+            }
+            .toList()
+        val archiveRecordings = matchingDesignatorsByDirectory
+            .flatMap { (dayDirectory, designators) ->
+                dayDirectory.listFiles()
+                    .asSequence()
+                    .filter { it.isDirectory }
+                    .filter { directory ->
+                        directory.name.orEmpty().trim().lowercase() in designators
+                    }
+                    .flatMap { it.listFiles().asSequence() }
+                    .filter { it.isFile && it.name.orEmpty().endsWith(".mp4", true) }
+                    .toList()
+            }
+            .distinctBy { it.uri.toString() }
+            .sortedByDescending(DocumentFile::lastModified)
+            .take(MAX_ARCHIVE_RECOVERY_RECORDINGS)
+        val destinationRoot = activeRoot(context).also(File::mkdirs)
+        var recovered = 0
+        for (source in archiveRecordings) {
+            val designator = source.parentFile?.name.orEmpty()
+                .replace(Regex("[^A-Za-z0-9._-]"), "_")
+                .ifBlank { "recording" }
+            val sessionId = sessionIdForPath(source.uri.toString())
+            val destination = File(
+                destinationRoot,
+                "${designator}__${sessionId}__${source.name ?: "recording.mp4"}",
+            )
+            if (destination.isFile && destination.length() > 0L) continue
+            val sourceLength = source.length().coerceAtLeast(0L)
+            if (destinationRoot.usableSpace - sourceLength < MIN_FREE_SPACE_AFTER_RECOVERY_BYTES) {
+                CaltopoClient.CTWarn(TAG, "Archive recording recovery stopped: insufficient private storage")
+                break
+            }
+            val temporary = File(destinationRoot, ".${destination.name}.tmp")
+            val copied = runCatching {
+                context.contentResolver.openInputStream(source.uri).use { input ->
+                    requireNotNull(input) { "Archive recording could not be opened" }
+                    FileOutputStream(temporary).use(input::copyTo)
+                }
+                check(temporary.length() > 0L) { "Archive recording was empty" }
+                Files.move(
+                    temporary.toPath(),
+                    destination.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE,
+                )
+                source.lastModified().takeIf { it > 0L }?.let(destination::setLastModified)
+            }.onFailure { error ->
+                temporary.delete()
+                CaltopoClient.CTWarn(TAG, "Unable to recover archived recording: ${error.message}")
+            }.isSuccess
+            if (copied) recovered += 1
+        }
+        synchronized(this@ManagedVideoSessionRecordingCatalog) {
+            recoveredArchiveKey = recoveryKey
+        }
+        CaltopoClient.CTInfo(
+            TAG,
+            "Archive recording recovery matched=${archiveRecordings.size} copied=$recovered map=$mapId",
+        )
+    }
+
+    internal fun matchingArchiveDesignators(
+        metadataDocuments: List<String>,
+        mapId: String,
+    ): Set<String> = metadataDocuments.asSequence()
+        .flatMap { document ->
+            runCatching {
+                val features = JSONObject(document).optJSONArray("features")
+                    ?: return@runCatching emptySequence<String>()
+                (0 until features.length()).asSequence().mapNotNull { index ->
+                    val properties = features.optJSONObject(index)?.optJSONObject("properties")
+                    val r2c = properties?.optJSONObject("r2c_prop")
+                    if (r2c?.optString("map_id")?.trim() != mapId) return@mapNotNull null
+                    r2c.optString("mid").trim().lowercase().takeIf(String::isNotEmpty)
+                }
+            }.getOrDefault(emptySequence())
+        }
+        .toSet()
 
     @JvmStatic
     fun findForTrack(
@@ -219,6 +373,20 @@ object ManagedVideoSessionRecordingCatalog {
             null
         } finally {
             retriever.release()
+        }
+    }
+
+    private fun readRecordingCached(file: File): ManagedVideoSessionRecording? {
+        val path = file.absolutePath
+        val fingerprint = RecordingFingerprint(
+            length = file.length(),
+            lastModified = file.lastModified(),
+        )
+        recordingMetadataCache[path]
+            ?.takeIf { it.fingerprint == fingerprint }
+            ?.let { return it.recording }
+        return readRecording(file).also { recording ->
+            recordingMetadataCache[path] = CachedRecordingMetadata(fingerprint, recording)
         }
     }
 

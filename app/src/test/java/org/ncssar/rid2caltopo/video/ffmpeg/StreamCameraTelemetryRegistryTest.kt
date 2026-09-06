@@ -1,10 +1,36 @@
 package org.ncssar.rid2caltopo.video.ffmpeg
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StreamCameraTelemetryRegistryTest {
+    @Test
+    fun clueRidFallbackIsBlockedForCurrentOrPreviouslyValidatedPositionalSei() {
+        assertFalse(shouldBlockRidClueFallback(
+            seiPositionAuthorityEstablished = false,
+            freshRawSeiPositionAvailable = false,
+            validatedSeiPositionAvailable = false,
+        ))
+        assertTrue(shouldBlockRidClueFallback(
+            seiPositionAuthorityEstablished = false,
+            freshRawSeiPositionAvailable = true,
+            validatedSeiPositionAvailable = false,
+        ))
+        assertTrue(shouldBlockRidClueFallback(
+            seiPositionAuthorityEstablished = true,
+            freshRawSeiPositionAvailable = false,
+            validatedSeiPositionAvailable = false,
+        ))
+        assertFalse(shouldBlockRidClueFallback(
+            seiPositionAuthorityEstablished = true,
+            freshRawSeiPositionAvailable = true,
+            validatedSeiPositionAvailable = true,
+        ))
+    }
+
     @Test
     fun registryKeepsOnlyFreshCompleteDjiSamples() {
         StreamCameraTelemetryRegistry.update(
@@ -88,7 +114,7 @@ class StreamCameraTelemetryRegistryTest {
     }
 
     @Test
-    fun freshAnchoredValidatesFullWidthPositionAfterStreamRestart() {
+    fun continuingPositionValidatesFullWidthPositionAfterStreamRestart() {
         val referenceLatitude = 39.319435
         val referenceLongitude = -120.658820
         StreamCameraTelemetryRegistry.update(
@@ -116,12 +142,12 @@ class StreamCameraTelemetryRegistryTest {
             targetEastMeters / (6_378_137.0 * kotlin.math.cos(Math.toRadians(referenceLatitude)))
         )
 
-        val anchored = StreamCameraTelemetryRegistry.freshAnchored(
+        val anchored = StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
             designator = "RESTART",
             anchorLatitudeDeg = targetLatitude + Math.toDegrees(1.5 / 6_378_137.0),
             anchorLongitudeDeg = targetLongitude,
             anchorAltitudeMeters = 1_462.0,
-            takeoffMslMeters = 1_394.0,
+            takeoffReportedAltitudeMeters = 1_394.0,
             nowMs = 2_000,
         )
 
@@ -134,7 +160,7 @@ class StreamCameraTelemetryRegistryTest {
     }
 
     @Test
-    fun freshAnchoredWithholdsPositionWhenRidDisagrees() {
+    fun continuingPositionWithholdsPositionWhenRidDisagreesBeforeValidation() {
         StreamCameraTelemetryRegistry.update(
             "AMBIGUOUS",
             FfmpegTelemetry(
@@ -158,7 +184,7 @@ class StreamCameraTelemetryRegistryTest {
         val anchorLongitude = -121.0 + Math.toDegrees(
             32.768 / (6_378_137.0 * kotlin.math.cos(Math.toRadians(39.0)))
         )
-        val anchored = StreamCameraTelemetryRegistry.freshAnchored(
+        val anchored = StreamCameraTelemetryRegistry.freshPositionAfterRidValidation(
             "AMBIGUOUS",
             anchorLatitude,
             anchorLongitude,

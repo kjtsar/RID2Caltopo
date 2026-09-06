@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -106,7 +107,8 @@ class TrackerEnrollmentLinkTest {
 
         assertTrue(enrollmentClient.contains("syncManagedConfigurationAfterEnrollment"))
         assertTrue(enrollmentClient.contains("installation_id"))
-        assertTrue(enrollmentClient.contains("AndroidDeviceIdentity.installationId(context)"))
+        assertTrue(enrollmentClient.contains("CaltopoMap.GetMyUUID()"))
+        assertFalse(enrollmentClient.contains("AndroidDeviceIdentity.installationId"))
         assertTrue(application.contains("retryManagedConfigurationBootstrap(this)"))
     }
 }

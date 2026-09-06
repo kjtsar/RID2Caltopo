@@ -804,7 +804,7 @@ private struct AppleDeveloperToolsView: View {
         .navigationTitle("Developer Tools")
         .fileImporter(
             isPresented: $importingConfig,
-            allowedContentTypes: [.json, .plainText, .data]
+            allowedContentTypes: [.image, .json, .plainText, .data]
         ) { result in
             guard case let .success(url) = result else { return }
             Task {

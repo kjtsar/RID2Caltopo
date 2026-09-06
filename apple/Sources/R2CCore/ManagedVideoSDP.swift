@@ -64,4 +64,8 @@ public enum ManagedVideoSDP {
     public static func hasRoutableICECandidate(_ value: String) -> Bool {
         value.contains(" typ srflx ") || value.contains(" typ relay ")
     }
+
+    public static func hasRelayICECandidate(_ value: String) -> Bool {
+        value.contains(" typ relay ")
+    }
 }

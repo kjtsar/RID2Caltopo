@@ -90,6 +90,8 @@ struct ContentView: View {
     @State private var trackerReauthenticationBrowserOpen = false
     @State private var trackerReauthenticationURL: URL?
     @State private var showTrackerReauthenticationPrompt = false
+    @State private var showTrackerReenrollmentRequired = false
+    @State private var lastTrackerReenrollmentNoticeCredential: String?
     @State private var organizationAccessEvaluated = false
     @State private var organizationAccessGranted = false
     @State private var organizationAccessObscured = false
@@ -283,6 +285,16 @@ struct ContentView: View {
                 reauthenticationURL: $trackerReauthenticationURL,
                 browserOpen: $trackerReauthenticationBrowserOpen
             ))
+            .alert("Tracker re-enrollment required", isPresented: $showTrackerReenrollmentRequired) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(
+                    "Tracker rejected this tablet's organization authorization. It may have "
+                        + "been retired, expired, or replaced. In Import Config, scan a current "
+                        + "organization enrollment QR to re-enroll this tablet. Offline RID and "
+                        + "the incident map remain available."
+                )
+            }
             .alert("Confirm Exit", isPresented: $showConfirmExit) {
                 Button("Cancel", role: .cancel) {
                     AppleLog.info("Lifecycle", "Quit cancelled")
@@ -964,6 +976,14 @@ struct ContentView: View {
             .onChange(of: peerCoordinator.statusDetail) { _, detail in
                 AppleLog.info("TrackerPeer", detail)
                 publishLocalDeviceMarker(force: true)
+                if detail == AppleTrackerCoordinator.reenrollmentRequiredStatusDetail {
+                    let credential = orgConfigSettings.trackerAPIKey
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if lastTrackerReenrollmentNoticeCredential != credential {
+                        lastTrackerReenrollmentNoticeCredential = credential
+                        showTrackerReenrollmentRequired = true
+                    }
+                }
             }
             .onChange(
                 of: peerCoordinator.reauthenticationRequiredGeneration,
@@ -1738,7 +1758,10 @@ struct ContentView: View {
         case .healthy: "Tracker verified"
         case .standby: "Tracker standby"
         case .degraded: "Tracker degraded"
-        case .unavailable: "Unavailable"
+        case .unavailable:
+            peerCoordinator.statusDetail == AppleTrackerCoordinator.reenrollmentRequiredStatusDetail
+                ? "Re-enroll required"
+                : "Unavailable"
         case .standalone: "Disabled"
         case .unconfigured: "Not configured"
         case .connecting: "Connecting"

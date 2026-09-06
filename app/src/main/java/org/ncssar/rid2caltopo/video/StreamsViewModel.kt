@@ -1104,6 +1104,10 @@ class StreamsViewModel(
      */
     fun addAltitudeConsumer(): () -> Unit = altitudeCoordinator.addConsumer()
 
+    fun prefetchTerrainForLocation(latitude: Double, longitude: Double) {
+        altitudeCoordinator.prefetchTerrainForLocation(latitude, longitude)
+    }
+
     fun droneDisplayStateFor(mappedId: String): DroneDisplayState? =
         altitudeCoordinator.displayStateByDesignator[mappedId]
 
@@ -1312,6 +1316,7 @@ class StreamsViewModel(
                 activeKeys.add(key)
                 val state = _droneStates.getOrPut(key) { DroneSpecState(spec) }
                 state.updateFrom(spec)
+                altitudeCoordinator.prefetchTerrainForLocation(spec.lastLat, spec.lastLng)
             }
         }
         _droneStates.keys.toList().forEach { key ->

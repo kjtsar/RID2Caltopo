@@ -11,13 +11,19 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.video.MINIMUM_TRAVEL_BEARING_DISPLACEMENT_METERS
+import org.ncssar.rid2caltopo.video.autoDownloadBestDemForLocation
+import org.ncssar.rid2caltopo.video.demPrefetchCellKey
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import androidx.compose.runtime.snapshotFlow
+import java.util.concurrent.TimeUnit
 
 /**
  * Computes AGL, ATO, and heading for all tracked drones, combining RID position/telemetry
@@ -39,9 +45,16 @@ internal class DroneAltitudeCoordinator(
     private val droneStates: Map<String, DroneSpecState>,
 ) {
     private val tag = "DroneAltCoord"
+    private val applicationContext = appContext.applicationContext
 
     // ── Public DEM service (MapPane still needs it for tile downloads, offline prep, stats) ─
-    val demElevationService = DemElevationService(appContext)
+    val demElevationService = DemElevationService(applicationContext)
+    private val terrainPrefetchCells = HashSet<String>()
+    private val terrainPrefetchMutex = Mutex()
+    private val terrainPrefetchClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.MINUTES)
+        .build()
 
     // ── Output: read by ViewModel / MapPane / StreamTile ────────────────────────────────────
     val displayStateByDesignator = mutableStateMapOf<String, DroneDisplayState>()
@@ -377,6 +390,7 @@ internal class DroneAltitudeCoordinator(
     ) {
         if (lat == 0.0 && lng == 0.0) return
         if (!lat.isFinite() || !lng.isFinite()) return
+        prefetchTerrainForLocation(lat, lng)
 
         val demKey   = demElevationService.samplingKey(lat, lng)
         val priorKey = demKeyByRemoteId[remoteId]
@@ -419,6 +433,37 @@ internal class DroneAltitudeCoordinator(
                     }
                     recomputeDisplayState(designator)
                 }
+            }
+        }
+    }
+
+    /**
+     * Starts terrain preparation without waiting for a map pane or blocking normal app use.
+     * The first usable tablet or aircraft coordinate wins; later updates in the same small
+     * location cell are deduplicated while the serialized background transfer completes.
+     */
+    fun prefetchTerrainForLocation(lat: Double, lng: Double) {
+        if (!lat.isFinite() || !lng.isFinite() || lat !in -90.0..90.0 || lng !in -180.0..180.0) {
+            return
+        }
+        if (lat == 0.0 && lng == 0.0) return
+        // A fresh install can receive a location before archive selection completes. Do not
+        // consume the cell in that state; a later tablet/drone update must be allowed to retry.
+        if (org.ncssar.rid2caltopo.data.CaltopoClient.GetArchiveDir() == null) return
+        val cell = demPrefetchCellKey(lat, lng)
+        synchronized(terrainPrefetchCells) {
+            if (!terrainPrefetchCells.add(cell)) return
+        }
+        scope.launch(Dispatchers.IO) {
+            terrainPrefetchMutex.withLock {
+                autoDownloadBestDemForLocation(
+                    lat,
+                    lng,
+                    applicationContext,
+                    terrainPrefetchClient,
+                    demElevationService,
+                )
+                demElevationService.prewarmForLocation(lat, lng)
             }
         }
     }

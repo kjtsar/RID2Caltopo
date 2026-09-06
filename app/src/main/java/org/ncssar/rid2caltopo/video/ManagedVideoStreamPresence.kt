@@ -8,6 +8,7 @@ object ManagedVideoStreamPresence {
     private val sessionIdBySourcePath = linkedMapOf<String, String>()
     private var currentLiveDesignators = emptySet<String>()
     private var currentLiveSessionIdByDesignator = emptyMap<String, String>()
+    private var currentLiveSourceDesignatorBySessionId = emptyMap<String, String>()
     private val latestSessionIdByDesignator = linkedMapOf<String, String>()
 
     @Synchronized
@@ -65,6 +66,9 @@ object ManagedVideoStreamPresence {
         currentLiveSessionIdByDesignator = liveAdvertisements.associate {
             it.droneDesignator.trim().lowercase() to it.sessionId
         }
+        currentLiveSourceDesignatorBySessionId = live.zip(liveAdvertisements).associate {
+            (stream, advertisement) -> advertisement.sessionId to stream.designator
+        }
         latestSessionIdByDesignator.putAll(currentLiveSessionIdByDesignator)
         return liveAdvertisements + recordings.map { recording ->
             ManagedVideoSessionRecordingCatalog.advertisement(
@@ -99,6 +103,7 @@ object ManagedVideoStreamPresence {
         sessionIdBySourcePath.clear()
         currentLiveDesignators = emptySet()
         currentLiveSessionIdByDesignator = emptyMap()
+        currentLiveSourceDesignatorBySessionId = emptyMap()
         latestSessionIdByDesignator.clear()
     }
 
@@ -124,6 +129,11 @@ object ManagedVideoStreamPresence {
         .filter { it.isNotEmpty() }
         .mapNotNull(currentLiveSessionIdByDesignator::get)
         .firstOrNull()
+
+    @JvmStatic
+    @Synchronized
+    fun localLiveDesignator(sessionId: String): String? =
+        currentLiveSourceDesignatorBySessionId[sessionId.trim()]
 
     @JvmStatic
     @Synchronized

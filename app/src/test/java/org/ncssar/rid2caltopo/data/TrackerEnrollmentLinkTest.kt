@@ -3,6 +3,7 @@ package org.ncssar.rid2caltopo.data
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -79,6 +80,51 @@ class TrackerEnrollmentLinkTest {
     }
 
     @Test
+    fun `replacement candidates retain tracker identity name and model`() {
+        val response = """{
+          "schema_version":1,
+          "candidates":[
+            {
+              "credential_id":"11111111-2222-3333-4444-555555555555",
+              "device_name":"Ken T.'s Samsung SM-X930",
+              "device_model":"Samsung SM-X930",
+              "platform":"android"
+            },
+            {"credential_id":"", "device_name":"Incomplete"}
+          ]
+        }""".trimIndent()
+
+        val candidates = TrackerEnrollmentClient.parseReplacementCandidates(response)
+
+        assertEquals(1, candidates.size)
+        assertEquals(
+            "11111111-2222-3333-4444-555555555555",
+            candidates.single().credentialId,
+        )
+        assertEquals("Ken T.'s Samsung SM-X930", candidates.single().deviceName)
+        assertEquals("Samsung SM-X930", candidates.single().deviceModel)
+    }
+
+    @Test
+    fun `Android owns replacement question and Apple remains unchanged`() {
+        val working = File(requireNotNull(System.getProperty("user.dir")))
+        val projectRoot = if (File(working, "app").isDirectory) working else working.parentFile
+        val androidActivity = File(
+            projectRoot,
+            "app/src/main/java/org/ncssar/rid2caltopo/app/R2CActivity.kt",
+        ).readText()
+        val appleIdentity = File(
+            projectRoot,
+            "apple/App/AppleNetworkAddress.swift",
+        ).readText()
+
+        assertTrue(androidActivity.contains("Is this a new \$model?"))
+        assertTrue(androidActivity.contains("No, same tablet"))
+        assertTrue(androidActivity.contains("replaceDeviceAuthorization"))
+        assertFalse(appleIdentity.contains("replacement-candidates"))
+    }
+
+    @Test
     fun `manifest claims verified tracker enrollment links and fallback scheme`() {
         val working = File(requireNotNull(System.getProperty("user.dir")))
         val manifest = listOf(
@@ -108,7 +154,6 @@ class TrackerEnrollmentLinkTest {
         assertTrue(enrollmentClient.contains("syncManagedConfigurationAfterEnrollment"))
         assertTrue(enrollmentClient.contains("installation_id"))
         assertTrue(enrollmentClient.contains("CaltopoMap.GetMyUUID()"))
-        assertFalse(enrollmentClient.contains("AndroidDeviceIdentity.installationId"))
         assertTrue(application.contains("retryManagedConfigurationBootstrap(this)"))
     }
 }

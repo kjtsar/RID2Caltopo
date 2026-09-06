@@ -327,8 +327,12 @@ final class RIDTrackViewModel: ObservableObject {
     }
 
     func prefetchTerrainForDeviceLocation(latitude: Double, longitude: Double) {
+        prefetchTerrain(latitude: latitude, longitude: longitude)
+    }
+
+    private func prefetchTerrain(latitude: Double, longitude: Double) {
         let terrainService = self.terrainService
-        Task {
+        Task(priority: .utility) {
             await terrainService.prefetch(latitude: latitude, longitude: longitude)
         }
     }
@@ -423,6 +427,10 @@ final class RIDTrackViewModel: ObservableObject {
     }
 
     private func updateAltitude(for track: RidAircraftTrack) {
+        prefetchTerrain(
+            latitude: track.lastObservation.latitude,
+            longitude: track.lastObservation.longitude
+        )
         var coordinator = altitudeCoordinatorByAircraftID[track.aircraftID] ?? OperationalAltitudeCoordinator()
         coordinator.ingest(track.lastObservation)
         if let requestKey = terrainRequestKey(for: coordinator),

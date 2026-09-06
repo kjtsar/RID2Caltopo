@@ -88,6 +88,7 @@ import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.data.TrackerEnrollmentClient
+import org.ncssar.rid2caltopo.data.TrackerDeviceReplacementCandidate
 import org.ncssar.rid2caltopo.data.AndroidDeviceIdentity
 import org.ncssar.rid2caltopo.data.PeerCoordinator
 import org.ncssar.rid2caltopo.data.VideoThumbnailRefreshPolicy
@@ -715,6 +716,8 @@ class R2CActivity :
     private var pendingOrganizationAccessIntent: Intent? = null
     private var trackerReauthenticationBrowserOpen = false
     private var pendingTrackerReauthenticationUrl by mutableStateOf<String?>(null)
+    private var deviceReconciliationInFlight = false
+    private var deviceReconciliationDialog: androidx.appcompat.app.AlertDialog? = null
     private var trackerReenrollmentRequired by mutableStateOf(false)
     private var pendingVideoStreamRequest by mutableStateOf<VideoStreamViewRequest?>(null)
     private var pendingRecordingDownloadRequest by mutableStateOf<RecordingDownloadRequest?>(null)
@@ -1013,9 +1016,7 @@ class R2CActivity :
             when (uri.host) {
                 "complete" -> {
                     showToast("Tracker reauthentication succeeded. Configuration was preserved.")
-                    TrackerEnrollmentClient.retryManagedConfigurationBootstrap(this)
-                    R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
-                        .resumeAfterReauthentication()
+                    reconcileDeviceAuthorizationAfterReauthentication()
                 }
                 "erase" -> {
                     CaltopoClient.RequireManagedReauthentication()
@@ -1144,9 +1145,12 @@ class R2CActivity :
                 TAG,
                 "Returned from Tracker sign-in browser without an app callback; retrying Tracker access",
             )
-            TrackerEnrollmentClient.retryManagedConfigurationBootstrap(this)
-            R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
-                .resumeAfterReauthentication()
+            reconcileDeviceAuthorizationAfterReauthentication()
+        } else if (
+            pendingTrackerReauthenticationUrl == null &&
+            TrackerEnrollmentClient.isDeviceReconciliationPending(this)
+        ) {
+            reconcileDeviceAuthorizationAfterReauthentication()
         }
         reloadExternalDisplayConfig()
         refreshBluetoothDisabledState("resume")
@@ -1352,18 +1356,26 @@ class R2CActivity :
                                 applicationContext
                             )
                         }
-                        var advertisements = ManagedVideoStreamPresence.snapshot(
+                        val advertisements = ManagedVideoStreamPresence.snapshot(
                             streams = streams,
                             sourceInfoProvider = streamsViewModel::managedVideoSourceInfo,
                             hasRecentFrame = streamsViewModel::hasRecentManagedVideoFrame,
                             recordings = recordings,
                             thumbnailProvider = ManagedVideoThumbnailStore::get,
                         )
+                        // Presence is operational state; thumbnails are optional decoration.
+                        // Publish the inventory before opening any recording decoder so a slow
+                        // or malformed file cannot make otherwise valid recordings disappear
+                        // from the Tracker. Apple follows the same publish-then-thumbnail order.
+                        peerCoordinator.updateManagedVideoStreams(
+                            CaltopoClient.GetIncident(),
+                            advertisements,
+                        )
                         refreshManagedVideoThumbnails(
                             advertisements,
                             forceDesignators = thumbnailRefreshDesignators,
                         )
-                        advertisements = ManagedVideoStreamPresence.snapshot(
+                        val advertisementsWithThumbnails = ManagedVideoStreamPresence.snapshot(
                             streams,
                             streamsViewModel::managedVideoDroneDesignator,
                             streamsViewModel::managedVideoSourceInfo,
@@ -1371,10 +1383,12 @@ class R2CActivity :
                             recordings,
                             ManagedVideoThumbnailStore::get,
                         )
-                        peerCoordinator.updateManagedVideoStreams(
-                            CaltopoClient.GetIncident(),
-                            advertisements,
-                        )
+                        if (advertisementsWithThumbnails != advertisements) {
+                            peerCoordinator.updateManagedVideoStreams(
+                                CaltopoClient.GetIncident(),
+                                advertisementsWithThumbnails,
+                            )
+                        }
                         CaltopoLiveTrack.RefreshActiveVideoCameraMetadata()
                         delay(
                             VideoThumbnailRefreshPolicy.milliseconds(
@@ -1888,6 +1902,12 @@ class R2CActivity :
         organizationAccessSession.completeTrustedExternalFlow(
             OrganizationExternalFlow.ARCHIVE_DIRECTORY_PICKER
         )
+        CaltopoMap.GetMyLocation()?.let { location ->
+            streamsViewModel.prefetchTerrainForLocation(
+                location.latitude,
+                location.longitude,
+            )
+        }
     }
 
     private fun beginConfigQrScanner(): Boolean {
@@ -2100,6 +2120,10 @@ class R2CActivity :
                     if (location != null) {
                         val hadDeviceLocationBefore = CaltopoMap.GetDeviceLocation() != null
                         CaltopoMap.UpdateMyLocation(location)
+                        streamsViewModel.prefetchTerrainForLocation(
+                            location.latitude,
+                            location.longitude,
+                        )
                         if (!hadDeviceLocationBefore && CaltopoMap.GetDeviceLocation() != null) {
                             AirspaceCenter.requestImmediateRefresh()
                             NotamCenter.requestImmediateRefresh()
@@ -2143,6 +2167,10 @@ class R2CActivity :
                         )
                         val hadDeviceLocationBefore = CaltopoMap.GetDeviceLocation() != null
                         CaltopoMap.UpdateMyLocation(location)
+                        streamsViewModel.prefetchTerrainForLocation(
+                            location.latitude,
+                            location.longitude,
+                        )
                         if (!hadDeviceLocationBefore && CaltopoMap.GetDeviceLocation() != null) {
                             AirspaceCenter.requestImmediateRefresh()
                             NotamCenter.requestImmediateRefresh()
@@ -2221,10 +2249,132 @@ class R2CActivity :
 
     fun beginTrackerReauthentication(url: String) {
         runOnUiThread {
+            TrackerEnrollmentClient.markDeviceReconciliationPending(this)
             pendingTrackerReauthenticationUrl = url
         }
     }
 
+    private fun reconcileDeviceAuthorizationAfterReauthentication() {
+        if (!TrackerEnrollmentClient.isDeviceReconciliationPending(this)) {
+            resumeTrackerAfterReauthentication()
+            return
+        }
+        if (deviceReconciliationInFlight) return
+        deviceReconciliationInFlight = true
+        lifecycleScope.launch {
+            runCatching {
+                TrackerEnrollmentClient.replacementCandidates()
+            }.onSuccess { candidates ->
+                if (candidates.isEmpty()) {
+                    TrackerEnrollmentClient.clearDeviceReconciliationPending(this@R2CActivity)
+                    deviceReconciliationInFlight = false
+                    resumeTrackerAfterReauthentication()
+                } else {
+                    showDeviceReplacementQuestion(candidates)
+                }
+            }.onFailure { error ->
+                deviceReconciliationInFlight = false
+                CTError(
+                    TAG,
+                    "Unable to check whether this Android tablet replaces an earlier authorization",
+                    error as? Exception ?: RuntimeException(error),
+                )
+                showToast("Tracker could not check this tablet's earlier authorization. It will try again later.")
+                resumeTrackerAfterReauthentication()
+            }
+        }
+    }
+
+    private fun showDeviceReplacementQuestion(
+        candidates: List<TrackerDeviceReplacementCandidate>,
+    ) {
+        if (isFinishing || isDestroyed) {
+            deviceReconciliationInFlight = false
+            return
+        }
+        val model = candidates.firstNotNullOfOrNull { candidate ->
+            candidate.deviceModel.takeIf { it.isNotBlank() }
+        } ?: AndroidDeviceIdentity.modelName()
+        deviceReconciliationDialog?.dismiss()
+        deviceReconciliationDialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Is this a new $model?")
+            .setMessage(
+                if (candidates.size == 1) {
+                    "Tracker already knows ${candidates.first().deviceName}. Is this another tablet?"
+                } else {
+                    "Tracker already knows ${candidates.size} matching tablets. Is this another tablet?"
+                }
+            )
+            .setPositiveButton("Yes, new tablet") { _, _ ->
+                TrackerEnrollmentClient.clearDeviceReconciliationPending(this)
+                deviceReconciliationInFlight = false
+                resumeTrackerAfterReauthentication()
+            }
+            .setNegativeButton("No, same tablet") { _, _ ->
+                if (candidates.size == 1) {
+                    replaceEarlierDeviceAuthorization(candidates.first())
+                } else {
+                    showEarlierDeviceChooser(candidates)
+                }
+            }
+            .setCancelable(false)
+            .create()
+        deviceReconciliationDialog?.show()
+    }
+
+    private fun showEarlierDeviceChooser(
+        candidates: List<TrackerDeviceReplacementCandidate>,
+    ) {
+        deviceReconciliationDialog?.dismiss()
+        deviceReconciliationDialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Which tablet is this?")
+            .setItems(candidates.map { it.deviceName }.toTypedArray()) { _, index ->
+                replaceEarlierDeviceAuthorization(candidates[index])
+            }
+            .setNegativeButton("Back") { _, _ ->
+                showDeviceReplacementQuestion(candidates)
+            }
+            .setCancelable(false)
+            .create()
+        deviceReconciliationDialog?.show()
+    }
+
+    private fun replaceEarlierDeviceAuthorization(
+        candidate: TrackerDeviceReplacementCandidate,
+    ) {
+        lifecycleScope.launch {
+            runCatching {
+                TrackerEnrollmentClient.replaceDeviceAuthorization(
+                    candidate.credentialId,
+                )
+            }.onSuccess { canonicalName ->
+                AndroidDeviceIdentity.applyManagedDisplayName(
+                    this@R2CActivity,
+                    canonicalName,
+                )
+                MyDeviceName = canonicalName
+                TrackerEnrollmentClient.clearDeviceReconciliationPending(this@R2CActivity)
+                deviceReconciliationInFlight = false
+                showToast("Restored this tablet as $canonicalName.")
+                resumeTrackerAfterReauthentication()
+            }.onFailure { error ->
+                deviceReconciliationInFlight = false
+                CTError(
+                    TAG,
+                    "Unable to replace the earlier Android tablet authorization",
+                    error as? Exception ?: RuntimeException(error),
+                )
+                showToast(error.message ?: "Tracker could not restore the earlier tablet authorization.")
+                resumeTrackerAfterReauthentication()
+            }
+        }
+    }
+
+    private fun resumeTrackerAfterReauthentication() {
+        TrackerEnrollmentClient.retryManagedConfigurationBootstrap(this)
+        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+            .resumeAfterReauthentication()
+    }
     fun showTrackerReenrollmentRequired() {
         runOnUiThread {
             trackerReenrollmentRequired = true
@@ -2253,6 +2403,8 @@ class R2CActivity :
     }
 
     public override fun onDestroy() {
+        deviceReconciliationDialog?.dismiss()
+        deviceReconciliationDialog = null
         managedVideoMediaPeer?.close()
         managedVideoMediaPeer = null
         setVolumeControlStream(AudioManager.STREAM_ALARM)
@@ -2324,7 +2476,9 @@ class R2CActivity :
                     request.streamSessionId,
                 ) == null
             ) {
-                requireManagedVideoLiveSource(request.requestId, request.droneDesignator)
+                ManagedVideoStreamPresence.localLiveDesignator(request.streamSessionId)?.let {
+                    requireManagedVideoLiveSource(request.requestId, it)
+                }
             }
             if (!request.consentRequired) {
                 remoteControlledVideoRequests[request.requestId] = request
@@ -2547,6 +2701,13 @@ class R2CActivity :
                 applicationContext,
                 approved.request.streamSessionId,
             )
+            val liveSourceDesignator = if (recording == null) {
+                ManagedVideoStreamPresence.localLiveDesignator(
+                    approved.request.streamSessionId,
+                )
+            } else {
+                null
+            }
             stopManagedVideoRecordingDecoder()
             val sessionId = recording?.let {
                 streamsViewModel.startManagedVideoRecordingSession(
@@ -2555,9 +2716,7 @@ class R2CActivity :
                 )?.also { decoderSessionId ->
                         managedVideoRecordingDecoderSessionId = decoderSessionId
                     }
-            } ?: streamsViewModel.managedVideoRenderSessionId(
-                approved.request.droneDesignator,
-            )
+            } ?: liveSourceDesignator?.let(streamsViewModel::managedVideoRenderSessionId)
             if (sessionId == null) {
                 approvedVideoSelections.remove(offer.requestId)
                 releaseManagedVideoLiveSource(offer.requestId)
@@ -2573,10 +2732,7 @@ class R2CActivity :
             activeRemoteVideoMicrophoneError = null
             activeRemoteVideoRequest = approved.request
             if (recording == null) {
-                requireManagedVideoLiveSource(
-                    approved.request.requestId,
-                    approved.request.droneDesignator,
-                )
+                requireManagedVideoLiveSource(approved.request.requestId, liveSourceDesignator!!)
             } else {
                 releaseManagedVideoLiveSource(approved.request.requestId)
             }
@@ -2615,11 +2771,12 @@ class R2CActivity :
                             managedVideoMediaPeer === peer &&
                             activeRemoteVideoRequest?.requestId == requestId
                         ) {
+                            val localSourceDesignator =
+                                managedVideoLiveSourcesByRequestId[requestId]
                             val sourceEndedNormally =
                                 managedVideoRecordingDecoderSessionId == null &&
-                                StreamRegistry.streams.value[
-                                    approved.request.droneDesignator
-                                ]?.state != org.ncssar.rid2caltopo.video.StreamState.LIVE
+                                StreamRegistry.streams.value[localSourceDesignator]?.state !=
+                                org.ncssar.rid2caltopo.video.StreamState.LIVE
                             val terminationReason = if (sourceEndedNormally) {
                                 "source_ended"
                             } else {
@@ -2753,11 +2910,12 @@ class R2CActivity :
         advertisements: List<ManagedVideoStreamAdvertisement>,
         forceDesignators: Set<String> = emptySet(),
     ) {
+        val activeRemoteSessionId = activeRemoteVideoRequest?.streamSessionId
         val candidates = ManagedVideoStreamPresence.thumbnailCaptureCandidates(
             advertisements = advertisements,
             forceDesignators = forceDesignators,
             hasThumbnail = { ManagedVideoThumbnailStore.get(it) != null },
-        )
+        ).filterNot { it.sessionId == activeRemoteSessionId }
         for (advertisement in candidates) {
             val recording = if (advertisement.mediaKind == "recording") {
                 ManagedVideoSessionRecordingCatalog.find(
@@ -2774,9 +2932,8 @@ class R2CActivity :
                 )
             }
             val decoderSessionId = ownedDecoder
-                ?: streamsViewModel.managedVideoRenderSessionId(
-                    advertisement.droneDesignator
-                )
+                ?: ManagedVideoStreamPresence.localLiveDesignator(advertisement.sessionId)
+                    ?.let(streamsViewModel::managedVideoRenderSessionId)
                 ?: continue
             try {
                 ManagedVideoThumbnailStore.capture(
@@ -2806,11 +2963,14 @@ class R2CActivity :
             managedVideoSourceRecoveryJob = null
             return
         }
-        val stream = streams[request.droneDesignator]
+        val localSourceDesignator = managedVideoLiveSourcesByRequestId[request.requestId]
+            ?: ManagedVideoStreamPresence.localLiveDesignator(request.streamSessionId)
+            ?: return
+        val stream = streams[localSourceDesignator]
         if (stream?.state == org.ncssar.rid2caltopo.video.StreamState.LIVE) {
             managedVideoSourceRecoveryJob?.cancel()
             managedVideoSourceRecoveryJob = null
-            streamsViewModel.managedVideoRenderSessionId(request.droneDesignator)?.let { sessionId ->
+            streamsViewModel.managedVideoRenderSessionId(localSourceDesignator)?.let { sessionId ->
                 peer.rebindVideoSource(sessionId)
             }
             return
@@ -2826,7 +2986,7 @@ class R2CActivity :
             managedVideoSourceRecoveryJob = null
             if (
                 activeRemoteVideoRequest?.requestId == requestId &&
-                StreamRegistry.streams.value[request.droneDesignator]?.state !=
+                StreamRegistry.streams.value[localSourceDesignator]?.state !=
                 org.ncssar.rid2caltopo.video.StreamState.LIVE
             ) {
                 terminateManagedVideo("Drone video source did not recover")

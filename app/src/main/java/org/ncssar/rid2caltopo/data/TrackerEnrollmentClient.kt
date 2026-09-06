@@ -23,9 +23,17 @@ data class TrackerEnrollmentResult(
     val reauthenticationUrl: String? = null
 )
 
+data class TrackerDeviceReplacementCandidate(
+    val credentialId: String,
+    val deviceName: String,
+    val deviceModel: String,
+)
+
 object TrackerEnrollmentClient {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
     const val APP_LINK_SCHEME = "r2cenroll"
+    private const val IDENTITY_PREFS = "tracker_device_identity"
+    private const val RECONCILIATION_PENDING = "replacement_check_pending"
 
     fun normalizedEnrollmentUrl(value: String): String? {
         val trimmed = value.trim()
@@ -157,6 +165,111 @@ object TrackerEnrollmentClient {
             trackerBaseUrl,
             deviceToken
         )
+    }
+
+    fun markDeviceReconciliationPending(context: Context) {
+        context.getSharedPreferences(IDENTITY_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(RECONCILIATION_PENDING, true)
+            .apply()
+    }
+
+    fun isDeviceReconciliationPending(context: Context): Boolean =
+        context.getSharedPreferences(IDENTITY_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(RECONCILIATION_PENDING, false)
+
+    fun clearDeviceReconciliationPending(context: Context) {
+        context.getSharedPreferences(IDENTITY_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(RECONCILIATION_PENDING)
+            .apply()
+    }
+
+    suspend fun replacementCandidates(): List<TrackerDeviceReplacementCandidate> =
+        withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(deviceAuthorizationUrl("replacement-candidates"))
+            .header("Accept", "application/json")
+            .header("X-SAR-Token", CaltopoClient.GetHomeTrackerApiKey().trim())
+            .header(
+                "X-R2C-Functionality-Release",
+                BuildConfig.TRACKER_FUNCTIONALITY_RELEASE.toString()
+            )
+            .get()
+            .build()
+        CaltopoSession.MyOkHttpClient.newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException(responseError(body, response.code))
+            }
+            parseReplacementCandidates(body)
+        }
+    }
+
+    suspend fun replaceDeviceAuthorization(
+        replacementCredentialId: String,
+    ): String = withContext(Dispatchers.IO) {
+        val payload = JSONObject()
+            .put("replacement_credential_id", replacementCredentialId)
+            .toString()
+        val request = Request.Builder()
+            .url(deviceAuthorizationUrl("replace"))
+            .header("Accept", "application/json")
+            .header("X-SAR-Token", CaltopoClient.GetHomeTrackerApiKey().trim())
+            .header(
+                "X-R2C-Functionality-Release",
+                BuildConfig.TRACKER_FUNCTIONALITY_RELEASE.toString()
+            )
+            .post(payload.toRequestBody(jsonMediaType))
+            .build()
+        CaltopoSession.MyOkHttpClient.newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException(responseError(body, response.code))
+            }
+            JSONObject(body).getString("canonical_device_name")
+        }
+    }
+
+    internal fun parseReplacementCandidates(
+        body: String,
+    ): List<TrackerDeviceReplacementCandidate> {
+        val candidates = JSONObject(body).optJSONArray("candidates") ?: return emptyList()
+        return buildList {
+            for (index in 0 until candidates.length()) {
+                val candidate = candidates.optJSONObject(index) ?: continue
+                val credentialId = candidate.optString("credential_id").trim()
+                val deviceName = candidate.optString("device_name").trim()
+                val deviceModel = candidate.optString("device_model").trim()
+                if (credentialId.isNotEmpty() && deviceName.isNotEmpty()) {
+                    add(TrackerDeviceReplacementCandidate(
+                        credentialId = credentialId,
+                        deviceName = deviceName,
+                        deviceModel = deviceModel,
+                    ))
+                }
+            }
+        }
+    }
+
+    private fun deviceAuthorizationUrl(operation: String) =
+        CaltopoClient.GetHomeTrackerUrlPfx().trim().toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.encodedPath("/api/v1/device-authorization/$operation")
+            ?.query(null)
+            ?.fragment(null)
+            ?.build()
+            ?: throw IllegalStateException("Tracker address is not configured.")
+
+    private fun responseError(body: String, code: Int): String {
+        val detail = runCatching { JSONObject(body).opt("detail") }.getOrNull()
+        return when (detail) {
+            is String -> detail.ifBlank { "Tracker request failed ($code)." }
+            is JSONObject -> detail.optString("message").ifBlank {
+                "Tracker request failed ($code)."
+            }
+            else -> "Tracker request failed ($code)."
+        }
     }
 
     private fun trustedHost(host: String): Boolean =

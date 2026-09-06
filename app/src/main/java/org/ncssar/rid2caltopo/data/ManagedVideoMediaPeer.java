@@ -110,6 +110,7 @@ public final class ManagedVideoMediaPeer implements AutoCloseable {
     @Nullable private ScheduledFuture<?> statsTask;
     @NonNull private String requestId = "";
     private volatile long ffmpegSessionId;
+    @Nullable private FfmpegBridge.RemoteVideoFrameLease videoFrameLease;
     private int selectedWidth;
     private int selectedHeight;
     private double selectedFps;
@@ -193,16 +194,18 @@ public final class ManagedVideoMediaPeer implements AutoCloseable {
                         }
                     },
                     new SessionDescription(SessionDescription.Type.OFFER, normalizedOfferSdp));
-            boolean exporting = FfmpegBridge.INSTANCE.startRemoteVideoFrames(
+            FfmpegBridge.RemoteVideoFrameLease lease = FfmpegBridge.INSTANCE.startRemoteVideoFrames(
                     sessionId,
                     selectedWidth,
                     selectedHeight,
                     selectedFps,
+                    FfmpegBridge.RemoteVideoFramePurpose.LIVE_SHARE,
                     this::onDecodedFrame);
-            if (!exporting) {
+            if (lease == null) {
                 fail("Unable to attach the approved drone video source.");
                 return false;
             }
+            videoFrameLease = lease;
             statsTask = executor.scheduleAtFixedRate(
                     this::collectStats,
                     2L,
@@ -229,20 +232,24 @@ public final class ManagedVideoMediaPeer implements AutoCloseable {
         if (closed.get() || replacementSessionId <= 0L) return false;
         long previousSessionId = ffmpegSessionId;
         if (replacementSessionId == previousSessionId) return true;
-        boolean exporting = FfmpegBridge.INSTANCE.startRemoteVideoFrames(
+        FfmpegBridge.RemoteVideoFrameLease replacementLease =
+                FfmpegBridge.INSTANCE.startRemoteVideoFrames(
                 replacementSessionId,
                 selectedWidth,
                 selectedHeight,
                 selectedFps,
+                FfmpegBridge.RemoteVideoFramePurpose.LIVE_SHARE,
                 this::onDecodedFrame);
-        if (!exporting) {
+        if (replacementLease == null) {
             CaltopoClient.CTWarn(TAG, "Unable to rebind media peer request=" + requestId
                     + " replacementSession=" + replacementSessionId);
             return false;
         }
+        FfmpegBridge.RemoteVideoFrameLease previousLease = videoFrameLease;
+        videoFrameLease = replacementLease;
         ffmpegSessionId = replacementSessionId;
-        if (previousSessionId > 0L) {
-            FfmpegBridge.INSTANCE.stopRemoteVideoFrames(previousSessionId);
+        if (previousLease != null) {
+            FfmpegBridge.INSTANCE.stopRemoteVideoFrames(previousLease);
         }
         CaltopoClient.CTDebug(TAG, "Rebound media peer request=" + requestId
                 + " decoderSession=" + previousSessionId + "->" + replacementSessionId);
@@ -650,7 +657,11 @@ public final class ManagedVideoMediaPeer implements AutoCloseable {
 
     private synchronized void closePeer() {
         if (closed.getAndSet(true) && peer == null && factory == null) return;
-        if (ffmpegSessionId > 0L) FfmpegBridge.INSTANCE.stopRemoteVideoFrames(ffmpegSessionId);
+        FfmpegBridge.RemoteVideoFrameLease activeVideoFrameLease = videoFrameLease;
+        videoFrameLease = null;
+        if (activeVideoFrameLease != null) {
+            FfmpegBridge.INSTANCE.stopRemoteVideoFrames(activeVideoFrameLease);
+        }
         ffmpegSessionId = 0L;
         ScheduledFuture<?> activeStatsTask = statsTask;
         statsTask = null;

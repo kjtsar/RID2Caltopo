@@ -658,6 +658,8 @@ import Testing
 
     #expect(contentView.contains("ridTracks.prefetchTerrainForDeviceLocation("))
     #expect(viewModel.contains("await terrainService.prefetch(latitude: latitude, longitude: longitude)"))
+    #expect(viewModel.contains("latitude: track.lastObservation.latitude"))
+    #expect(viewModel.contains("Task(priority: .utility)"))
     #expect(terrainService.contains("func prefetch(latitude: Double, longitude: Double)"))
     #expect(terrainService.contains("guard scheduledPrefetchCells.insert(cell).inserted else { return }"))
 }

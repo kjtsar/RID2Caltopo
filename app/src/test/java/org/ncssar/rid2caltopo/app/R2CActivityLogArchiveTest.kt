@@ -21,8 +21,8 @@ class R2CActivityLogArchiveTest {
         val handler = activitySource.substring(handlerStart, handlerEnd)
 
         assertTrue(handler.contains("setIntent(Intent(this, R2CActivity::class.java)"))
-        assertTrue(handler.contains("retryManagedConfigurationBootstrap(this)"))
-        assertTrue(handler.contains(".resumeAfterReauthentication()"))
+        assertTrue(handler.contains("reconcileDeviceAuthorizationAfterReauthentication()"))
+        assertFalse(handler.contains(".resumeAfterReauthentication()"))
         assertFalse(handler.contains("recreate()"))
     }
 

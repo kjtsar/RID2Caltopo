@@ -22,17 +22,18 @@ object ManagedVideoThumbnailStore {
     suspend fun capture(sessionId: String, decoderSessionId: Long): ManagedVideoThumbnail? =
         withContext(Dispatchers.IO) {
             val frame = CompletableDeferred<ByteArray>()
-            val configured = FfmpegBridge.startRemoteVideoFrames(
+            val lease = FfmpegBridge.startRemoteVideoFrames(
                 decoderSessionId,
                 WIDTH,
                 HEIGHT,
                 1.0,
+                FfmpegBridge.RemoteVideoFramePurpose.THUMBNAIL,
             ) { callbackSessionId, width, height, _, i420 ->
                 if (callbackSessionId == decoderSessionId && !frame.isCompleted) {
                     frame.complete(i420ToJpeg(width, height, i420))
                 }
             }
-            if (!configured) return@withContext null
+            if (lease == null) return@withContext null
             try {
                 val jpeg = withTimeoutOrNull(2_500L) { frame.await() }
                     ?.takeIf { it.isNotEmpty() }
@@ -44,7 +45,7 @@ object ManagedVideoThumbnailStore {
                     thumbnails[sessionId] = it
                 }
             } finally {
-                FfmpegBridge.stopRemoteVideoFrames(decoderSessionId)
+                FfmpegBridge.stopRemoteVideoFrames(lease)
             }
         }
 

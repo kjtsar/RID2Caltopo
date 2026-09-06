@@ -72,6 +72,28 @@ class ManagedVideoStreamPresenceTest {
 
         assertEquals("1sar7DjMn4Pr", paired.droneDesignator)
         assertEquals(first.sessionId, paired.sessionId)
+        assertEquals(
+            "1sar7mn4pr",
+            ManagedVideoStreamPresence.localLiveDesignator(paired.sessionId),
+        )
+    }
+
+    @Test
+    fun `ended live session cannot resolve a stale local source`() {
+        val live = ManagedVideoStreamPresence.snapshot(
+            streams = mapOf(
+                "camera/path" to StreamInfo(
+                    designator = "1sar7mn4pr",
+                    sourcePath = "camera/path",
+                    state = StreamState.LIVE,
+                )
+            ),
+            droneDesignatorProvider = { "1sar7DjMn4Pr" },
+        ).single()
+
+        ManagedVideoStreamPresence.snapshot(streams = emptyMap())
+
+        assertEquals(null, ManagedVideoStreamPresence.localLiveDesignator(live.sessionId))
     }
 
     @Test

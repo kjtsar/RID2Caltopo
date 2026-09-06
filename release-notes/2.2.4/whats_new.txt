@@ -1,22 +1,26 @@
 Latest changes:
-- Tracker status now distinguishes an expired sign-in from required tablet re-enrollment and explains how to recover without repeatedly covering the enrollment scanner.
-- Organization configuration imports accept enrollment links, JSON and ZIP files, live QR scans, and QR codes saved as images.
-- Remote live and recorded video playback is more reliable, including recovery from duplicate or delayed Tracker offers.
-- Active Tracker playback and recording-transfer requests keep a standalone tablet connected until the request finishes.
-- Clue snapshots use validated, current video telemetry for aircraft position and will not silently fall back to older Remote ID coordinates after that source is established.
-- Diagnostic sharing sends to UAS4SAR support, removes location details from log messages, and excludes aircraft tracks unless the operator explicitly includes them.
-- Update notices on both platforms now tell operators to continue safely when a store has not made the update available, instead of creating pressure to uninstall the app.
+- Remote live and recorded video recovers more reliably from duplicate, delayed, or first-frame failures, and active viewing or recording transfers keep the tablet connected until completion.
+- Recordings in the selected archive folder are rediscovered after reinstall or re-enrollment, and downloads retain concise names without internal catalog identifiers.
+- H.264 exports combine standalone SEI metadata with video access units for smooth playback in standard players such as QuickTime.
+- Organization configuration import continues to support enrollment links, JSON, ZIP, and saved QR-code images.
+- Tracker authorization failures distinguish re-enrollment from sign-in recovery, leave offline RID and incident-map use available, and avoid repeated notices covering QR scanning.
+- Protected organization and CalTopo Teams access still requires device biometrics or passcode while remaining unlocked during continuous use and brief trusted system or browser transitions.
+- Organization-authorized tablets use a unique member-and-device-model name consistently across RID2Caltopo, CalTopo markers, Tracker, and recording ownership.
+- Clue snapshots prefer current validated SEI position, wait when it is not usable, follow shallow camera sightlines across terrain, and identify projection-height and DEM sources.
+- Android and Apple prepare the best available USGS S1M terrain tile once tablet or aircraft coordinates are usable, without delaying normal operation and while retaining lower-resolution fallback.
+- Stream pairing and thumbnail publication recover more reliably, including automatic pairing for one aircraft and one unpaired live stream and prompt metadata refresh after capture.
+- Automatic closing now occurs after 30 minutes without decoded RID messages; installations using the old 120-minute default migrate automatically while custom choices remain unchanged.
+- Diagnostic sharing uses UAS4SAR support, removes location from log messages, and excludes tracks unless explicitly included. Update notices advise safe continued use when a store has not yet made an update available.
 
 Platform-specific changes:
-- These are implementation-specific repairs that bring the affected platform into parity; they are not intended differences in operator behavior.
-- Some controllers deliver telemetry as separate H.264 access units. Android's archive path now repairs those recordings as Apple's path already did, so both platforms provide playable downloads with concise filenames.
-- Android's standby timer now stays suspended for the complete remote-video request, matching the request-lifecycle behavior already provided on Apple.
-- Android removes external-folder permissions when an app is uninstalled. Reinstall recovery now explains that behavior, verifies a renewed archive grant before accepting it, and always provides a non-blocking temporary-storage path instead of repeating the folder prompt.
-- Apple's WebRTC path now waits for the complete offer and ICE-candidate sequence required by its media framework, matching the reliable remote-playback result already provided on Android.
+- Android asks after re-authentication whether a matching Samsung tablet is new or the same physical device. Confirming the same tablet preserves its established name and recording history; this remains Android-only because that duplicate-installation problem has only been observed there.
+- Android keeps Tracker awake during remote-video and recording-transfer requests, then begins a fresh 30-second standby interval.
+- Android reinstall recovery verifies a renewed archive-folder grant, suppresses repeated prompts after cancellation or failure, and offers temporary storage while protected access remains fail-closed.
+- Android Quit and RID-idle closing finish reliably even from a background timer or delayed diagnostic output.
+- Apple improves WebRTC offer and ICE sequencing, Safari sign-in callback recovery, stream reoffering for a confirmed drone, stable map labels, and recording publication after file finalization.
 
 Known platform differences:
-- These differences remain because the operating systems expose different services or impose different restrictions.
 - Apple uses iCloud Drive and Files for backup and transfer; Google Drive remains selectable through Files when installed.
-- iOS does not expose handset Wi-Fi RSSI, so the Apple app records that value as unavailable.
+- iOS does not expose handset Wi-Fi RSSI, so the Apple app records it as unavailable.
 - iOS may suspend video and anomaly processing while locked or backgrounded; Bluetooth restoration is best effort.
-- Person Relevance filtering is not yet available on iOS. This is an outstanding parity gap, not an intended platform difference.
+- Person Relevance filtering is not yet available on iOS and remains an outstanding parity gap.

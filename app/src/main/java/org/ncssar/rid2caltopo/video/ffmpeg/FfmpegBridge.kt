@@ -22,6 +22,19 @@ object FfmpegBridge {
             i420: ByteArray,
         )
     }
+    enum class RemoteVideoFramePurpose(internal val priority: Int) {
+        THUMBNAIL(0),
+        LIVE_SHARE(1),
+    }
+    class RemoteVideoFrameLease internal constructor(
+        internal val sessionId: Long,
+        internal val token: Long,
+    )
+    private data class RemoteVideoFrameRegistration(
+        val lease: RemoteVideoFrameLease,
+        val purpose: RemoteVideoFramePurpose,
+        val listener: RemoteVideoFrameListener,
+    )
     enum class PersonRelevanceMode(val nativeValue: Int) {
         OFF(0),
         SHADOW(1),
@@ -30,8 +43,10 @@ object FfmpegBridge {
     const val TAG = "FfmpegBridge"
     const val NATIVE_TAG = "ffmpeg_bridge"
     private val probeListeners = linkedSetOf<(String, Long, String, FfmpegTelemetry) -> Unit>()
-    private val remoteVideoFrameListeners = linkedMapOf<Long, RemoteVideoFrameListener>()
+    private val remoteVideoFrameRegistrations =
+        linkedMapOf<Long, RemoteVideoFrameRegistration>()
     private val listenerLock = Any()
+    private var nextRemoteVideoFrameToken = 1L
     @Volatile
     private var djiSeiHexDumpEnabled = false
 
@@ -117,11 +132,27 @@ object FfmpegBridge {
         width: Int,
         height: Int,
         fps: Double,
+        purpose: RemoteVideoFramePurpose,
         listener: RemoteVideoFrameListener,
-    ): Boolean {
-        if (!nativeLoaded || sessionId <= 0L) return false
-        synchronized(listenerLock) {
-            remoteVideoFrameListeners[sessionId] = listener
+    ): RemoteVideoFrameLease? {
+        if (!nativeLoaded || sessionId <= 0L) return null
+        val lease = synchronized(listenerLock) {
+            val existing = remoteVideoFrameRegistrations[sessionId]
+            if (!remoteVideoFramePurposeCanReplace(existing?.purpose, purpose)) {
+                CTWarn(
+                    TAG,
+                    "Remote-video frame export already owned for sessionId=$sessionId " +
+                        "existing=${existing?.purpose} requested=$purpose",
+                )
+                return null
+            }
+            RemoteVideoFrameLease(sessionId, nextRemoteVideoFrameToken++).also {
+                remoteVideoFrameRegistrations[sessionId] = RemoteVideoFrameRegistration(
+                    lease = it,
+                    purpose = purpose,
+                    listener = listener,
+                )
+            }
         }
         val configured = nativeConfigureRemoteVideoFrames(
             sessionId,
@@ -131,17 +162,34 @@ object FfmpegBridge {
             true,
         )
         if (!configured) {
-            synchronized(listenerLock) { remoteVideoFrameListeners.remove(sessionId) }
+            synchronized(listenerLock) {
+                if (remoteVideoFrameRegistrations[sessionId]?.lease?.token == lease.token) {
+                    remoteVideoFrameRegistrations.remove(sessionId)
+                }
+            }
+            return null
         }
-        return configured
+        return lease
     }
 
-    fun stopRemoteVideoFrames(sessionId: Long) {
-        synchronized(listenerLock) { remoteVideoFrameListeners.remove(sessionId) }
-        if (nativeLoaded && sessionId > 0L) {
-            nativeConfigureRemoteVideoFrames(sessionId, 0, 0, 0.0, false)
+    fun stopRemoteVideoFrames(lease: RemoteVideoFrameLease) {
+        val released = synchronized(listenerLock) {
+            if (remoteVideoFrameRegistrations[lease.sessionId]?.lease?.token != lease.token) {
+                false
+            } else {
+                remoteVideoFrameRegistrations.remove(lease.sessionId)
+                true
+            }
+        }
+        if (released && nativeLoaded && lease.sessionId > 0L) {
+            nativeConfigureRemoteVideoFrames(lease.sessionId, 0, 0, 0.0, false)
         }
     }
+
+    internal fun remoteVideoFramePurposeCanReplace(
+        existing: RemoteVideoFramePurpose?,
+        requested: RemoteVideoFramePurpose,
+    ): Boolean = existing == null || requested.priority > existing.priority
 
     fun updateAnomalyConfig(sessionId: Long, config: NativeAnomalyConfig) {
         if (!nativeLoaded || sessionId <= 0L) return
@@ -326,7 +374,7 @@ object FfmpegBridge {
         i420: ByteArray,
     ) {
         val listener = synchronized(listenerLock) {
-            remoteVideoFrameListeners[sessionId]
+            remoteVideoFrameRegistrations[sessionId]?.listener
         } ?: return
         try {
             listener.onFrame(sessionId, width, height, timestampUs, i420)

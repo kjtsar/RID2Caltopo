@@ -106,8 +106,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import androidx.documentfile.provider.DocumentFile
 import okhttp3.OkHttpClient
 import okhttp3.Call
@@ -770,9 +768,6 @@ internal fun SplitMapPane(
     var visibleTileZoom by remember { mutableIntStateOf(14) }
     var firstLiveTilePriorityPassComplete by remember { mutableStateOf(false) }
     var lastViewportSignature by remember { mutableStateOf<String?>(null) }
-    // Auto-download: GeoTIFF tiles already initiated (prevents redundant re-downloads).
-    val autoFetchedDemTiles = remember { Collections.synchronizedSet(HashSet<String>()) }
-    val demAutoFetchMutex = remember { Mutex() }
     val autoPrefetchedMapTiles = remember { Collections.synchronizedSet(HashSet<String>()) }
     val demAutoFetchClient = remember {
         OkHttpClient.Builder()
@@ -983,14 +978,6 @@ internal fun SplitMapPane(
     }
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
-    // Point targets for proactive S1M downloads. Quantizing to small cells keeps requests
-    // bounded while still detecting movement into another 10 km S1M tile.
-    val neededDemTargets: Map<String, Pair<Double, Double>> = remember(dronePoints) {
-        dronePoints.associateBy(
-            keySelector = { demPrefetchCellKey(it.lat, it.lng) },
-            valueTransform = { it.lat to it.lng },
-        )
-    }
     var offlineBoundaryOptions by remember { mutableStateOf<List<OfflineBoundaryOption>>(emptyList()) }
     LaunchedEffect(artifactOverlayState) {
         if (artifactOverlayState.totalFeatures == 0) {
@@ -1041,48 +1028,6 @@ internal fun SplitMapPane(
                 MapCacheDebug.log("prewarm auto complete elapsedMs=$elapsedMs sig=$signature")
             } catch (e: Exception) {
                 MapCacheDebug.log("prewarm auto failed err=${e.javaClass.simpleName}:${e.message}")
-            }
-        }
-    }
-    // Proactive DEM tile download + block pre-decode from device GPS.
-    // Fires once at startup (after a brief GPS-lock delay) so that by the time the user opens
-    // Live View — or the first drone appears — the .f32raw block file for the current location
-    // is already on disk and elevation queries are instant (O(1) seek, no LZW/pred3).
-    LaunchedEffect(Unit) {
-        delay(3_000L) // give FusedLocationProvider a moment to deliver its first fix
-        val loc = CaltopoMap.GetMyLocation() ?: return@LaunchedEffect
-        if (!loc.latitude.isFinite() || !loc.longitude.isFinite()) return@LaunchedEffect
-        val lat = loc.latitude
-        val lng = loc.longitude
-        val cellKey = demPrefetchCellKey(lat, lng)
-        withContext(Dispatchers.IO) {
-            if (autoFetchedDemTiles.add(cellKey)) {
-                demAutoFetchMutex.withLock {
-                    autoDownloadBestDemForLocation(lat, lng, context, demAutoFetchClient, demElevationService)
-                }
-            }
-            // Pre-decode the TIFF block(s) covering our GPS position into the persistent
-            // .f32raw cache.  Runs after the tile is confirmed available so the decode
-            // succeeds.  Subsequent elevation queries during the flight hit the block file
-            // directly — no further LZW/pred3 work needed.
-            demElevationService.prewarmForLocation(lat, lng)
-        }
-    }
-    // Proactive S1M download keyed on active drone positions. Each small location cell is
-    // queried at most once per session; the downloader also keeps the 30 m coverage fallback.
-    LaunchedEffect(neededDemTargets) {
-        for ((cellKey, coordinate) in neededDemTargets) {
-            if (!autoFetchedDemTiles.add(cellKey)) continue
-            uiScope.launch(Dispatchers.IO) {
-                demAutoFetchMutex.withLock {
-                    autoDownloadBestDemForLocation(
-                        coordinate.first,
-                        coordinate.second,
-                        context,
-                        demAutoFetchClient,
-                        demElevationService,
-                    )
-                }
             }
         }
     }
